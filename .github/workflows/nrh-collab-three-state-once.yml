@@ -1,0 +1,38 @@
+name: Add collaborator tri-state filters (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-collab-three-state-once.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch collaborator filters without replacing research DB
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object Niji_Research_Helper.user.js)" = "e07205ccf07981ccb242a21c00c294ed36a6fd20"
+          python3 - <<'PY'
+          import base64, zlib
+          payload = 'eNrtPO+PG8d13/lXzFlCdhfirUXJlmQSZ9VWzrVg2WfolAbG5eBbcofk+vZ2mZ3l3bFnAuIpbmwnQVMbSZBGjeNWSdw4jhvUKQzHcD70PzF9Z/mT+yf0vZnZ3RnuD/IkuS2SSoBE7rx58+b9fjNv2Y3CHTJw4r7vtYm3MwijmDwPX2vyc0STT2zEajWEJCscwoQHthP1djcam1aNwVMctCPquC/GdD82adAJXS/orRjDuLt8ybBqLu0CwoHvdOiLYdChZui7dRLQvTpxKetE3iD2wsBq1gj86flh2/EJ41864TCIYQlm80840eIDXleOLa2QhpiIfyLHY5Ssj1hMd1b3vdjsGgfKEuMmofsD2ompS8KAkh0n7vSBVOIEnX4Y1UkvjMkBRzw2xEKMry6pVwhvWLWatifj4YfJX+3SiME6gpiGfdY+d9aok5KhBg7t0NhxndghchyW1dA+1AkDFpO/Wb2+fnXtOSDGkGhbD9VJyWCDDxoRbMPboaWYBYN932mHkROH0VOeH9OoSQyj/q1gdvBK3wkC6vNRXLliMoHtPjX0/eW+x2BkRLphZ8haxA87INiOE7mky6GR80NGGYn7IDQaM9Kmfrhn51e/GnT8oUvdJjKfPOsMTIsvE4TRjuN7fwvyHMAugb3LjxPXY7DNEQmcHdoiO0M/9ga+FDYsBiuStev5NVb373kNilORx4w4/p4zYmTPC+by0Igoo07U6RMWOzGdlY9hGIlat220rCthEFNuDlv/9dadfyKnDwQ9461WLYNEZWI0ttWF0Ug5qAoYezFwBZCleMh08s508rvp4b9Pb/3r9Nbt6eQX08k/TA/fuPv2O5/f+UhbxnHd1V2g5hrImAY0Mo2O73W2QfqA83FykIISQu1BRBH267TrgDRMq6WNgpIMno/CgdNz0Ej1YdjKdcmmKzl1MwXhsGYQRyNl3thqAfvq//Ms/PLjf/z8Dz+fHr5+95OPp5M/kU//7g3yxU/vHN35Mf9499f/At/+VxjZGXV8WsTKuUzc9VwaJro/8HywYU5hsb4Kl0SFMa1tA3eW5Bdm+zToQSB5+WXlGQt3qLmHW+07I9sThs7MPUtSEtF4GAUkdnqA7GtfIxJCfEmXQdhxDf7pDoMObh7mBS6Nijb8tHBLpkUOFCV50HQLfAMaDriKoE8BF2eaETg4VbEYot3YtOwd8Dipr1HpfQ58jGULl2k+GYY+dQJ9FUmU+7yQ0QrZsG078S52kZOzt+mImdam2AZ8wY0IYu2+w/BJsgS4wBvgnxNn7ocO8BX8HEb8EdinD/FUuHDu58FNqgu2CK4A/nDbI7B1lqD0AR3EYH/EZ67deHr1OukNKYtZHWYQNwS/i2nIcgzPhNB5+OzTiNonUAz8sqTz5350JQ1pXBoMbOBUktqQvT6IhgwH4D4oYcNeDyjHmFAH0gbDGJKMJPBBLAqcHt1BV9SGsLhdx904XoAR8aUhbDhl57IMEX7Y8zo1CBSRyIc8oHjfNJRNiIWLNrGe0cI3YtVgvyVYnMHAHyVIhJcVk+qEL27VQJNf5ERjvoG2wxUkonSZhzFN+lI9QMubJOx2MXJKMRFz7bqF36Vs8CNAoGgB36oSUCMKME4nVgMxhl1GupjEassl2RQmaZD2EOGg0fPburzzTHoGDUK4QOl0pYIllos2JQAK7bdOsnHU9qtBN7xcCLkpPey9WLyutwNQmcLw+OQwjiEAtGNw68grUEF2BROvFdJ1fEaTLQr3wc2flFJiIgbN30gZIrpCL5Oka6krKXJWZZNTF6VPhr3YHd9hDAOlHYe9ng8xB/TC26VGPSWpEjpZGoPrfg5+JkE4fZBSepkYn776hkGa2c7x0e038ZGBmYQxhlwC+ZRkEhxhlh7wIUgOTh+oGNRU4bMP35vePDz+7dvTyfsiY0DkKgniqQon0glOxPTwT9Nbt6a3fjKd/FpFa8Cqr969893jH/0bpHbqCMxfuz69ORFoIcs7+s5vjl559cuPX1O2AGnQE3Ecee1hjNyOPGcZchDGOA/TrYBeq4TG0ZByoriuGVkc8dbWIbHuON8egptwAtBFzydxCIheAi9B/vpZzIbW4xFwLRr6EGSTWs/02LNh2/PpC+EwHrbpNzzTstLciAMU0GIp2RPfDGLGLWGSRKN4ZBptp7Pdi6DgU3UC93Dq0tnzFx+5wLdx6tHGIxedC1iuiaLYCWJDSZRKcINShxFOOtXtdk86GYwBQtJygkMjjT56qfOYJO1S4+I56pRgHxMKAijkQkR3wl1ayIhC4mbhBWELgWpbyWirJf/qPm3hMKb5I4yvK+S0aZwKBt1lvhjMW+YDhuZ+MDzw5KMAPOSnBEyf8O2hx2NdDloJ8foMEfS4h8tPkmPJDNTdJUE/ppcpdfhFrIyfklmWDEqtmrIcplWwFC4AQHM5p1Hq9QIHEKKXQjQ8JO1jLog+qzQg7Ns8JIybpw/2xcnMeMuyXwq9wDReVneWbCctqbIFl1ZWsuUzS01nyKzqSt/zXcjPsmKmC3HeTHcOSQOnXLV1MQjChF25kERhnmV3IF+N6arPsy7TEKJWFRie2LuOP5S84FvUR4EJ1Bf+PAFA7yq+CTZ89sf/yByoth9IrCDr4tsxAdmMHSiAeVYpjGpJq1FliFnXutcThJVm/mlMTjJ/Ia66AWJsVszLVQzZvK2cmaRkpARz5AmJyQxUDQ5fohcJrkyoArpUJwQJUP4mesygQqXm2TppnEuBIAA9Q+kgM09ZnO16zGvD/1haI2mQe4+gqNulmCtB6Ucg5jCogXlSjms0ztl5XdwA/ohkaxN1cq4ceL5YyfFNVae5n4DFRcGGig9GWm6hiX5aZAX4yas5JN0eDFnfPBApIdfY5tlxThXzFgZT8wbWrjCvNk9Atfhgx6MB6nIy1oJHPEVDgvG55ie5wI0FTmXypjo3K66nk6zFTmIg3AC3y09QUnQKPqGxqtW3c4wus4HMAjR7TxS3zA40bYTSTqgjE/q4YcgUyahXJ+2bdbKRZMplsKmKKjpabguciq9cf7by+nP6ANnATSDdEWZQaTrFcygiiwj9EDBXDRSjknUBLwbSGoD8508KTvpmywECCXkZ2qwCMPRsHk9jT3KIKFRXpGSFqQHXKTwtVI58NGWrUuGxrpd9z3Upnj+lCYvdwXlSrFfQ4SjJQSJ7wX8JxAMAT4gs8V8WlIs0URxRYJJkGPkCWTvNuKIpO2C+jywyEDqnUvJ1cSXA3S+fcVlSzmnTZp+g4OZ+H0VDDsALOwxsIz2f//xnHx6/9j3QoqMf/uDotR9gCffKL49e/9l0AlXgr6aTv+cH+D+aTr4DyyeZo5RZdax3QXwxVarv6pQCvJeZmnzqjDpDVugtUyBdVlL9/9ykJcvryU+nh9/76iSXimIxyaWCLpIcbqIisyi3wizZSENCmQ7MT1O5NHjC6cTmcsPSBCPK2opaURCExwStkiPNhJ1CTFvgx4nil7M7sMM3EgmCaD4BOW5ZRQfIi/nX9GTxAYowB/6XJD9dDBUZmrP3HE96+QEtmvPQ93WHMsdJSAz37xmSCj55utgJapY+nVB57sUDPEgd+gq16IH6gXv2BOkxW6kwcyfac4RZbtrk/raqb1TZZHoGLHLLZIfw71szm1xMC4uVqjol0C+gT3IwmO1cM2iRVsrqYD3GdhNzbg5p2QC4o5+SCURPxkFRuiGLB8XMU/BMzOkjJUXOyGvloPTiQ9nIZdm4cPTKO8e33/rix28e/f6Xx+99wG8WMrAxySoQLCGMghVkMaLj1pHMXhikpYeCUxjPaWCLrbFFtAsAO6EsXHU6fbyLgkqktmCJjhdXeKJcWPRzQdUJXjMkFcuCp8Zp5E5alIBML3TJN71t7+GnQz906X560+0x0qXYM+Ty2hZPf6DcVI53ZUEt7yyfkDfi/ILcJS+EwxvDNuX9TuIWU9znwdCQ4T3vE9euJRiYuA3FC+K0v0BV/WrD4fewxZGtSt1Tm+A4CpS/cLLsYZpTjl0mA0DkRFntJaYlF6yZ/vC4WBlPSjyOvJm/EW7T4MyZViXQdXFCvrFZDfYCPFsUbj12YoQ9GFfDSqW6IhsZz1ZDox4uCAqcDX2w1DAWClANfQ2UEpVO3v9mwHMbHwq9v2xucYQm0IANo9T4eARK7RwgLis3sY7rmvygLxxQ5Xgn9aoSx3LXaRvWAhN3Q8/lFle1hwr1qldquaX6uIUiL4esir6lSUKi7jI4y/a0ClDwz1A2/vDd6eFNNUcRvXrTm4czIWJ6eHh85/bnH/xzUSED7ut5XCrapYSCt9a8l8FIGHk9L3B8cFi+F9C0/XGvD7HMSbpawGFC/g2uzkXvJQ+QE34BojWJRabVsivqm9TZ5t2WrVrNMIwaW2EbTd5rsnkm7TU5wzZAVZubFS1nHb2ZozIxn58GqPFfBoRnsYH0qstmigRc67LS31XugZRGr4ifytmem2/zIM0UWf5cl+J5amcYgeGm8XMVfKqHSXJRQ9v/cyXhSqKk8DzELXS9aMew0CCfQpcoHNxzYUBL2nDz/BRdgrO7hv3MsIbn/RS3hYPwqbD/j1/siHj++LyakhdZMwvPXIaxPt4RLdIep29Jb5yd6WIsb5yaWV2kf6tZq8+D7EjUF7maNSMtzalKgJ/A7bQwXfyutIomFaO5lFMHYPD8Cn9WlDirVInuWdBLM1KBRzoLueyJobTos5Iu3zlhDHW6OhEpBUCfIBturZl8Y68fzs07t8TRKi+IqoKnXhdlHi2/wAzhl4mRRlYRUD/78L1Pb/4K72q20pF86M5vD5sF0lscyG9gyNRve+pkA/Zc54RtzrpEeRFPprf+SAyrzmsAeYeK9+1Dtiw9nvbMC7ph4sfHiqnPP4mS1jPvOKkYSmfirGAX7ifk2EHIacJz9P4nd3//dlmipM0bf/bRR19+/OradWzQKJD+wn2JCRGyr79kbQ0c115c43SVTp3L1rx0cPK7+fqnqPGs9s5VWHKGGKCzxozxlKmul3Y6JKz9ajWZGGKk9MUE3BWeqkShL281peO9ho09dQkBe0k+rg1kA7f4qhwlJG2joTvSLki1RbSXUNT0QerGwvff2qz8Pbg+XNBT0Y4DoxCTdsyEd9lEuYd6S95SJeeehShEy1+HsRuAC5FA1Q9J/nIcDpoXBvutwkkV77zMuQTUMtBET4OqRi/X28U7tAy2iEFCv5b7MKwRzOFnuJRyJW25xZd+PniXfHr7TZJ7+efuH+4Q5KvyEtDx7d98Mfnw+PWfQ5F2ks7cgppu8v7x7ZtHn3x/OnkXUE4P35xOfpHSN1PuwXQjz731rFexmoMKV5I5kIzk+nbS/sbWLHB5r4/aSFm4Tnpoikd+KsR8a0YJFli21MT5hl6foeUkhq8dWn7jaolfEieuQtPnNnJUvw5XdbCgOaOTrJkeFc2/4ry3G6OENEFUevza6XuD4jfNHpo56RITbzg9ZvPzB5PfmcvBJPaUDMsglXgvIz+zaKjwONUQ7+T+nyXuW8EiVzd5KgqzmgQseY81ORYve9HYzndnSdaQA6J2iDdPNboXuxcea5GsJb156tyjl9oXH+E+BUG63W6LjBNunwC3aJfXcYvu/hncgllFmLNkpujGIx3OLS269vWlL7rnz55vFy5d3Da+IVzhJmCXZ3DNIAzoUtr8L9hixJGXvY4V5su4Ar5J+u9TKO1wf5n1HTfca54l+PfcYJ9EvbZjnr9Yb5x/rN5oXKjbjQtWqfyq6VhUgOV0XGrULzbqjQsqGYZ8uzV5OU2+q1CDqsiodrkGzCFM/AJB7tcHjPXY8SnB6x6fShmiC0eTBH/qePjmAP9xBXsv8mIqfkCB4V3O7G8oDCIIZGbXWHsGf2+BX0odQFZuMpvDUtOyxqQ9iilrJS/8y18ZaJG47O28rMb/b68dTJg=')))
+          PY
+          node --check Niji_Research_Helper.user.js
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('Niji_Research_Helper.user.js').read_text(encoding='utf-8')
+          assert '// @version      1.0.21' in text
+          assert text.count('const researchCardOriginalDisplay = new WeakMap();') == 1
+          assert 'research.collaboratorExcluded.clear();' in text
+          assert 'function cycleResearchCollaborator(' in text
+          assert 'const show = tagOk && includeOk && excludeOk && !personExcluded && personIncluded;' in text
+          assert "const CLOUD_URL = 'https://niji-research-backup.dearlylovedxxx.workers.dev';" in text
+          print('PASS: JS syntax, multi-person exclusion, reset, backup endpoint preserved')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git commit -m 'Add multi-person tri-state collaborator include and exclude (v1.0.21)'
+          git push
