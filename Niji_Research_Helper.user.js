@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.22
+// @version      1.0.23
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.22';
+  const VERSION = '1.0.23';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -3602,6 +3602,8 @@
     collaboratorFilter: '', // Full-history focus; local card filtering uses the Sets below.
     collaboratorIncluded: new Map(), // normalized person -> display name; multiple matches use OR
     collaboratorExcluded: new Map(), // normalized person -> display name; exclusions always win
+    collaboratorGroupIncluded: new Set(), // nijisanji / outside, OR with individual includes
+    collaboratorGroupExcluded: new Set(), // independently exclude both groups
     collaboratorChannel: '',
     collabHistoryRows: [],
     collabHistoryYears: [],
@@ -5220,9 +5222,11 @@
     const excludeOk = !excludes.length || !excludes.some(w => hay.includes(w));
     const people = new Set((row.collaborators || []).map(normalizeCollaboratorName).filter(Boolean));
     const excludedPerson = [...research.collaboratorExcluded.keys()].some(key => people.has(key));
+    const live = currentResearchEntries().find(entry => entry.id === row.id);
+    const groups = researchCollaboratorOrgGroups(live || row);
     // The history loader already selects the focused collaborator; some wiki rows
-    // list only the OTHER guests, so do not re-test inclusion here.
-    return tagOk && includeOk && excludeOk && !excludedPerson;
+    // list only the OTHER guests, so do not re-test individual names here.
+    return tagOk && includeOk && excludeOk && !excludedPerson && researchGroupFilterPass(groups);
   }
 
   function renderResearchCollaboratorHistory() {
@@ -5519,6 +5523,7 @@
     if (!categories.includes('コラボ')) categories.push('コラボ');
     const mentions = researchMentionList(v).map(x => x.name).filter(Boolean);
     const collaborators = [...mentions];
+    const collaboratorOrgGroups = [...researchCollaboratorOrgGroups({ meta:v, collaborators })];
     if (person && !collaborators.some(n => normalizeCollaboratorName(n) === normalizeCollaboratorName(person))) {
       collaborators.push(person);
     }
@@ -5529,7 +5534,7 @@
       title: String(v.title || '').trim() || v.id,
       game,
       categories,
-      collaborators,
+      collaborators, collaboratorOrgGroups,
       notes: [],
       sourceUrl: '',
       source: 'Holodex',
@@ -5795,6 +5800,89 @@
       .map(normalizeCollaboratorName).filter(Boolean));
   }
 
+  // Affiliation comes from a Holodex mention's org or a successful Nijisanji Wiki
+  // channel record. A missing org alone must not classify someone as external.
+  const RESEARCH_COLLAB_GROUPS = { nijisanji:'にじさんじ', outside:'にじさんじ以外' };
+
+  function researchKnownNijisanjiNames() {
+    const known = new Set();
+    for (const [cacheKey, dataset] of Object.entries(state.wikiCache || {})) {
+      if (!dataset?.fetchOk || !Object.keys(dataset.entries || {}).length) continue;
+      const name = dataset.channel || cacheKey.replace(/^history::/, '').split('::')[0];
+      const key = normalizeCollaboratorName(name);
+      if (key) known.add(key);
+    }
+    return known;
+  }
+
+  function researchCollaboratorOrgGroups(entry) {
+    const groups = new Set();
+    const known = researchKnownNijisanjiNames();
+    const mentions = Array.isArray(entry?.meta?.mentions) ? entry.meta.mentions : [];
+    for (const mention of mentions) {
+      const channel = mention?.channel || mention || {};
+      const names = [mention?.name, mention?.english_name, channel.name, channel.english_name]
+        .map(normalizeCollaboratorName).filter(Boolean);
+      if (names.some(name => known.has(name))) { groups.add('nijisanji'); continue; }
+      const rawOrg = mention?.org ?? channel.org;
+      const org = typeof rawOrg === 'string' ? rawOrg.trim() : '';
+      if (/nijisanji|にじさんじ/i.test(org)) groups.add('nijisanji');
+      else if (org) groups.add('outside');
+    }
+    // Wiki-only collaborator names are recognized only if their OWN channel has
+    // a confirmed Nijisanji Wiki cache entry; other names remain unclassified.
+    for (const name of [...(entry?.collaborators || []), ...(entry?.wikiInfo?.collaborators || [])]) {
+      if (known.has(normalizeCollaboratorName(name))) groups.add('nijisanji');
+    }
+    for (const group of (entry?.collaboratorOrgGroups || [])) {
+      if (Object.prototype.hasOwnProperty.call(RESEARCH_COLLAB_GROUPS, group)) groups.add(group);
+    }
+    return groups;
+  }
+
+  function researchGroupFilterPass(groups) {
+    if ([...research.collaboratorGroupExcluded].some(group => groups.has(group))) return false;
+    return !research.collaboratorGroupIncluded.size ||
+      [...research.collaboratorGroupIncluded].some(group => groups.has(group));
+  }
+
+  function updateResearchCollaboratorGroupButtons() {
+    $$('.npf-r-collab-group').forEach(btn => {
+      const group = btn.dataset.collabGroup;
+      const included = research.collaboratorGroupIncluded.has(group);
+      const excluded = research.collaboratorGroupExcluded.has(group);
+      btn.classList.toggle('active', included);
+      btn.classList.toggle('excluded', excluded);
+      btn.textContent = `${excluded ? '−' : included ? '✓' : '🤝'} ${RESEARCH_COLLAB_GROUPS[group]}`;
+      btn.setAttribute('aria-pressed', included || excluded ? 'true' : 'false');
+      if (isMobileYoutubeUi()) {
+        if (included || excluded) {
+          btn.style.setProperty('background', excluded ? '#803746' : '#5147a6', 'important');
+          btn.style.setProperty('color', '#fff', 'important');
+          btn.style.setProperty('border-color', excluded ? '#e58c96' : '#8172ea', 'important');
+        } else {
+          btn.style.removeProperty('background');
+          btn.style.removeProperty('color');
+          btn.style.removeProperty('border-color');
+        }
+      }
+    });
+  }
+
+  function cycleResearchCollaboratorGroup(group) {
+    if (!Object.prototype.hasOwnProperty.call(RESEARCH_COLLAB_GROUPS, group)) return;
+    if (research.collaboratorGroupIncluded.has(group)) {
+      research.collaboratorGroupIncluded.delete(group);
+      research.collaboratorGroupExcluded.add(group);
+    } else if (research.collaboratorGroupExcluded.has(group)) {
+      research.collaboratorGroupExcluded.delete(group);
+    } else {
+      research.collaboratorGroupIncluded.add(group);
+    }
+    updateResearchCollaboratorFilterUi();
+    applyResearchFilters();
+  }
+
   function paintResearchCollaboratorButton(btn, name, isCard = false) {
     const key = normalizeCollaboratorName(name);
     const included = research.collaboratorIncluded.has(key);
@@ -5936,6 +6024,7 @@
     $$('.npf-r-collab-person').forEach(btn =>
       paintResearchCollaboratorButton(btn, btn.dataset.collaborator || '', true));
     updateResearchCollaboratorSuggestions();
+    updateResearchCollaboratorGroupButtons();
   }
 
   // Full-period Wiki/Holodex history is fetched for the last selected include.
@@ -5979,10 +6068,13 @@
       const excludeOk = !excludes.length || !excludes.some(w => hay.includes(w));
       const people = researchCollaboratorKeys(e);
       const personExcluded = [...research.collaboratorExcluded.keys()].some(key => people.has(key));
-      const personIncluded = !research.collaboratorIncluded.size ||
+      const groups = researchCollaboratorOrgGroups(e);
+      const groupExcluded = [...research.collaboratorGroupExcluded].some(group => groups.has(group));
+      const personIncluded = (!research.collaboratorIncluded.size && !research.collaboratorGroupIncluded.size) ||
         [...research.collaboratorIncluded.keys()].some(key => people.has(key)) ||
-        (!!collaboratorKey && research.collaboratorIncluded.has(collaboratorKey) && historyMatchIds.has(e.id));
-      const show = tagOk && includeOk && excludeOk && !personExcluded && personIncluded;
+        (!!collaboratorKey && research.collaboratorIncluded.has(collaboratorKey) && historyMatchIds.has(e.id)) ||
+        [...research.collaboratorGroupIncluded].some(group => groups.has(group));
+      const show = tagOk && includeOk && excludeOk && !personExcluded && !groupExcluded && personIncluded;
       // Some mobile Macaque/YouTube pages do not apply GM.addStyle rules.
 // Preserve YouTube's original inline display instead of blindly resetting it.
 if (!show) {
@@ -6096,12 +6188,14 @@ e.el.classList.toggle('npf-r-hidden', !show);
 
     if (!state.apiKey) addRow('API', 'Holodex APIキー未設定', '日時・配信時間等は取得できません', 'npf-r-status-bad');
 
-    if (research.collaboratorIncluded.size || research.collaboratorExcluded.size || research.collabHistoryLoading) {
+    if (research.collaboratorIncluded.size || research.collaboratorExcluded.size || research.collaboratorGroupIncluded.size || research.collaboratorGroupExcluded.size || research.collabHistoryLoading) {
       const included = research.collaboratorIncluded.size ? `コラボ対象 ${research.collaboratorIncluded.size}人（OR）` : '';
       const excluded = research.collaboratorExcluded.size ? `除外 ${research.collaboratorExcluded.size}人` : '';
+      const groups = [...research.collaboratorGroupIncluded].map(g => RESEARCH_COLLAB_GROUPS[g]).join('・');
+      const excludedGroups = [...research.collaboratorGroupExcluded].map(g => RESEARCH_COLLAB_GROUPS[g]).join('・');
       const hist = research.collaboratorFilter ?
         `${research.collaboratorFilter} の全期間 ${research.collabHistoryLoading ? '検索中…' : research.collabHistoryRows.length + '件'}` : '';
-      addRow('絞り込み', [included, excluded, hist].filter(Boolean).join(' ・ '), '', 'npf-r-status-filter npf-r-status-info');
+      addRow('絞り込み', [included, excluded, groups ? `所属 ${groups}` : '', excludedGroups ? `所属除外 ${excludedGroups}` : '', hist].filter(Boolean).join(' ・ '), '', 'npf-r-status-filter npf-r-status-info');
     }
   }
 
@@ -6413,7 +6507,23 @@ e.el.classList.toggle('npf-r-hidden', !show);
     const collabSelected = document.createElement('div');
     collabSelected.id = 'npf-r-collab-selected'; collabSelected.className = 'npf-r-collab-suggestions';
     collabSelected.hidden = true;
-    collabControl.append(collabLabel, collabHint, collabRow, collabExclude, collabOptions, collabSuggestions, collabSelected);
+    const groupLabel = document.createElement('div');
+    groupLabel.className = 'npf-r-label';
+    groupLabel.textContent = 'コラボ相手の所属で絞り込み';
+    const groupHint = document.createElement('div');
+    groupHint.className = 'npf-r-filter-hint';
+    groupHint.textContent = 'タップ：紫 ✓ 絞り込み → 赤 − 除外 → 未選択。箱内・箱外の両方がいる動画は両方に該当、除外が優先。Holodex等で所属不明の相手は勝手に箱外扱いしません。';
+    const groupButtons = document.createElement('div');
+    groupButtons.className = 'npf-r-collab-suggestions';
+    for (const [group, label] of Object.entries(RESEARCH_COLLAB_GROUPS)) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'npf-r-collab-quick npf-r-collab-group';
+      b.dataset.collabGroup = group;
+      b.textContent = `🤝 ${label}`;
+      b.addEventListener('click', () => cycleResearchCollaboratorGroup(group));
+      groupButtons.appendChild(b);
+    }
+    collabControl.append(collabLabel, collabHint, collabRow, collabExclude, collabOptions, collabSuggestions, collabSelected, groupLabel, groupHint, groupButtons);
     body.appendChild(collabControl);
 
     const activeCollab = document.createElement('button');
@@ -6463,6 +6573,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
     reset.addEventListener('click', () => {
       research.activeTags.clear(); research.excludedTags.clear(); research.includeText = ''; research.excludeText = ''; research.collaboratorFilter = '';
       research.collaboratorIncluded.clear(); research.collaboratorExcluded.clear();
+      research.collaboratorGroupIncluded.clear(); research.collaboratorGroupExcluded.clear();
       research.collaboratorChannel = ''; research.collabHistoryToken++; research.collabHistoryRows = []; research.collabHistoryYears = []; research.collabHistoryYearStats = {}; research.collabHistoryHolodexCount = 0; research.collabHistoryWikiCount = 0; research.collabHistoryResolveNote = ''; research.collabHistoryLoading = false;
       include.value = ''; exclude.value = '';
       const collabInputNow = $('#npf-r-collab-input'); if (collabInputNow) collabInputNow.value = '';
