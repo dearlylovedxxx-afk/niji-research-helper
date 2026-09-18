@@ -28,11 +28,12 @@ jobs:
           const fs=require('node:fs'), assert=require('node:assert/strict');
           const {JSDOM}=require('/tmp/nrh-roster-node/node_modules/jsdom');
           const s=fs.readFileSync('Niji_Research_Helper.user.js','utf8');
+          const text=s.match(/  function normalizeResearchText\(s = ''\) \{[\s\S]*?\n  \}/);
           const norm=s.match(/  function normalizeCollaboratorName\(name = ''\) \{[\s\S]*?\n  \}/);
-          assert(norm,'normalizeCollaboratorName missing');
+          assert(text && norm,'normalization function missing');
           const start=s.indexOf('  const RESEARCH_COLLAB_GROUPS = '),end=s.indexOf('  function paintResearchCollaboratorButton(',start);
           assert(start>0&&end>start,'roster section missing');
-          const impl=new Function('DOMParser','WIKI_BASE',`${norm[0]}\n${s.slice(start,end)}\nreturn {parseNijisanjiRosterHtml,researchRosterKey,researchCollaboratorOrgGroups,researchRoster};`)(new JSDOM('').window.DOMParser,'https://wikiwiki.jp/nijisanji');
+          const impl=new Function('DOMParser','WIKI_BASE',`${text[0]}\n${norm[0]}\n${s.slice(start,end)}\nreturn {parseNijisanjiRosterHtml,researchRosterKey,researchCollaboratorOrgGroups,researchRoster};`)(new JSDOM('').window.DOMParser,'https://wikiwiki.jp/nijisanji');
           const roster=impl.parseNijisanjiRosterHtml(fs.readFileSync('/tmp/nrh-official-roster.html','utf8'));
           console.log('Parsed current members:',roster.members,'aliases:',roster.names.length);
           assert(roster.members>=190&&roster.members<=260);
