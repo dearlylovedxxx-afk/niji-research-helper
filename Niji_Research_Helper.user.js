@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.17
+// @version      1.0.18
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.17';
+  const VERSION = '1.0.18';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -678,6 +678,57 @@
     }
   }
 
+  // Read-only end-to-end check: fetch the existing backup, validate bytes and JSON,
+  // and never restore it or write a new backup. Token is not persisted.
+  async function cloudVerifyLatest() {
+    const input = document.getElementById('npf-cloud-token');
+    const button = document.getElementById('npf-cloud-verify');
+    const token = String(input?.value || '').trim();
+    if (token.length < 24) {
+      cloud.status = '検証にはバックアップ専用トークンが必要です'; cloudUpdateUi(); return;
+    }
+    if (button) button.disabled = true;
+    cloud.status = '📥 保存済みバックアップを読み取り検証中…'; cloudUpdateUi();
+    try {
+      const get = async path => {
+        const res = await gmRequest({ method:'GET', url:CLOUD_URL + path,
+          headers:{ authorization:`Bearer ${token}`, accept:'application/json' },
+          responseType:'text', timeout:45000 });
+        const text = typeof res.responseText === 'string' ? res.responseText
+          : typeof res.response === 'string' ? res.response : null;
+        if (text === null) throw new Error('Macaqueが応答を文字列で返しませんでした');
+        if (res.status !== 200) {
+          let detail = '';
+          try { detail = JSON.parse(text)?.error || ''; } catch {}
+          throw new Error(`HTTP ${res.status}${detail ? ': ' + String(detail).slice(0, 60) : ''}`);
+        }
+        return text;
+      };
+      const listed = JSON.parse(await get('/v1/backups'));
+      if (!listed.ok || !Array.isArray(listed.backups)) throw new Error('バックアップ一覧の形式が違います');
+      const item = listed.backups.find(x => x.device === cloudDevice() && x.origin === location.origin);
+      if (!item) throw new Error('この端末・YouTube URLのバックアップが見つかりません');
+      const text = await get('/v1/backups/' + encodeURIComponent(item.id));
+      const bytes = new TextEncoder().encode(text);
+      if (bytes.byteLength !== item.size) throw new Error('取得ファイルのサイズが一致しません');
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      const sha = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2,'0')).join('');
+      if (sha !== item.sha256) throw new Error('取得ファイルのチェックサムが一致しません');
+      const data = JSON.parse(text);
+      if (data.app !== 'Niji Research Helper' || data.dbVersion !== NRH_DB_VERSION
+          || data.device !== item.device || data.sourceOrigin !== item.origin
+          || CLOUD_STORES.some(name => !Array.isArray(data.stores?.[name])))
+        throw new Error('取得ファイルのデータ形式が違います');
+      cloud.status = `✅ 保存済みファイルの読み取り・整合性確認OK（${new Date(item.createdAt).toLocaleString('ja-JP')}、動画${data.stores.videos.length}件、お気に入り${data.preferences?.favorites?.length || 0}件）。DBは変更していません。`;
+    } catch (e) {
+      cloud.status = `⚠️ 読み取り検証失敗：${String(e?.message || e?.error?.message || e?.statusText || e?.status || '通信エラー').slice(0, 110)}`;
+    } finally {
+      if (input) input.value = '';
+      if (button) button.disabled = false;
+      cloudUpdateUi();
+    }
+  }
+
   async function cloudShowBackups() {
     const list = document.getElementById('npf-cloud-list');
     if (!list) return;
@@ -710,7 +761,10 @@
     enable.textContent = '🔒 接続して自動保存を有効化'; enable.addEventListener('click', () => void cloudEnable());
     const note = document.createElement('div'); note.className = 'npf-r-note';
     note.textContent = '専用Workerの導入後に有効化。Holodex APIキーは送信しません。ブラウザを閉じている間は自動実行されません。';
-    setup.append(token, enable, note);
+    const verify = document.createElement('button'); verify.type = 'button'; verify.id = 'npf-cloud-verify';
+    verify.className = 'npf-r-btn'; verify.textContent = '🔎 保存済みバックアップを検証（復元なし）';
+    verify.addEventListener('click', () => void cloudVerifyLatest());
+    setup.append(token, enable, verify, note);
     const actions = document.createElement('div'); actions.id = 'npf-cloud-actions';
     const upload = document.createElement('button'); upload.id = 'npf-cloud-upload'; upload.type = 'button';
     upload.className = 'npf-r-btn'; upload.textContent = '☁️ 今すぐ保存';
