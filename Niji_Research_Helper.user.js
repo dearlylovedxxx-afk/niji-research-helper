@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.19
+// @version      1.0.20
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.19';
+  const VERSION = '1.0.20';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -5884,6 +5884,9 @@
       : 'コラボ相手フィルターを解除しました');
   }
 
+  // Restore each card's own inline display when its filter is cleared.
+  const researchCardOriginalDisplay = new WeakMap();
+
   function applyResearchFilters() {
     const includes = splitResearchWords(research.includeText);
     const excludes = splitResearchWords(research.excludeText);
@@ -5896,7 +5899,23 @@
       const excludeOk = !excludes.length || !excludes.some(w => hay.includes(w));
       const collaboratorOk = !collaboratorKey || historyMatchIds.has(e.id) || (e.collaborators || []).some(name => normalizeCollaboratorName(name) === collaboratorKey);
       const show = tagOk && includeOk && excludeOk && collaboratorOk;
-      e.el.classList.toggle('npf-r-hidden', !show);
+      // Some mobile Macaque/YouTube pages do not apply GM.addStyle rules.
+// Preserve YouTube's original inline display instead of blindly resetting it.
+if (!show) {
+  if (!researchCardOriginalDisplay.has(e.el)) {
+    researchCardOriginalDisplay.set(e.el, {
+      value: e.el.style.getPropertyValue('display'),
+      priority: e.el.style.getPropertyPriority('display'),
+    });
+  }
+  e.el.style.setProperty('display', 'none', 'important');
+} else if (researchCardOriginalDisplay.has(e.el)) {
+  const original = researchCardOriginalDisplay.get(e.el);
+  if (original.value) e.el.style.setProperty('display', original.value, original.priority);
+  else e.el.style.removeProperty('display');
+  researchCardOriginalDisplay.delete(e.el);
+}
+e.el.classList.toggle('npf-r-hidden', !show);
     }
     updateResearchCollaboratorFilterUi();
     renderResearchCollaboratorHistory();
