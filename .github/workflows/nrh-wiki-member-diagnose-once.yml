@@ -9,26 +9,39 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect public roster HTML structure
+      - name: Count official current members separately from former and VirtuaReal
         run: |
           python3 -m pip -q install beautifulsoup4
           python3 - <<'PY'
           import requests
           from bs4 import BeautifulSoup
           u='https://wikiwiki.jp/nijisanji/%E5%85%AC%E5%BC%8F%E3%83%A9%E3%82%A4%E3%83%90%E3%83%BC'
-          r=requests.get(u,timeout=20,headers={'User-Agent':'Mozilla/5.0'}); print('HTTP',r.status_code,'bytes',len(r.content)); r.raise_for_status()
-          soup=BeautifulSoup(r.content,'html.parser')
-          print('title',soup.title.get_text(' ',strip=True) if soup.title else '')
-          for t in soup.find_all(['h2','h3','h4','h5']):
-            label=t.get_text(' ',strip=True)
-            if 'にじさんじ公式ライバー' in label or '海外公式ライバー' in label or label.startswith('メンバー') or 'NIJISANJI EN' in label or 'VirtuaReal' in label or '元メンバー' in label:
-              print('HEADING',t.name,repr(label),'class=',t.get('class'))
-              if 'メンバー' in label:
-                sib=t.find_next_sibling()
-                for j in range(3):
-                  if not sib:break
-                  print('NEXT',sib.name, 'text',repr(sib.get_text(' ',strip=True)[:170]));print('LINKS',[(a.get_text(' ',strip=True)[:55],a.get('href','')[:130]) for a in sib.find_all('a')[:5]])
-                  sib=sib.find_next_sibling()
-              if 'EN' in label and 'NIJISANJI EN' in label:break
-          print('EXAMPLE',[(a.get_text(' ',strip=True),a.get('href','')) for a in soup.find_all('a') if '小柳ロウ' in a.get_text(' ',strip=True)][:3])
+          r=requests.get(u,timeout=20,headers={'User-Agent':'Mozilla/5.0'});r.raise_for_status()
+          s=BeautifulSoup(r.content,'html.parser')
+          section='';current=False;members=[];sections={}
+          for el in s.find_all(['h2','h3','h4','ul']):
+            if el.name=='h2':
+              text=el.get_text(' ',strip=True)
+              if 'にじさんじ公式ライバー' in text:section='jp'
+              elif '海外公式ライバー' in text:section='other'
+              else:section=''
+              current=False
+            elif el.name=='h3':
+              text=el.get_text(' ',strip=True)
+              if section in ('other','en','virtual'):
+                section='en' if 'NIJISANJI EN' in text else ('virtual' if 'VirtuaReal' in text else 'other')
+              current=False
+            elif el.name=='h4':
+              text=el.get_text(' ',strip=True)
+              current=bool(section in ('jp','en') and text.startswith('メンバー') and not text.startswith('元メンバー'))
+            elif el.name=='ul' and current:
+              for li in el.find_all('li',recursive=False):
+                a=next((a for a in li.find_all('a') if a.get('href','').startswith('/nijisanji/') and not '::' in a.get('href','')),None)
+                if a:
+                  name=a.get_text(' ',strip=True)
+                  if name:members.append((section,name,li.get_text(' ',strip=True)[:110]))
+          for sec in ('jp','en'):
+            names={n for typ,n,_ in members if typ==sec};print(sec,'unique:',len(names),'sample:',list(names)[:10]);print(sec,'tail:',list(names)[-8:])
+          print('total unique:',len({n for _,n,_ in members}),'Koyanagi:',[m for m in members if '小柳' in m[1]],'examples EN:',[m for m in members if m[0]=='en'][:2]);
+          assert len({n for _,n,_ in members})>175
           PY
