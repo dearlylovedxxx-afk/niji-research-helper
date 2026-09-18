@@ -1,0 +1,41 @@
+name: Fix Niji backup transport (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-one-time-backup-fix.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Send JSON as text and bump to v1.0.17
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Niji_Research_Helper.user.js')
+          s = p.read_text(encoding='utf-8')
+          changes = [
+              ('// @version      1.0.16', '// @version      1.0.17'),
+              ("const VERSION = '1.0.16';", "const VERSION = '1.0.17';"),
+              ('      const bytes = new TextEncoder().encode(JSON.stringify(payload));',
+               '      // Send JSON text: Macaque may alter ArrayBuffer request bodies.\n'
+               '      const jsonText = JSON.stringify(payload);\n'
+               '      const bytes = new TextEncoder().encode(jsonText);'),
+              ("await cloudRequest('POST', '/v1/backups', bytes.buffer, {",
+               "await cloudRequest('POST', '/v1/backups', jsonText, {"),
+          ]
+          for before, after in changes:
+              if s.count(before) != 1:
+                  raise SystemExit('Refusing unsafe patch; expected exactly one: ' + before)
+              s = s.replace(before, after, 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+          node --check Niji_Research_Helper.user.js
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Niji_Research_Helper.user.js
+          git commit -m "Fix Macaque backup upload encoding (v1.0.17)"
+          git push
