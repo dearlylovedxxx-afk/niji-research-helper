@@ -13,6 +13,7 @@ jobs:
       - name: Patch script and validate JavaScript syntax
         run: |
           python3 .github/scripts/nrh_roster_filter_patch_once.py
+          python3 .github/scripts/nrh_roster_onecharacter_fix_once.py
           node --check Niji_Research_Helper.user.js
       - name: Test real Wiki roster and strict outsider classification
         run: |
