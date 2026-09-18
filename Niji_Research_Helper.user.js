@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.18
+// @version      1.0.19
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.18';
+  const VERSION = '1.0.19';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -530,6 +530,8 @@
     cloud.busy = true;
     clearTimeout(cloud.timer);
     const initialWrites = cloud.writes;
+    let uploadSha = '';
+    let uploadSize = 0;
     cloud.status = '☁️ バックアップを作成中…'; cloudUpdateUi();
     try {
       const payload = await cloudSnapshot();
@@ -544,6 +546,7 @@
         throw new Error('バックアップが20MBを超えました。ローカルJSONを先に退避してください');
       const digest = await crypto.subtle.digest('SHA-256', bytes);
       const sha = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, '0')).join('');
+      uploadSha = sha; uploadSize = bytes.byteLength;
       const result = await cloudRequest('POST', '/v1/backups', jsonText, {
         'content-type':'application/json', 'x-nrh-device':cloudDevice(),
         'x-nrh-origin':location.origin, 'x-nrh-sha256':sha, 'x-nrh-version':VERSION,
@@ -557,12 +560,55 @@
       await GM.setValue(CLOUD_CONFIG_KEY, { enabled:true, token:cloud.token, lastSavedAt:cloud.lastSavedAt });
       if (force) toast('☁️ pCloudへのバックアップが完了しました');
     } catch (e) {
-      cloud.status = `⚠️ バックアップ失敗：${String(e?.message || e).slice(0, 120)}`;
-      cloud.dirty = true;
-      cloud.nextRetryAt = Date.now() + 15 * 60 * 1000;
-      void GM.setValue(CLOUD_PENDING_KEY, true).catch(() => {});
-      if (force) toast(cloud.status);
-      console.warn('[NRH][cloud]', e);
+  // A Macaque POST error may arrive after the Worker has stored the data.
+  // Confirm the exact SHA and stored bytes before retrying or claiming failure.
+  let confirmed = false;
+  if (uploadSha && uploadSize && cloud.enabled && cloud.token) {
+    try {
+      const list = await cloudRequest('GET', '/v1/backups?device=' + encodeURIComponent(cloudDevice()));
+      const match = list.backups?.find(b => b.sha256 === uploadSha
+        && b.size === uploadSize && b.origin === location.origin);
+      if (match) {
+        const res = await gmRequest({method:'GET',
+          url:CLOUD_URL + '/v1/backups/' + encodeURIComponent(match.id),
+          headers:{authorization:`Bearer ${cloud.token}`}, responseType:'text', timeout:45000});
+        const text = typeof res.responseText === 'string' ? res.responseText
+          : typeof res.response === 'string' ? res.response : '';
+        if (res.status === 200 && text) {
+          const received = new TextEncoder().encode(text);
+          if (received.byteLength === uploadSize) {
+            const digest = await crypto.subtle.digest('SHA-256', received);
+            const remoteSha = [...new Uint8Array(digest)]
+              .map(x => x.toString(16).padStart(2, '0')).join('');
+            confirmed = remoteSha === uploadSha;
+          }
+        }
+      }
+    } catch (verifyError) {
+      console.warn('[NRH][cloud post-response verification]', verifyError);
+    }
+  }
+  if (confirmed) {
+    cloud.lastSavedAt = Date.now(); cloud.nextRetryAt = 0;
+    cloud.status = `✅ ${new Date().toLocaleString('ja-JP')} 保存済みファイルを再照合しました`;
+    if (initialWrites === cloud.writes) {
+      cloud.dirty = false; cloud.writes = 0;
+      void GM.setValue(CLOUD_PENDING_KEY, false).catch(() => {});
+    }
+    void GM.setValue(CLOUD_CONFIG_KEY, { enabled:true, token:cloud.token,
+      lastSavedAt:cloud.lastSavedAt }).catch(() => {});
+    if (force) toast('☁️ pCloudの保存済みファイルを照合しました');
+  } else {
+    const detail = typeof e?.message === 'string' && e.message ? e.message
+      : typeof e?.error === 'string' && e.error ? e.error
+      : e?.status ? `通信エラー（HTTP ${e.status}）` : '通信エラー（詳細不明）';
+    cloud.status = `⚠️ バックアップ未確認：${detail.slice(0, 110)}`;
+    cloud.dirty = true;
+    cloud.nextRetryAt = Date.now() + 15 * 60 * 1000;
+    void GM.setValue(CLOUD_PENDING_KEY, true).catch(() => {});
+    if (force) toast(cloud.status);
+    console.warn('[NRH][cloud]', e);
+  }
     } finally {
       cloud.busy = false; cloudUpdateUi();
       if (cloud.dirty) cloudSchedule(90000);
