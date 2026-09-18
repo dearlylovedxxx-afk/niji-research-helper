@@ -1,0 +1,37 @@
+name: Add read-only pCloud backup verification (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-verify-once.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add read-only verification v1.0.18
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('Niji_Research_Helper.user.js')
+          s=p.read_text(encoding='utf-8')
+          assert s.count('// @version      1.0.17') == 1
+          assert s.count("const VERSION = '1.0.17';") == 1
+          assert s.count('  async function cloudEnable() {') == 1
+          assert s.count('    setup.append(token, enable, note);') == 1
+          s=s.replace('// @version      1.0.17', '// @version      1.0.18', 1)
+          s=s.replace("const VERSION = '1.0.17';", "const VERSION = '1.0.18';", 1)
+          s=s.replace('  async function cloudEnable() {', "  // Read-only audit: retrieve the newest copy from pCloud without restoring or uploading.\n  async function cloudVerifyLatest() {\n    const input = document.getElementById('npf-cloud-token');\n    const token = String(input?.value || '').trim();\n    if (cloud.enabled) { toast('検証前に自動保存を停止してください'); return; }\n    if (cloud.busy) return;\n    if (token.length < 24) { toast('バックアップ専用トークンを入力してください'); return; }\n    cloud.busy = true;\n    cloud.token = token; // used only during this read-only operation; never persisted\n    cloud.status = '🔍 pCloudの保存済みデータを読み取り検証中…'; cloudUpdateUi();\n    try {\n      const items = await cloudRequest('GET', '/v1/backups?device=' + encodeURIComponent(cloudDevice()));\n      const backup = items.backups?.[0];\n      if (!backup) throw new Error('この端末の保存済みバックアップがありません');\n      const res = await gmRequest({ method:'GET', url:CLOUD_URL + '/v1/backups/' + encodeURIComponent(backup.id),\n        headers:{ authorization:`Bearer ${cloud.token}` }, timeout:45000 });\n      if (res.status !== 200) throw new Error(`読み込みHTTP ${res.status}`);\n      const text = typeof res.responseText === 'string' ? res.responseText\n        : typeof res.response === 'string' ? res.response : '';\n      if (!text) throw new Error('バックアップの本文を取得できません');\n      const raw = new TextEncoder().encode(text);\n      if (raw.byteLength !== backup.size) throw new Error('保存データのサイズが一致しません');\n      const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', raw))]\n        .map(x => x.toString(16).padStart(2, '0')).join('');\n      if (sha !== backup.sha256) throw new Error('保存データのチェックサムが一致しません');\n      const data = JSON.parse(text);\n      if (data.app !== 'Niji Research Helper' || data.dbVersion !== NRH_DB_VERSION ||\n          data.device !== backup.device || data.sourceOrigin !== backup.origin ||\n          CLOUD_STORES.some(name => !Array.isArray(data.stores?.[name])))\n        throw new Error('保存データの形式が一致しません');\n      cloud.status = `✅ pCloudから再取得・照合完了：${new Date(backup.createdAt).toLocaleString('ja-JP')}（復元なし）`;\n    } catch (e) {\n      const message = typeof e?.message === 'string' && e.message ? e.message\n        : typeof e?.error === 'string' && e.error ? e.error : '通信エラー（詳細不明）';\n      cloud.status = `⚠️ 保存済みデータの検証失敗：${message.slice(0, 110)}`;\n      console.warn('[NRH][cloud verification]', e);\n    } finally {\n      cloud.token = '';\n      cloud.busy = false;\n      if (input) input.value = '';\n      cloudUpdateUi();\n    }\n  }\n\n" + '  async function cloudEnable() {', 1)
+          anchor="    enable.textContent = '🔒 接続して自動保存を有効化'; enable.addEventListener('click', () => void cloudEnable());"
+          assert s.count(anchor)==1
+          s=s.replace(anchor,anchor+"\n    const verify = document.createElement('button'); verify.type = 'button'; verify.className = 'npf-r-btn';\n    verify.textContent = '🔍 保存済みデータを検証（復元・送信なし）';\n    verify.addEventListener('click', () => void cloudVerifyLatest());",1)
+          s=s.replace('    setup.append(token, enable, note);','    setup.append(token, enable, verify, note);',1)
+          p.write_text(s, encoding='utf-8')
+          PY
+          node --check Niji_Research_Helper.user.js
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git commit -m 'Add read-only pCloud backup verification (v1.0.18)'
+          git push
