@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.16
+// @version      1.0.17
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.16';
+  const VERSION = '1.0.17';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -537,12 +537,14 @@
         || payload.preferences.favorites?.length || payload.preferences.liverFavorites?.length
         || Object.keys(payload.preferences.syncPoints || {}).length;
       if (!populated) throw new Error('DBが空のため、既存バックアップの保護を優先して保存しません');
-      const bytes = new TextEncoder().encode(JSON.stringify(payload));
+      // Send JSON text: Macaque may alter ArrayBuffer request bodies.
+      const jsonText = JSON.stringify(payload);
+      const bytes = new TextEncoder().encode(jsonText);
       if (bytes.byteLength > 20 * 1024 * 1024)
         throw new Error('バックアップが20MBを超えました。ローカルJSONを先に退避してください');
       const digest = await crypto.subtle.digest('SHA-256', bytes);
       const sha = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, '0')).join('');
-      const result = await cloudRequest('POST', '/v1/backups', bytes.buffer, {
+      const result = await cloudRequest('POST', '/v1/backups', jsonText, {
         'content-type':'application/json', 'x-nrh-device':cloudDevice(),
         'x-nrh-origin':location.origin, 'x-nrh-sha256':sha, 'x-nrh-version':VERSION,
       });
