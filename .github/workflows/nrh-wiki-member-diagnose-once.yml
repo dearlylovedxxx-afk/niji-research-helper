@@ -1,0 +1,34 @@
+name: Inspect Nijisanji Wiki roster markup (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-wiki-member-diagnose-once.yml
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect public roster HTML structure
+        run: |
+          python3 -m pip -q install beautifulsoup4
+          python3 - <<'PY'
+          import requests
+          from bs4 import BeautifulSoup
+          u='https://wikiwiki.jp/nijisanji/%E5%85%AC%E5%BC%8F%E3%83%A9%E3%82%A4%E3%83%90%E3%83%BC'
+          r=requests.get(u,timeout=20,headers={'User-Agent':'Mozilla/5.0'}); print('HTTP',r.status_code,'bytes',len(r.content)); r.raise_for_status()
+          soup=BeautifulSoup(r.content,'html.parser')
+          print('title',soup.title.get_text(' ',strip=True) if soup.title else '')
+          for t in soup.find_all(['h2','h3','h4','h5']):
+            label=t.get_text(' ',strip=True)
+            if 'にじさんじ公式ライバー' in label or '海外公式ライバー' in label or label.startswith('メンバー') or 'NIJISANJI EN' in label or 'VirtuaReal' in label or '元メンバー' in label:
+              print('HEADING',t.name,repr(label),'class=',t.get('class'))
+              if 'メンバー' in label:
+                sib=t.find_next_sibling()
+                for j in range(3):
+                  if not sib:break
+                  print('NEXT',sib.name, 'text',repr(sib.get_text(' ',strip=True)[:170]));print('LINKS',[(a.get_text(' ',strip=True)[:55],a.get('href','')[:130]) for a in sib.find_all('a')[:5]])
+                  sib=sib.find_next_sibling()
+              if 'EN' in label and 'NIJISANJI EN' in label:break
+          print('EXAMPLE',[(a.get_text(' ',strip=True),a.get('href','')) for a in soup.find_all('a') if '小柳ロウ' in a.get_text(' ',strip=True)][:3])
+          PY
