@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.21
+// @version      1.0.22
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.21';
+  const VERSION = '1.0.22';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -4491,7 +4491,7 @@
       ['League of Legends', /league of legends|\blol\b|リーグ・オブ・レジェンド/i],
       ['Overwatch 2', /overwatch|\bow2\b|オーバーウォッチ/i],
       ['Counter-Strike 2', /counter[ -]?strike|\bcs2\b/i],
-      ['Rainbow Six Siege', /rainbow six|\br6s\b|シージ/i],
+      ['Rainbow Six Siege', /rainbow[\s_-]*six|\br6s\b|シージ/i],
       ['Escape from Tarkov', /tarkov|\beft\b|タルコフ/i],
       ['PUBG', /\bpubg\b/i],
       ['Fortnite', /fortnite|フォートナイト/i],
@@ -4516,7 +4516,7 @@
   }
 
   function isFpsGame(game = '', title = '') {
-    return /valorant|apex|overwatch|counter-strike|rainbow six|tarkov|pubg|fortnite|delta force|marvel rivals|battlefield|call of duty/i.test(`${game} ${title}`);
+    return /valorant|apex|overwatch|counter-strike|rainbow[\s_-]*six|\br6s\b|シージ|tarkov|pubg|fortnite|delta force|marvel rivals|battlefield|call of duty/i.test(`${game} ${title}`);
   }
 
   function researchMentionList(meta) {
