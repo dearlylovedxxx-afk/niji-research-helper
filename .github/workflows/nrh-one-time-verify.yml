@@ -1,0 +1,95 @@
+name: Add read-only Niji backup verification (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-one-time-verify.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Add read-only verification and bump to v1.0.18
+        run: |
+          set -euo pipefail
+          test "$(git hash-object Niji_Research_Helper.user.js)" = "9ed7ca9cb4ad682b01f0406e6835bccd63367f9c"
+          python3 - <<'PY_SCRIPT'
+          from pathlib import Path
+          p=Path('Niji_Research_Helper.user.js')
+          s=p.read_text()
+          assert s.count('  async function cloudShowBackups() {')==1
+          assert s.count("    setup.append(token, enable, note);")==1
+          assert s.count("// @version      1.0.17")==1
+          assert s.count("  const VERSION = '1.0.17';")==1
+          s=s.replace('// @version      1.0.17','// @version      1.0.18',1).replace("  const VERSION = '1.0.17';","  const VERSION = '1.0.18';",1)
+          verify = '''  // Read-only end-to-end check: fetch the existing backup, validate bytes and JSON,
+            // and never restore it or write a new backup. Token is not persisted.
+            async function cloudVerifyLatest() {
+              const input = document.getElementById('npf-cloud-token');
+              const button = document.getElementById('npf-cloud-verify');
+              const token = String(input?.value || '').trim();
+              if (token.length < 24) {
+                cloud.status = '検証にはバックアップ専用トークンが必要です'; cloudUpdateUi(); return;
+              }
+              if (button) button.disabled = true;
+              cloud.status = '📥 保存済みバックアップを読み取り検証中…'; cloudUpdateUi();
+              try {
+                const get = async path => {
+                  const res = await gmRequest({ method:'GET', url:CLOUD_URL + path,
+                    headers:{ authorization:`Bearer ${token}`, accept:'application/json' },
+                    responseType:'text', timeout:45000 });
+                  const text = typeof res.responseText === 'string' ? res.responseText
+                    : typeof res.response === 'string' ? res.response : null;
+                  if (text === null) throw new Error('Macaqueが応答を文字列で返しませんでした');
+                  if (res.status !== 200) {
+                    let detail = '';
+                    try { detail = JSON.parse(text)?.error || ''; } catch {}
+                    throw new Error(`HTTP ${res.status}${detail ? ': ' + String(detail).slice(0, 60) : ''}`);
+                  }
+                  return text;
+                };
+                const listed = JSON.parse(await get('/v1/backups'));
+                if (!listed.ok || !Array.isArray(listed.backups)) throw new Error('バックアップ一覧の形式が違います');
+                const item = listed.backups.find(x => x.device === cloudDevice() && x.origin === location.origin);
+                if (!item) throw new Error('この端末・YouTube URLのバックアップが見つかりません');
+                const text = await get('/v1/backups/' + encodeURIComponent(item.id));
+                const bytes = new TextEncoder().encode(text);
+                if (bytes.byteLength !== item.size) throw new Error('取得ファイルのサイズが一致しません');
+                const digest = await crypto.subtle.digest('SHA-256', bytes);
+                const sha = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2,'0')).join('');
+                if (sha !== item.sha256) throw new Error('取得ファイルのチェックサムが一致しません');
+                const data = JSON.parse(text);
+                if (data.app !== 'Niji Research Helper' || data.dbVersion !== NRH_DB_VERSION
+                    || data.device !== item.device || data.sourceOrigin !== item.origin
+                    || CLOUD_STORES.some(name => !Array.isArray(data.stores?.[name])))
+                  throw new Error('取得ファイルのデータ形式が違います');
+                cloud.status = `✅ 保存済みファイルの読み取り・整合性確認OK（${new Date(item.createdAt).toLocaleString('ja-JP')}、動画${data.stores.videos.length}件、お気に入り${data.preferences?.favorites?.length || 0}件）。DBは変更していません。`;
+              } catch (e) {
+                cloud.status = `⚠️ 読み取り検証失敗：${String(e?.message || e?.error?.message || e?.statusText || e?.status || '通信エラー').slice(0, 110)}`;
+              } finally {
+                if (input) input.value = '';
+                if (button) button.disabled = false;
+                cloudUpdateUi();
+              }
+            }
+          
+          '''
+          s=s.replace('  async function cloudShowBackups() {', verify+'  async function cloudShowBackups() {',1)
+          old='''    setup.append(token, enable, note);'''
+          new='''    const verify = document.createElement('button'); verify.type = 'button'; verify.id = 'npf-cloud-verify';
+              verify.className = 'npf-r-btn'; verify.textContent = '🔎 保存済みバックアップを検証（復元なし）';
+              verify.addEventListener('click', () => void cloudVerifyLatest());
+              setup.append(token, enable, verify, note);'''
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          print('PATCH_CHECK_OK', s.count('cloudVerifyLatest'), len(s))
+          PY_SCRIPT
+          node --check Niji_Research_Helper.user.js
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git commit -m 'Add read-only verification for stored Niji backups v1.0.18'
+          git push
