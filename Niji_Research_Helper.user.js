@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.23
+// @version      1.0.24
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.23';
+  const VERSION = '1.0.24';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -5800,53 +5800,160 @@
       .map(normalizeCollaboratorName).filter(Boolean));
   }
 
-  // Affiliation comes from a Holodex mention's org or a successful Nijisanji Wiki
-  // channel record. A missing org alone must not classify someone as external.
+  // The official member roster on the Nijisanji fan wiki is the ONLY box-member
+  // authority. Ordinary Wiki video pages and Holodex org labels are not a roster.
   const RESEARCH_COLLAB_GROUPS = { nijisanji:'にじさんじ', outside:'にじさんじ以外' };
+  const RESEARCH_ROSTER_URL = `${WIKI_BASE}/公式ライバー`;
+  const RESEARCH_ROSTER_CACHE_KEY = 'npf_current_nijisanji_roster_wiki_v1';
+  const RESEARCH_ROSTER_TTL = 7 * 24 * 60 * 60 * 1000;
+  const researchRoster = { names:new Set(), members:0, ready:false, loading:false,
+    fetchedAt:0, error:'', promise:null };
 
-  function researchKnownNijisanjiNames() {
-    const known = new Set();
-    for (const [cacheKey, dataset] of Object.entries(state.wikiCache || {})) {
-      if (!dataset?.fetchOk || !Object.keys(dataset.entries || {}).length) continue;
-      const name = dataset.channel || cacheKey.replace(/^history::/, '').split('::')[0];
-      const key = normalizeCollaboratorName(name);
-      if (key) known.add(key);
+  function researchRosterKey(name = '') {
+    return normalizeCollaboratorName(name).normalize('NFKC');
+  }
+
+  function parseNijisanjiRosterHtml(html = '') {
+    const doc = new DOMParser().parseFromString(String(html), 'text/html');
+    const names = new Set();
+    const members = new Set();
+    let section = '', current = false;
+    const add = (value, canonical = false) => {
+      const key = researchRosterKey(value);
+      // 叶 is a current official member; one-character aliases remain excluded.
+      if (key && (canonical || key.length >= 2) && key.length <= 100) names.add(key);
+    };
+    for (const el of doc.querySelectorAll('h2,h3,h4,ul')) {
+      const tag = el.tagName.toLowerCase();
+      if (tag === 'h2') {
+        const label = (el.textContent || '').trim();
+        section = label.includes('にじさんじ公式ライバー') ? 'jp'
+          : label.includes('海外公式ライバー') ? 'other' : '';
+        current = false;
+      } else if (tag === 'h3') {
+        const label = (el.textContent || '').trim();
+        if (['other','en','virtual'].includes(section))
+          section = label.includes('NIJISANJI EN') ? 'en'
+            : label.includes('VirtuaReal') ? 'virtual' : 'other';
+        current = false;
+      } else if (tag === 'h4') {
+        const label = (el.textContent || '').trim();
+        current = (section === 'jp' || section === 'en')
+          && /^メンバー/.test(label) && !/^元メンバー/.test(label);
+      } else if (tag === 'ul' && current) {
+        for (const li of el.children) {
+          if (li.tagName !== 'LI') continue;
+          const person = [...li.querySelectorAll('a[href]')].find(a => {
+            const href = a.getAttribute('href') || '';
+            return href.startsWith('/nijisanji/') && !href.includes('::');
+          });
+          if (!person) continue;
+          const name = (person.textContent || '').trim();
+          const key = researchRosterKey(name);
+          if (!key || members.has(key)) continue;
+          members.add(key); add(name, true);
+          // The member row sometimes gives an English/Korean/Japanese alias in
+          // its FIRST parentheses: e.g. ミン スゥーハ / Min Suha.
+          const alias = (li.textContent || '').match(/[（(]([^）)]+)[）)]/);
+          if (alias) for (const part of alias[1].split(/[\/／]/)) add(part.trim());
+        }
+      }
     }
-    return known;
+    // Catch a changed Wiki layout instead of treating every stranger as outside.
+    if (members.size < 180 || members.size > 260
+        || !names.has(researchRosterKey('小柳ロウ'))
+        || !names.has(researchRosterKey('Elira Pendora')))
+      throw new Error(`公式ライバー名簿の解析結果が不正（${members.size}名）`);
+    return { names:[...names], members:members.size };
+  }
+
+  async function ensureResearchRoster() {
+    if (researchRoster.ready && Date.now() - researchRoster.fetchedAt < RESEARCH_ROSTER_TTL)
+      return true;
+    if (researchRoster.promise) return researchRoster.promise;
+    researchRoster.loading = true;
+    researchRoster.error = '';
+    updateResearchCollaboratorGroupButtons();
+    researchRoster.promise = (async () => {
+      const cached = await gmGet(RESEARCH_ROSTER_CACHE_KEY, null).catch(() => null);
+      if (cached && Array.isArray(cached.names) && cached.names.length >= 180
+          && Number(cached.members) >= 180 && Number(cached.members) <= 260) {
+        researchRoster.names = new Set(cached.names);
+        researchRoster.members = Number(cached.members);
+        researchRoster.fetchedAt = Number(cached.fetchedAt || 0);
+        researchRoster.ready = true;
+      }
+      if (researchRoster.ready && Date.now() - researchRoster.fetchedAt < RESEARCH_ROSTER_TTL)
+        return true;
+      try {
+        // Only triggered by a user's first box/outsider filter selection.
+        const html = await wikiRequest(RESEARCH_ROSTER_URL);
+        const parsed = parseNijisanjiRosterHtml(html);
+        researchRoster.names = new Set(parsed.names);
+        researchRoster.members = parsed.members;
+        researchRoster.fetchedAt = Date.now();
+        researchRoster.ready = true;
+        await gmSet(RESEARCH_ROSTER_CACHE_KEY, { ...parsed, fetchedAt:researchRoster.fetchedAt })
+          .catch(err => console.debug('[NRH][roster save]', err?.message || err));
+      } catch (err) {
+        researchRoster.error = String(err?.message || err || 'Wiki名簿の取得に失敗しました');
+        console.debug('[NRH][roster load]', researchRoster.error);
+      }
+      return researchRoster.ready;
+    })().finally(() => {
+      researchRoster.loading = false;
+      researchRoster.promise = null;
+      updateResearchCollaboratorGroupButtons();
+      applyResearchFilters();
+    });
+    return researchRoster.promise;
   }
 
   function researchCollaboratorOrgGroups(entry) {
     const groups = new Set();
-    const known = researchKnownNijisanjiNames();
-    const mentions = Array.isArray(entry?.meta?.mentions) ? entry.meta.mentions : [];
+    // When the roster is unavailable, NEITHER group can be inferred safely.
+    if (!researchRoster.ready || !entry) return groups;
+    const names = new Set([
+      ...(entry.collaborators || []), ...(entry.wikiInfo?.collaborators || []),
+    ].map(researchRosterKey).filter(Boolean));
+    const mentions = Array.isArray(entry.meta?.mentions) ? entry.meta.mentions : [];
     for (const mention of mentions) {
       const channel = mention?.channel || mention || {};
-      const names = [mention?.name, mention?.english_name, channel.name, channel.english_name]
-        .map(normalizeCollaboratorName).filter(Boolean);
-      if (names.some(name => known.has(name))) { groups.add('nijisanji'); continue; }
-      const rawOrg = mention?.org ?? channel.org;
-      const org = typeof rawOrg === 'string' ? rawOrg.trim() : '';
-      if (/nijisanji|にじさんじ/i.test(org)) groups.add('nijisanji');
-      else if (org) groups.add('outside');
+      const candidates = [mention?.name, mention?.english_name, channel?.name, channel?.english_name]
+        .map(researchRosterKey).filter(Boolean);
+      // These aliases refer to ONE participant: do not count a romanized
+      // version of a known member as an extra outside collaborator.
+      if (!candidates.length) continue;
+      if (candidates.some(name => researchRoster.names.has(name))) groups.add('nijisanji');
+      else groups.add('outside');
+      // Remove aliases of the same mention when also included in Wiki names.
+      for (const candidate of candidates) names.delete(candidate);
     }
-    // Wiki-only collaborator names are recognized only if their OWN channel has
-    // a confirmed Nijisanji Wiki cache entry; other names remain unclassified.
-    for (const name of [...(entry?.collaborators || []), ...(entry?.wikiInfo?.collaborators || [])]) {
-      if (known.has(normalizeCollaboratorName(name))) groups.add('nijisanji');
-    }
-    for (const group of (entry?.collaboratorOrgGroups || [])) {
-      if (Object.prototype.hasOwnProperty.call(RESEARCH_COLLAB_GROUPS, group)) groups.add(group);
+    for (const name of names) {
+      groups.add(researchRoster.names.has(name) ? 'nijisanji' : 'outside');
     }
     return groups;
   }
 
   function researchGroupFilterPass(groups) {
+    // Never hide everything, or label members as outside, if roster fetch fails.
+    if (!researchRoster.ready) return true;
     if ([...research.collaboratorGroupExcluded].some(group => groups.has(group))) return false;
     return !research.collaboratorGroupIncluded.size ||
       [...research.collaboratorGroupIncluded].some(group => groups.has(group));
   }
 
   function updateResearchCollaboratorGroupButtons() {
+    const hint = $('#npf-r-collab-group-hint');
+    if (hint) {
+      hint.textContent = researchRoster.loading
+        ? 'にじさんじ非公式Wikiの現所属者名簿を確認中…（確認できるまで所属フィルターは保留）'
+        : researchRoster.ready
+          ? `にじさんじ非公式Wiki「公式ライバー」現所属 ${researchRoster.members}名の名簿で判定。名簿にないコラボ相手は箱外。${researchRoster.error ? '更新失敗のため前回名簿を使用中。' : ''}箱内・箱外の混在動画は両方に該当し、除外を優先。`
+          : researchRoster.error
+            ? `Wiki名簿を確認できません：${researchRoster.error}。誤判定防止のため所属フィルターは保留。もう一度ボタンを操作すると再試行します。`
+            : '初回の所属フィルター選択時に非公式Wikiの現所属者名簿を取得します。名簿にないコラボ相手は箱外。卒業者・個人勢・ストリーマーも箱外扱い。';
+    }
     $$('.npf-r-collab-group').forEach(btn => {
       const group = btn.dataset.collabGroup;
       const included = research.collaboratorGroupIncluded.has(group);
@@ -5881,6 +5988,8 @@
     }
     updateResearchCollaboratorFilterUi();
     applyResearchFilters();
+    if (research.collaboratorGroupIncluded.size || research.collaboratorGroupExcluded.size)
+      void ensureResearchRoster();
   }
 
   function paintResearchCollaboratorButton(btn, name, isCard = false) {
@@ -6069,11 +6178,13 @@
       const people = researchCollaboratorKeys(e);
       const personExcluded = [...research.collaboratorExcluded.keys()].some(key => people.has(key));
       const groups = researchCollaboratorOrgGroups(e);
-      const groupExcluded = [...research.collaboratorGroupExcluded].some(group => groups.has(group));
-      const personIncluded = (!research.collaboratorIncluded.size && !research.collaboratorGroupIncluded.size) ||
+      const rosterReady = researchRoster.ready;
+      const groupExcluded = rosterReady && [...research.collaboratorGroupExcluded].some(group => groups.has(group));
+      const groupIncluded = rosterReady && research.collaboratorGroupIncluded.size > 0;
+      const personIncluded = (!research.collaboratorIncluded.size && !groupIncluded) ||
         [...research.collaboratorIncluded.keys()].some(key => people.has(key)) ||
         (!!collaboratorKey && research.collaboratorIncluded.has(collaboratorKey) && historyMatchIds.has(e.id)) ||
-        [...research.collaboratorGroupIncluded].some(group => groups.has(group));
+        (groupIncluded && [...research.collaboratorGroupIncluded].some(group => groups.has(group)));
       const show = tagOk && includeOk && excludeOk && !personExcluded && !groupExcluded && personIncluded;
       // Some mobile Macaque/YouTube pages do not apply GM.addStyle rules.
 // Preserve YouTube's original inline display instead of blindly resetting it.
@@ -6512,7 +6623,8 @@ e.el.classList.toggle('npf-r-hidden', !show);
     groupLabel.textContent = 'コラボ相手の所属で絞り込み';
     const groupHint = document.createElement('div');
     groupHint.className = 'npf-r-filter-hint';
-    groupHint.textContent = 'タップ：紫 ✓ 絞り込み → 赤 − 除外 → 未選択。箱内・箱外の両方がいる動画は両方に該当、除外が優先。Holodex等で所属不明の相手は勝手に箱外扱いしません。';
+    groupHint.id = 'npf-r-collab-group-hint';
+    groupHint.textContent = '所属フィルターを選ぶとWikiの現所属者名簿を確認します。';
     const groupButtons = document.createElement('div');
     groupButtons.className = 'npf-r-collab-suggestions';
     for (const [group, label] of Object.entries(RESEARCH_COLLAB_GROUPS)) {
