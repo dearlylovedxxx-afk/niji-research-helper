@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.20
+// @version      1.0.21
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.20';
+  const VERSION = '1.0.21';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -1255,7 +1255,7 @@
       appearance:none; cursor:pointer; background:rgba(35,145,120,.10); border-color:rgba(35,145,120,.34); color:#258b74;
     }
     .npf-r-collab-person:hover { border-color:#287d69; background:rgba(35,145,120,.18); color:#1f7563; }
-    .npf-r-collab-person.active { border-color:#1f7f69; background:#258b74; color:#fff; box-shadow:0 0 0 2px rgba(37,139,116,.16); }
+    .npf-r-collab-person.active { border-color:#8172ea; background:#5147a6; color:#fff; box-shadow:0 0 0 2px rgba(81,71,166,.16); }
     .npf-r-active-collab {
       display:inline-flex; align-items:center; margin:2px 0 7px; border:1px solid #287d69; border-radius:999px;
       background:rgba(35,145,120,.16); color:#c8fff1; padding:6px 9px; font-size:10px; font-weight:800; cursor:pointer;
@@ -1272,7 +1272,9 @@
       overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
     }
     .npf-r-collab-quick:hover { border-color:#3ca98e; background:rgba(35,145,120,.16); color:#9fe3d1; }
-    .npf-r-collab-quick.active { border-color:#1f7f69; background:#258b74; color:#fff; }
+    .npf-r-collab-quick.active { border-color:#8172ea; background:#5147a6; color:#fff; }
+    .npf-r-collab-quick.excluded, .npf-r-collab-person.excluded { border-color:#e58c96; background:#7d303b; color:#fff; }
+    #npf-r-collab-selected[hidden] { display:none!important; }
     .npf-r-collab-history {
       display:none; margin:2px 0 10px; padding:9px; border:1px solid rgba(35,145,120,.30); border-radius:11px;
       background:rgba(35,145,120,.06);
@@ -3597,7 +3599,9 @@
     excludedTags: new Set(),
     includeText: '',
     excludeText: '',
-    collaboratorFilter: '',
+    collaboratorFilter: '', // Full-history focus; local card filtering uses the Sets below.
+    collaboratorIncluded: new Map(), // normalized person -> display name; multiple matches use OR
+    collaboratorExcluded: new Map(), // normalized person -> display name; exclusions always win
     collaboratorChannel: '',
     collabHistoryRows: [],
     collabHistoryYears: [],
@@ -4947,11 +4951,11 @@
         b.className = `npf-r-pill npf-r-collab-person${wikiPeople.length ? ' npf-r-wiki' : ''}`;
         b.textContent = `🤝 ${person}`;
         b.dataset.collaborator = person;
-        b.title = `${person} とのコラボだけを表示`;
+        b.title = `${person}：絞り込み → 除外 → 解除`;
         b.addEventListener('click', e => {
           e.preventDefault();
           e.stopPropagation();
-          setResearchCollaboratorFilter(person, entry);
+          cycleResearchCollaborator(person, entry);
         });
         bar.appendChild(b);
       }
@@ -5214,7 +5218,11 @@
     const tagOk = researchCategoryPassesFilters(row.categories);
     const includeOk = !includes.length || includes.every(w => hay.includes(w));
     const excludeOk = !excludes.length || !excludes.some(w => hay.includes(w));
-    return tagOk && includeOk && excludeOk;
+    const people = new Set((row.collaborators || []).map(normalizeCollaboratorName).filter(Boolean));
+    const excludedPerson = [...research.collaboratorExcluded.keys()].some(key => people.has(key));
+    // The history loader already selects the focused collaborator; some wiki rows
+    // list only the OTHER guests, so do not re-test inclusion here.
+    return tagOk && includeOk && excludeOk && !excludedPerson;
   }
 
   function renderResearchCollaboratorHistory() {
@@ -5780,16 +5788,45 @@
     return [...map.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'ja'));
   }
 
+  // Three-state collaborator selectors: off -> include (OR) -> exclude -> off.
+  // Exclusions are exact normalized names from collaborator metadata, never title text.
+  function researchCollaboratorKeys(entry) {
+    return new Set([...(entry.collaborators || []), ...(entry.wikiInfo?.collaborators || [])]
+      .map(normalizeCollaboratorName).filter(Boolean));
+  }
+
+  function paintResearchCollaboratorButton(btn, name, isCard = false) {
+    const key = normalizeCollaboratorName(name);
+    const included = research.collaboratorIncluded.has(key);
+    const excluded = research.collaboratorExcluded.has(key);
+    btn.classList.toggle('active', included);
+    btn.classList.toggle('excluded', excluded);
+    btn.textContent = `${excluded ? '−' : included ? '✓' : '🤝'} ${name}`;
+    btn.title = `${name}：${included ? '絞り込み中。次は除外' : excluded ? '除外中。次は解除' : 'タップで絞り込み'}（複数の絞り込みはOR、除外を優先）`;
+    btn.setAttribute('aria-pressed', included || excluded ? 'true' : 'false');
+    // iOS Macaque can fail to inject GM.addStyle rules.
+    if (isMobileYoutubeUi()) {
+      if (included || excluded) {
+        btn.style.setProperty('background', excluded ? '#803746' : '#5147a6', 'important');
+        btn.style.setProperty('color', '#fff', 'important');
+        btn.style.setProperty('border-color', excluded ? '#e58c96' : '#8172ea', 'important');
+      } else {
+        btn.style.removeProperty('background');
+        btn.style.removeProperty('color');
+        btn.style.removeProperty('border-color');
+      }
+    }
+  }
+
   function updateResearchCollaboratorSuggestions() {
     const input = $('#npf-r-collab-input');
     const datalist = $('#npf-r-collab-options');
     const quick = $('#npf-r-collab-suggestions');
-    if (!input || !datalist || !quick) return;
+    const selected = $('#npf-r-collab-selected');
+    if (!input || !datalist || !quick || !selected) return;
 
     const rows = collectResearchCollaboratorSuggestions();
     const signature = rows.map(x => `${normalizeCollaboratorName(x.name)}:${x.count}`).join('|');
-    const activeKey = normalizeCollaboratorName(research.collaboratorFilter || '');
-
     if (datalist.dataset.signature !== signature) {
       datalist.replaceChildren();
       for (const row of rows) {
@@ -5801,67 +5838,112 @@
       datalist.dataset.signature = signature;
     }
 
-    const quickSig = `${signature}::${activeKey}`;
+    const stateSig = `${[...research.collaboratorIncluded.keys()].join(',')}::${[...research.collaboratorExcluded.keys()].join(',')}`;
+    const quickSig = `${signature}::${stateSig}`;
     if (quick.dataset.signature !== quickSig) {
       quick.replaceChildren();
-      for (const row of rows.slice(0, 12)) {
+      const top = rows.slice(0, 12);
+      // Keep selected people visible even if they have fallen outside the top 12.
+      for (const [key, name] of [...research.collaboratorIncluded, ...research.collaboratorExcluded]) {
+        if (!top.some(row => normalizeCollaboratorName(row.name) === key)) top.push({name, count:0});
+      }
+      for (const row of top) {
         const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'npf-r-collab-quick';
-        b.textContent = `🤝 ${row.name}`;
-        b.title = `${row.name} とのコラボだけ表示（現在読み込み済み ${row.count}件で検出）`;
+        b.type = 'button'; b.className = 'npf-r-collab-quick';
         b.dataset.collaborator = row.name;
-        b.classList.toggle('active', !!activeKey && normalizeCollaboratorName(row.name) === activeKey);
-        b.addEventListener('click', () => setResearchCollaboratorFilter(row.name));
+        paintResearchCollaboratorButton(b, row.name);
+        b.addEventListener('click', () => cycleResearchCollaborator(row.name));
         quick.appendChild(b);
       }
       quick.dataset.signature = quickSig;
     }
 
+    selected.replaceChildren();
+    for (const [kind, names] of [['include', research.collaboratorIncluded], ['exclude', research.collaboratorExcluded]]) {
+      for (const [key, name] of names) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = `npf-r-collab-quick${kind === 'exclude' ? ' excluded' : ' active'}`;
+        b.textContent = `${kind === 'exclude' ? '−' : '✓'} ${name} ×解除`;
+        b.title = `${name} の${kind === 'exclude' ? '除外' : '絞り込み'}を解除`;
+        b.addEventListener('click', () => removeResearchCollaboratorSelection(key));
+        selected.appendChild(b);
+      }
+    }
+    selected.hidden = !selected.childElementCount;
     if (document.activeElement !== input) input.value = research.collaboratorFilter || '';
   }
 
   function applyResearchCollaboratorInput() {
     const input = $('#npf-r-collab-input');
-    if (!input) return;
-    const name = String(input.value || '').trim();
-    if (!name) {
-      if (research.collaboratorFilter) setResearchCollaboratorFilter(research.collaboratorFilter);
-      else toast('コラボ相手の名前を入力してください');
-      return;
+    const name = collaboratorDisplayName(input?.value || '');
+    const key = normalizeCollaboratorName(name);
+    if (!key) { toast('コラボ相手の名前を入力してください'); return; }
+    research.collaboratorExcluded.delete(key);
+    research.collaboratorIncluded.set(key, name);
+    focusResearchCollaborator(name);
+  }
+
+  function excludeResearchCollaboratorInput() {
+    const input = $('#npf-r-collab-input');
+    const name = collaboratorDisplayName(input?.value || '');
+    const key = normalizeCollaboratorName(name);
+    if (!key) { toast('除外するコラボ相手の名前を入力してください'); return; }
+    research.collaboratorIncluded.delete(key);
+    research.collaboratorExcluded.set(key, name);
+    if (normalizeCollaboratorName(research.collaboratorFilter) === key)
+      focusResearchCollaborator([...research.collaboratorIncluded.values()].at(-1) || '');
+    else { updateResearchCollaboratorFilterUi(); applyResearchFilters(); }
+    toast(`− ${name} のコラボを除外します`);
+  }
+
+  function removeResearchCollaboratorSelection(key) {
+    research.collaboratorIncluded.delete(key);
+    research.collaboratorExcluded.delete(key);
+    if (normalizeCollaboratorName(research.collaboratorFilter) === key)
+      focusResearchCollaborator([...research.collaboratorIncluded.values()].at(-1) || '');
+    else { updateResearchCollaboratorFilterUi(); applyResearchFilters(); }
+  }
+
+  function cycleResearchCollaborator(rawName, entry = null) {
+    const name = collaboratorDisplayName(rawName);
+    const key = normalizeCollaboratorName(name);
+    if (!key) return;
+    if (research.collaboratorIncluded.has(key)) {
+      research.collaboratorIncluded.delete(key);
+      research.collaboratorExcluded.set(key, name);
+      if (normalizeCollaboratorName(research.collaboratorFilter) === key)
+        focusResearchCollaborator([...research.collaboratorIncluded.values()].at(-1) || '');
+      else { updateResearchCollaboratorFilterUi(); applyResearchFilters(); }
+      toast(`− ${name} のコラボを除外します`);
+    } else if (research.collaboratorExcluded.has(key)) {
+      research.collaboratorExcluded.delete(key);
+      updateResearchCollaboratorFilterUi(); applyResearchFilters();
+      toast(`${name} の除外を解除しました`);
+    } else {
+      research.collaboratorIncluded.set(key, name);
+      focusResearchCollaborator(name, entry);
     }
-    // 入力欄からの適用は、同じ名前でも「解除」ではなく再検索したいので一旦解除状態を経由しない。
-    const same = normalizeCollaboratorName(name) === normalizeCollaboratorName(research.collaboratorFilter || '');
-    if (same) {
-      research.collaboratorFilter = '';
-      research.collaboratorChannel = '';
-    }
-    setResearchCollaboratorFilter(name);
   }
 
   function updateResearchCollaboratorFilterUi() {
     const activeName = String(research.collaboratorFilter || '').trim();
-    const activeKey = normalizeCollaboratorName(activeName);
     const activeBtn = $('#npf-r-collab-active');
     if (activeBtn) {
       activeBtn.hidden = !activeName;
-      activeBtn.textContent = activeName ? `🤝 コラボ相手：${activeName}  ×解除` : '';
-      activeBtn.title = activeName ? `${activeName} のコラボ絞り込みを解除` : '';
+      activeBtn.textContent = activeName ? `🤝 全期間履歴：${activeName}  ×解除` : '';
+      activeBtn.title = activeName ? `${activeName} の絞り込みを解除` : '';
     }
-    $$('.npf-r-collab-person').forEach(btn => {
-      btn.classList.toggle('active', !!activeKey && normalizeCollaboratorName(btn.dataset.collaborator || '') === activeKey);
-    });
+    $$('.npf-r-collab-person').forEach(btn =>
+      paintResearchCollaboratorButton(btn, btn.dataset.collaborator || '', true));
     updateResearchCollaboratorSuggestions();
   }
 
-  function setResearchCollaboratorFilter(name = '', entry = null) {
-    const next = String(name || '').trim();
-    const currentKey = normalizeCollaboratorName(research.collaboratorFilter || '');
-    const nextKey = normalizeCollaboratorName(next);
-    const turningOff = !!nextKey && nextKey === currentKey;
-    research.collaboratorFilter = turningOff ? '' : next;
-    research.collaboratorChannel = turningOff ? '' : primaryResearchChannel(entry);
-    if (turningOff || !research.collaboratorFilter) {
+  // Full-period Wiki/Holodex history is fetched for the last selected include.
+  // Already loaded YouTube cards are filtered using ALL includes (OR) and excludes.
+  function focusResearchCollaborator(name = '', entry = null) {
+    research.collaboratorFilter = String(name || '').trim();
+    research.collaboratorChannel = research.collaboratorFilter ? primaryResearchChannel(entry) : '';
+    if (!research.collaboratorFilter) {
       research.collabHistoryToken++;
       research.collabHistoryRows = [];
       research.collabHistoryYears = [];
@@ -5879,12 +5961,10 @@
     }
     updateResearchCollaboratorFilterUi();
     applyResearchFilters();
-    toast(research.collaboratorFilter
-      ? `🤝 ${research.collaboratorFilter} とのコラボを絞り込み、全期間履歴も検索します`
-      : 'コラボ相手フィルターを解除しました');
+    if (research.collaboratorFilter) toast(`🤝 ${research.collaboratorFilter} を含むコラボを表示。全期間履歴も検索します`);
   }
 
-  // Restore each card's own inline display when its filter is cleared.
+  // Preserve each YouTube card's original inline display when a filter is cleared.
   const researchCardOriginalDisplay = new WeakMap();
 
   function applyResearchFilters() {
@@ -5897,8 +5977,12 @@
       const tagOk = researchCategoryPassesFilters(e.categories);
       const includeOk = !includes.length || includes.every(w => hay.includes(w));
       const excludeOk = !excludes.length || !excludes.some(w => hay.includes(w));
-      const collaboratorOk = !collaboratorKey || historyMatchIds.has(e.id) || (e.collaborators || []).some(name => normalizeCollaboratorName(name) === collaboratorKey);
-      const show = tagOk && includeOk && excludeOk && collaboratorOk;
+      const people = researchCollaboratorKeys(e);
+      const personExcluded = [...research.collaboratorExcluded.keys()].some(key => people.has(key));
+      const personIncluded = !research.collaboratorIncluded.size ||
+        [...research.collaboratorIncluded.keys()].some(key => people.has(key)) ||
+        (!!collaboratorKey && research.collaboratorIncluded.has(collaboratorKey) && historyMatchIds.has(e.id));
+      const show = tagOk && includeOk && excludeOk && !personExcluded && personIncluded;
       // Some mobile Macaque/YouTube pages do not apply GM.addStyle rules.
 // Preserve YouTube's original inline display instead of blindly resetting it.
 if (!show) {
@@ -6012,10 +6096,12 @@ e.el.classList.toggle('npf-r-hidden', !show);
 
     if (!state.apiKey) addRow('API', 'Holodex APIキー未設定', '日時・配信時間等は取得できません', 'npf-r-status-bad');
 
-    if (research.collaboratorFilter || research.collabHistoryLoading || research.collabHistoryRows.length) {
-      const who = research.collaboratorFilter ? `相手：${research.collaboratorFilter}` : '';
-      const hist = research.collabHistoryLoading ? '全期間検索中…' : `全期間 ${research.collabHistoryRows.length}件`;
-      addRow('絞り込み', [who, hist].filter(Boolean).join(' ・ '), '', 'npf-r-status-filter npf-r-status-info');
+    if (research.collaboratorIncluded.size || research.collaboratorExcluded.size || research.collabHistoryLoading) {
+      const included = research.collaboratorIncluded.size ? `コラボ対象 ${research.collaboratorIncluded.size}人（OR）` : '';
+      const excluded = research.collaboratorExcluded.size ? `除外 ${research.collaboratorExcluded.size}人` : '';
+      const hist = research.collaboratorFilter ?
+        `${research.collaboratorFilter} の全期間 ${research.collabHistoryLoading ? '検索中…' : research.collabHistoryRows.length + '件'}` : '';
+      addRow('絞り込み', [included, excluded, hist].filter(Boolean).join(' ・ '), '', 'npf-r-status-filter npf-r-status-info');
     }
   }
 
@@ -6317,7 +6403,17 @@ e.el.classList.toggle('npf-r-hidden', !show);
     collabSuggestions.id = 'npf-r-collab-suggestions';
     collabSuggestions.className = 'npf-r-collab-suggestions';
     collabRow.append(collabInput, collabApply);
-    collabControl.append(collabLabel, collabRow, collabOptions, collabSuggestions);
+    const collabExclude = document.createElement('button');
+    collabExclude.type = 'button'; collabExclude.className = 'npf-r-btn';
+    collabExclude.textContent = '− 入力した相手を除外';
+    collabExclude.style.cssText = 'margin-top:6px;';
+    collabExclude.addEventListener('click', excludeResearchCollaboratorInput);
+    const collabHint = document.createElement('div'); collabHint.className = 'npf-r-filter-hint';
+    collabHint.textContent = '相手をタップ：紫 ✓ 絞り込み → 赤 − 除外 → 未選択。複数の絞り込みはOR、除外を優先。全期間履歴は最後に選んだ相手を検索します。';
+    const collabSelected = document.createElement('div');
+    collabSelected.id = 'npf-r-collab-selected'; collabSelected.className = 'npf-r-collab-suggestions';
+    collabSelected.hidden = true;
+    collabControl.append(collabLabel, collabHint, collabRow, collabExclude, collabOptions, collabSuggestions, collabSelected);
     body.appendChild(collabControl);
 
     const activeCollab = document.createElement('button');
@@ -6325,7 +6421,8 @@ e.el.classList.toggle('npf-r-hidden', !show);
     activeCollab.type = 'button';
     activeCollab.className = 'npf-r-active-collab';
     activeCollab.hidden = true;
-    activeCollab.addEventListener('click', () => setResearchCollaboratorFilter(research.collaboratorFilter));
+    activeCollab.addEventListener('click', () =>
+      removeResearchCollaboratorSelection(normalizeCollaboratorName(research.collaboratorFilter)));
     body.appendChild(activeCollab);
     const collabHistory = document.createElement('div');
     collabHistory.id = 'npf-r-collab-history';
@@ -6365,6 +6462,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
     const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'npf-r-btn'; reset.textContent = 'リセット';
     reset.addEventListener('click', () => {
       research.activeTags.clear(); research.excludedTags.clear(); research.includeText = ''; research.excludeText = ''; research.collaboratorFilter = '';
+      research.collaboratorIncluded.clear(); research.collaboratorExcluded.clear();
       research.collaboratorChannel = ''; research.collabHistoryToken++; research.collabHistoryRows = []; research.collabHistoryYears = []; research.collabHistoryYearStats = {}; research.collabHistoryHolodexCount = 0; research.collabHistoryWikiCount = 0; research.collabHistoryResolveNote = ''; research.collabHistoryLoading = false;
       include.value = ''; exclude.value = '';
       const collabInputNow = $('#npf-r-collab-input'); if (collabInputNow) collabInputNow.value = '';
