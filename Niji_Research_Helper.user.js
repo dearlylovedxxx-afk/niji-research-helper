@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.28
+// @version      1.0.29
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.28';
+  const VERSION = '1.0.29';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -6308,6 +6308,31 @@ e.el.classList.toggle('npf-r-hidden', !show);
     toast(ok ? `📋 表示中 ${rows.length}件をCSV形式でコピーしました` : 'CSVコピーに失敗しました');
   }
 
+  function updateResearchCooldownDisplay() {
+    // iOS timers may be throttled in the background: derive the value from the
+    // absolute deadline whenever the browser runs again, never decrement a counter.
+    if (research.holodexPaused) {
+      const label = $('#npf-r-status [data-npf-cooldown="Holodex"] .npf-r-status-detail');
+      if (label) {
+        const sec = Math.ceil(holodexCooldownRemainingMs() / 1000);
+        label.textContent = sec > 0
+          ? `429で自動取得停止・あと約${sec}秒（手動再試行）`
+          : '429で自動取得停止・再解析・再取得で手動再試行';
+      }
+    }
+    if (wikiRequestsPaused) {
+      const label = $('#npf-r-status [data-npf-cooldown="Wiki"] .npf-r-status-detail');
+      if (label) {
+        const sec = Math.ceil(wikiCooldownRemainingMs() / 1000);
+        // Keep the other Wiki status counters unchanged.
+        label.textContent = label.textContent.replace(
+          /429で自動通信停止・(?:あと約\d+秒（手動再試行）|失敗分だけ手動再試行)/,
+          sec > 0 ? `429で自動通信停止・あと約${sec}秒（手動再試行）`
+            : '429で自動通信停止・失敗分だけ手動再試行');
+      }
+    }
+  }
+
   function updateResearchStatus() {
     const el = $('#npf-r-status');
     if (!el) return;
@@ -6333,6 +6358,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
     const addRow = (label, main, detail = '', cls = '', title = '') => {
       const row = document.createElement('div');
       row.className = `npf-r-status-row${cls ? ' ' + cls : ''}`;
+      if (label === 'Holodex' || label === 'Wiki') row.dataset.npfCooldown = label;
       if (title) row.title = title;
       const l = document.createElement('span'); l.className = 'npf-r-status-label'; l.textContent = label;
       const m = document.createElement('span'); m.className = 'npf-r-status-main'; m.textContent = main;
@@ -6343,6 +6369,18 @@ e.el.classList.toggle('npf-r-hidden', !show);
 
     addRow('収集', research.collectionActive ? '▶ 取得中' : '⏸ 手動開始待ち', research.collectionActive ? 'この一覧で追加表示された動画も取得' : '取得開始を押すまで外部へ自動取得しません', 'npf-r-status-info');
     addRow('YouTube', `表示 ${visible}/${total}本`, visible === total ? '読み込み済みカードはすべて表示対象' : `フィルターで ${total - visible}本非表示`, visible === total ? 'npf-r-status-ok' : 'npf-r-status-info');
+    if (research.activeTags.size || research.excludedTags.size) {
+      const includedTags = [...research.activeTags];
+      const excludedTags = [...research.excludedTags];
+      const tagOnly = all.filter(e => researchCategoryPassesFilters(e.categories)).length;
+      const additional = [];
+      if (splitResearchWords(research.includeText).length || splitResearchWords(research.excludeText).length) additional.push('キーワード');
+      if (research.collaboratorIncluded.size || research.collaboratorExcluded.size) additional.push('個別コラボ相手');
+      if (research.collaboratorGroupIncluded.size || research.collaboratorGroupExcluded.size) additional.push('所属');
+      addRow('分類', [includedTags.length ? `✓ ${includedTags.join('・')}` : '', excludedTags.length ? `− ${excludedTags.join('・')}` : ''].filter(Boolean).join(' / '),
+        `分類だけなら ${tagOnly}/${total}本・実際の表示 ${visible}本${additional.length ? `（ほかに${additional.join('・')}の条件も適用中）` : ''}${!tagOnly ? '。動画に分類が付いているか確認してください' : ''}`, 'npf-r-status-info');
+    }
+
 
     let holodexDetail = '';
     if (research.holodexPaused) holodexDetail = cooldownSec > 0
@@ -6893,6 +6931,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
         }
         syncYoutubePanelVisibility();
         updateYoutubePanel();
+        if (research.holodexPaused || wikiRequestsPaused) updateResearchCooldownDisplay();
       }, 1000);
       ytBootBadge?.remove();
     } catch (err) {
