@@ -1,69 +1,106 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.5.2
-// @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
-// @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
-// @description  pixiv検索をページ横断してブックマーク数順に表示。最低ブクマ数・中断再開・保存・小説対応。
+// @version      0.5.3
+// @description  ブックマーク順の検索結果を、スマホでも見える独立した一覧に表示。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
+// @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
+// @require      https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/9eb97e51cedba0d081db3cc7331ecc8c01ea6685/Pixiv_Bookmark_Sort.user.js
 // ==/UserScript==
 (() => {
-'use strict';
-if (window.__pixivBookmarkCrossPageV05) return;
-window.__pixivBookmarkCrossPageV05 = true;
-const DB='pixiv-bookmark-sort-cross-page-v02', PREF='pixiv-bookmark-sort-minimum-v03', MAX=1000, WAIT=2500;
-const fmt=n=>Number(n).toLocaleString('ja-JP');
-let dbPromise, context, searchKey='', running=null, lastRequest=0, timer, seq=0, limit=100, failedUrl='';
-const number=v=>/^\d+$/.test(String(v).trim()) ? Math.min(1e9,Math.floor(Number(v))) : 0;
-let minimum=(()=>{try{return number(localStorage.getItem(PREF)||'0')}catch{return 0}})();
-function current(){
- const u=new URL(location.href), m=u.pathname.match(/^\/tags\/([^/]+)(?:\/(artworks|illustrations|manga|novels))?(?:\/|$)/);
- let word,kind,mode;
- if(m){try{word=decodeURIComponent(m[1])}catch{return null} kind=m[2]||'artworks'; mode=u.searchParams.get('s_mode')||'s_tag_full'}
- else if(u.pathname==='/novel/search.php'){word=u.searchParams.get('word')||u.searchParams.get('q');kind='novels';mode=u.searchParams.get('s_mode')||'s_tag'}
- else if(['/search','/search.php'].includes(u.pathname)){word=u.searchParams.get('word')||u.searchParams.get('q'); const t=u.searchParams.get('type');kind=['novel','novels'].includes(t)?'novels':t==='manga'?'manga':['illust','illustrations'].includes(t)?'illustrations':'artworks';mode=u.searchParams.get('s_mode')||'s_tag'}
- else return null;
- if(!word)return null;
- const p=new URLSearchParams(), art=kind!=='novels';
- for(const key of ['mode','scd','ecd','ai_type','work_lang','lang',...(art?['wlt','wgt','hlt','hgt','ratio','tool']:['tlt','tgt','wlt','wgt','original_only','genre'])])
-  for(const v of u.searchParams.getAll(key))p.append(key,v);
- // pixivの検索画面とAJAX検索APIの検索モード表記を合わせる。
- mode=mode==='tag_tc'?(art?'s_tag_tc':'s_tag'):mode==='tc'?'s_tc':mode;
- p.set('word',word);p.set('s_mode',mode);p.set('mode',p.get('mode')||'all');
- if(art){p.set('csw','0');if(kind==='artworks')p.set('type','all');else if(kind==='manga')p.set('type','manga');else if(kind==='illustrations'){const t=u.searchParams.get('type');if(['illust','ugoira','illust_and_ugoira'].includes(t))p.set('type',t)}}
- else{const gs=u.searchParams.get('gs');if(['0','1'].includes(gs))p.set('gs',gs)}
- p.sort();return {word,kind,params:p,key:JSON.stringify([kind,word,[...p.entries()]])};
-}
-function db(){if(!dbPromise)dbPromise=new Promise((ok,no)=>{const r=indexedDB.open(DB,1);r.onupgradeneeded=()=>{const d=r.result,w=d.createObjectStore('works',{keyPath:'key'});w.createIndex('pending',['searchKey','status']);w.createIndex('rank',['searchKey','count']);d.createObjectStore('meta',{keyPath:'key'})};r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)});return dbPromise}
-function req(r){return new Promise((ok,no)=>{r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
-function done(t){return new Promise((ok,no)=>{t.oncomplete=ok;t.onerror=()=>no(t.error);t.onabort=()=>no(t.error)})}
-const fresh=k=>({key:k,nextPage:1,total:null,discovered:0,processed:0,skipped:0,pageSize:null,searchDone:false,note:''});
-async function meta(k){const d=await db(),t=d.transaction('meta','readonly');return await req(t.objectStore('meta').get(k))||fresh(k)}
-async function putMeta(m){const d=await db(),t=d.transaction('meta','readwrite'),wait=done(t);t.objectStore('meta').put(m);await wait}
-async function pending(k){const d=await db();return req(d.transaction('works').objectStore('works').index('pending').get([k,0]))}
-async function clear(k){const d=await db(),t=d.transaction(['works','meta'],'readwrite'),wait=done(t),s=t.objectStore('works');s.index('pending').openCursor(IDBKeyRange.bound([k,0],[k,2])).onsuccess=e=>{const c=e.target.result;if(c){c.delete();c.continue()}};t.objectStore('meta').delete(k);await wait}
-async function savePage(k,m,works,size){const d=await db(),t=d.transaction(['works','meta'],'readwrite'),wait=done(t),s=t.objectStore('works'),unique=new Map(works.map(w=>[String(w.id),w]));let left=unique.size,added=0;
- const finish=()=>{m.discovered+=added;m.nextPage++;if(!m.pageSize&&size)m.pageSize=size;t.objectStore('meta').put(m)};
- if(!left)finish();for(const [id,w] of unique){s.get(k+':'+id).onsuccess=e=>{if(!e.target.result){added++;const c=Number(w.bookmarkCount),has=w.bookmarkCount!=null&&Number.isFinite(c)&&c>=0;s.put({key:k+':'+id,searchKey:k,id,status:has?1:0,count:has?c:-1,title:w.title||w.illustTitle||'',userName:w.userName||'',thumb:w.url||w.coverUrl||'',date:w.createDate||''});if(has)m.processed++}if(!--left)finish()}}await wait}
-async function saveDetail(m,row,body,skip){const d=await db(),t=d.transaction(['works','meta'],'readwrite'),wait=done(t);t.objectStore('works').put({...row,status:skip?2:1,count:skip?-1:Number(body.bookmarkCount),title:body.title||row.title,userName:body.userName||row.userName,thumb:row.thumb||body.coverUrl||body.url||body.urls?.thumb||body.urls?.small||''});if(skip)m.skipped++;else m.processed++;t.objectStore('meta').put(m);await wait}
-async function ranked(k,min,max){const d=await db(),t=d.transaction('works'),i=t.objectStore('works').index('rank'),range=IDBKeyRange.bound([k,min],[k,Number.MAX_SAFE_INTEGER]);return Promise.all([req(i.count(range)),new Promise((ok,no)=>{const out=[],r=i.openCursor(range,'prev');r.onsuccess=()=>{if(!r.result||out.length>=max)return ok(out);out.push(r.result.value);r.result.continue()};r.onerror=()=>no(r.error)})])}
-function abort(signal){if(signal.aborted)throw new DOMException('中断','AbortError')}
-async function json(url,signal){const remain=Math.max(0,WAIT-(Date.now()-lastRequest));if(remain)await new Promise((ok,no)=>{const t=setTimeout(()=>{signal.removeEventListener('abort',cancel);ok()},remain);function cancel(){clearTimeout(t);no(new DOMException('中断','AbortError'))}signal.addEventListener('abort',cancel,{once:true})});abort(signal);lastRequest=Date.now();const r=await fetch(url,{credentials:'same-origin',signal,headers:{Accept:'application/json'}});
- if(r.status===404){const e=new Error('404');e.notFound=true;throw e}if(r.status===429)throw new Error('429：pixivのアクセス制限です。時間を置いてから再開してください。自動再試行はしません。');if(!r.ok){const e=new Error('通信エラー HTTP '+r.status);e.requestUrl=url;e.httpStatus=r.status;throw e}const data=await r.json();if(!data||data.error)throw new Error(data?.message||'pixiv APIエラー');return data.body}
-async function page(ctx,n,signal){const u=new URL('/ajax/search/'+ctx.kind+'/'+encodeURIComponent(ctx.word),location.origin);u.search=ctx.params.toString();u.searchParams.set('order','date_d');u.searchParams.set('p',String(n));const b=await json(u.href,signal),g=ctx.kind==='novels'?b?.novel:(b?.illustManga||b?.illust||b?.manga);if(!Array.isArray(g?.data))throw new Error('検索結果の形式が変わった可能性があります');return {total:Number(g.total),last:Number(g.lastPage),data:g.data,works:g.data.filter(w=>w&&/^\d+$/.test(String(w.id))&&!w.isAdContainer)}}
-async function detail(id,kind,signal){const b=await json('/ajax/'+(kind==='novels'?'novel':'illust')+'/'+encodeURIComponent(id),signal);if(!Number.isFinite(Number(b?.bookmarkCount)))throw new Error('ブックマーク数が取得できません');return b}
-const host=document.createElement('div');host.id='pixiv-bookmark-sort-cross-page-v05';const root=host.attachShadow({mode:'open'});root.innerHTML=`<style>:host{all:initial;font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;color-scheme:light}*{box-sizing:border-box}button,select,input{font:inherit;border:1px solid #d5d9e2;background:#fff;color:#263040;padding:9px;border-radius:8px}button,select{cursor:pointer}button:disabled{opacity:.5}.launch{position:fixed;right:12px;bottom:max(50px,env(safe-area-inset-bottom));z-index:2147483645;background:#eb3e63;color:white;border:0;border-radius:30px;font-weight:700;padding:13px 16px;box-shadow:0 4px 18px #0004}.veil{display:none;position:fixed;z-index:2147483646;inset:0;background:#111a}.veil.open{display:flex}.panel{margin:auto;width:min(1100px,100%);height:min(94dvh,100%);display:flex;flex-direction:column;overflow:hidden;background:#f5f6fb;color:#263040;border-radius:16px}.head{flex:none;padding:12px;background:white;border-bottom:1px solid #ddd}.heading,.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.heading{justify-content:space-between}.heading h2{font-size:17px;margin:0}.controls{margin-top:10px}.primary{background:#eb3e63;color:white}.minimum{width:105px}.status{white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:10px}.counted{font-size:12px;color:#b4294e;margin-top:8px}.note{font-size:11px;line-height:1.5;color:#586277;margin:8px 0 0}.results{flex:1;overflow:auto;min-height:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));align-content:start;gap:10px;padding:12px}.card{display:flex;flex-direction:column;text-decoration:none;color:#263040;background:white;border-radius:9px;overflow:hidden;min-width:0}.card img{width:100%;aspect-ratio:1/1;object-fit:cover;background:#e6e9ef}.card.novel img{aspect-ratio:3/4;object-fit:contain}.info{padding:8px}.num{color:#e33159;font-weight:700}.title{font-size:12px;overflow-wrap:anywhere}.author{font-size:11px;color:#647087}@media(max-width:600px){.panel{height:100dvh;border-radius:0}.results{grid-template-columns:repeat(2,minmax(0,1fr))}}</style><button class="launch">♥ 全体ブクマ順</button><div class="veil" role="dialog" aria-modal="true"><section class="panel"><div class="head"><div class="heading"><h2>♥ 検索結果をブックマーク数順に</h2><button class="close" aria-label="閉じる">×</button></div><div class="controls"><button class="start primary">全件の調査を開始／再開</button><button class="stop" disabled>一時停止</button><button class="reset">保存結果を消して再調査</button><select class="limit" aria-label="表示数"><option value="100">上位100件</option><option value="300">上位300件</option><option value="1000">上位1000件</option></select><label>最低ブクマ数 <input class="minimum" type="number" inputmode="numeric" min="0" max="1000000000" step="1">件以上</label><select class="preset" aria-label="最低ブクマ数の候補"><option value="custom">件数を選ぶ</option><option value="0">指定なし</option><option value="100">100件以上</option><option value="500">500件以上</option><option value="1000">1000件以上</option><option value="5000">5000件以上</option><option value="10000">10000件以上</option></select></div><div class="status" aria-live="polite"></div><button class="debug" hidden>エラーの診断用URLを表示</button><div class="counted" aria-live="polite"></div><p class="note">検索結果の各ページから作品を調べ、確認済み作品を人気順に表示します。途中で止めても結果は保存され、全件調査が終わるまでは暫定順位です。最低ブクマ数は表示だけを絞り、取得件数を減らすものではありません。作品数やpixivの制限により全件取得できない場合があります。アクセス制限の迂回・自動再試行はしません。</p></div><div class="results"></div></section></div>`;document.body.append(host);
-const $=s=>root.querySelector(s),launch=$('.launch'),veil=$('.veil'),startBtn=$('.start'),stopBtn=$('.stop'),status=$('.status'),items=$('.results'),minInput=$('.minimum'),preset=$('.preset'),counted=$('.counted'),debug=$('.debug');minInput.value=String(minimum);preset.value=[0,100,500,1000,5000,10000].includes(minimum)?String(minimum):'custom';
-const message=s=>{status.textContent=s},buttons=on=>{startBtn.disabled=on;stopBtn.disabled=!on},stop=()=>running?.abort();
-function stats(m,extra=''){return `${context?.kind==='novels'?'小説':'イラスト・漫画'}：検索結果 約${Number.isFinite(m.total)?fmt(m.total):'不明'}作品｜発見 ${fmt(m.discovered)}件｜確認 ${fmt(m.processed)}件｜閲覧不可 ${fmt(m.skipped)}件\n${m.searchDone?'検索ページの取得終了':'次のページ：'+m.nextPage}${extra?'｜'+extra:''}${m.note?'\n'+m.note:''}`}
-async function render(k){if(!k||k!==searchKey||!veil.classList.contains('open'))return;const id=++seq,[count,rows]=await ranked(k,minimum,limit);if(k!==searchKey||id!==seq||!veil.classList.contains('open'))return;items.replaceChildren();counted.textContent=`確認済みで ♥ ${fmt(minimum)}件以上：${fmt(count)}作品（表示 ${fmt(rows.length)}作品）`;for(const w of rows){const novel=context?.kind==='novels',a=document.createElement('a');a.className='card'+(novel?' novel':'');a.href=(novel?'/novel/show.php?id=':'/artworks/')+w.id;a.target='_blank';a.rel='noopener noreferrer';const image=document.createElement('img');image.loading='lazy';image.alt=w.title||'表紙';if(/^https:\/\/(i|s)\.pximg\.net\//.test(w.thumb||''))image.src=w.thumb;const info=document.createElement('div');info.className='info';const n=document.createElement('div');n.className='num';n.textContent='♥ '+fmt(w.count);const title=document.createElement('div');title.className='title';title.textContent=w.title||'無題';const author=document.createElement('div');author.className='author';author.textContent=w.userName||'';info.append(n,title,author);a.append(image,info);items.append(a)}if(!rows.length){const p=document.createElement('p');p.textContent='条件に一致する確認済み作品はまだありません。調査を進めるか最低件数を下げてください。';items.append(p)}}
-function schedule(k,instant=false){clearTimeout(timer);timer=setTimeout(()=>render(k).catch(e=>message('表示エラー：'+e.message)),instant?0:600)}
-async function refresh(){const c=current();launch.style.display=c?'':'none';if(!c){stop();veil.classList.remove('open');return}if(c.key!==searchKey){stop();searchKey=c.key;context=c;failedUrl='';debug.hidden=true;items.replaceChildren();counted.textContent=''}if(!veil.classList.contains('open'))return;try{const m=await meta(c.key);if(searchKey===c.key){message('検索条件：'+c.word+'\n'+stats(m,running?'調査中':'開始／再開できます'));schedule(c.key,true)}}catch(e){message('保存領域を開けません：'+e.message)}}
-async function scan(c,ctrl){const m=await meta(c.key);while(true){abort(ctrl.signal);if(c.key!==searchKey)throw new DOMException('検索条件変更','AbortError');const w=await pending(c.key);if(w){message(stats(m,'ブクマ数を確認中'));try{await saveDetail(m,w,await detail(w.id,c.kind,ctrl.signal),false)}catch(e){if(e.notFound)await saveDetail(m,w,{},true);else throw e}if(m.processed%5===0)schedule(c.key);continue}if(m.searchDone){message(stats(m,'取得可能な検索結果の調査終了'));schedule(c.key,true);return}if(m.nextPage>MAX){m.note='安全上1000ページで停止。検索全件を取得したわけではありません。';await putMeta(m);message(stats(m));return}message(stats(m,'検索ページ '+m.nextPage+' を取得中'));const p=await page(c,m.nextPage,ctrl.signal);if(Number.isFinite(p.total))m.total=p.total;if(Number.isInteger(p.last)&&p.last>0)m.lastPage=p.last;if(!p.data.length){m.searchDone=true;await putMeta(m);continue}const n=m.nextPage;await savePage(c.key,m,p.works,p.data.length);if(Number.isFinite(m.total)&&m.total>=0&&m.pageSize&&n*m.pageSize>=m.total){m.searchDone=true;await putMeta(m)}else if(m.lastPage&&n>=m.lastPage){m.searchDone=true;m.note='pixivが返した最終ページまで取得。全作品を取得できたとは限りません。';await putMeta(m)}schedule(c.key)}}
-function start(){if(running||!context)return;const c=context,ctrl=new AbortController();running=ctrl;failedUrl='';debug.hidden=true;buttons(true);scan(c,ctrl).catch(e=>{if(e.name==='AbortError')message('一時停止しました。保存済みの結果から再開できます。');else{failedUrl=e.requestUrl||'';debug.hidden=!failedUrl;message('調査を停止しました：'+e.message+'\n保存済みの結果は残っています。')}}).finally(()=>{if(running===ctrl){running=null;buttons(false)}schedule(c.key,true)})}
-launch.addEventListener('click',()=>{veil.classList.add('open');refresh()});$('.close').addEventListener('click',()=>{stop();veil.classList.remove('open')});veil.addEventListener('click',e=>{if(e.target===veil){stop();veil.classList.remove('open')}});startBtn.addEventListener('click',start);stopBtn.addEventListener('click',stop);debug.addEventListener('click',()=>{if(failedUrl)prompt('失敗したpixivのURLです。検索語を含むため共有前に確認してください。',failedUrl)});$('.reset').addEventListener('click',async()=>{if(running||!searchKey||!confirm('この検索条件の保存結果を削除して最初から調べ直しますか？'))return;await clear(searchKey);await refresh()});$('.limit').addEventListener('change',e=>{limit=Number(e.target.value);schedule(searchKey,true)});
-function changeMin(v){minimum=number(v);minInput.value=String(minimum);preset.value=[0,100,500,1000,5000,10000].includes(minimum)?String(minimum):'custom';try{localStorage.setItem(PREF,String(minimum))}catch{}schedule(searchKey,true)}
-minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEventListener('keydown',e=>{if(e.key==='Enter'){changeMin(minInput.value);minInput.blur()}});preset.addEventListener('change',()=>{if(preset.value!=='custom')changeMin(preset.value);else minInput.focus()});setInterval(()=>{const c=current();if((!c&&searchKey)||(c&&c.key!==searchKey))refresh()},1200);refresh();
+  'use strict';
+  // v0.5.2 を同じリポジトリの固定コミットから読み込む。DB・調査結果はそのまま。
+  const oldHostId = 'pixiv-bookmark-sort-cross-page-v05';
+  let attached = false;
+  function attachViewer() {
+    if (attached) return true;
+    const host = document.getElementById(oldHostId), root = host && host.shadowRoot;
+    const source = root && root.querySelector('.results');
+    const counted = root && root.querySelector('.counted');
+    if (!source || !counted) return false;
+    attached = true;
+    const css = document.createElement('style');
+    css.textContent = `
+      .pbs-view-button { display:block!important; width:100%!important; padding:13px!important;
+        margin:10px 0 0!important; border:0!important; border-radius:9px!important;
+        background:#1976d2!important; color:#fff!important; font-size:16px!important;
+        font-weight:700!important; cursor:pointer!important; }
+      .pbs-overlay { display:none!important; position:fixed!important; inset:0!important;
+        width:100vw!important; height:100vh!important; height:100dvh!important;
+        background:#f5f6fb!important; z-index:2147483647!important;
+        overflow-y:scroll!important; -webkit-overflow-scrolling:touch; }
+      .pbs-overlay.pbs-open { display:block!important; }
+      .pbs-header { position:sticky; top:0; z-index:1; background:white;
+        border-bottom:1px solid #ddd; padding:12px; color:#263040; }
+      .pbs-toolbar { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+      .pbs-toolbar strong { font-size:17px; }
+      .pbs-back { color:#263040!important; font-size:14px!important; }
+      .pbs-summary { font-size:12px; color:#586277; margin-top:7px; line-height:1.5; }
+      .pbs-list { display:block!important; padding:10px 10px 70px!important; }
+      .pbs-row { display:flex!important; align-items:flex-start!important; gap:12px!important;
+        margin:0 0 10px!important; padding:10px!important; min-height:65px!important;
+        background:#fff!important; border:1px solid #e2e6ed!important;
+        border-radius:10px!important; text-decoration:none!important; color:#263040!important; }
+      .pbs-row img { display:block!important; flex:none!important; width:76px!important;
+        height:100px!important; max-width:76px!important; object-fit:contain!important;
+        background:#eef0f4!important; }
+      .pbs-row .info { display:block!important; min-width:0!important; flex:1!important;
+        padding:0!important; font-size:13px!important; overflow-wrap:anywhere!important; }
+      .pbs-row .num,.pbs-row .count { color:#c52650!important; font-size:16px!important;
+        font-weight:800!important; margin-bottom:5px!important; }
+      .pbs-row .title,.pbs-row .name { font-size:13px!important; font-weight:600!important; }
+      .pbs-row .author { font-size:12px!important; color:#667286!important; margin-top:5px!important; }
+    `;
+    root.appendChild(css);
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'pbs-view-button';
+    button.textContent = '📚 ブクマ順の結果を見る';
+    counted.after(button);
+    const overlay = document.createElement('section');
+    overlay.className = 'pbs-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.innerHTML = `<div class='pbs-header'>
+      <div class='pbs-toolbar'><strong>♥ ブックマーク数順</strong>
+      <button type='button' class='pbs-back'>← 調査画面へ戻る</button></div>
+      <div class='pbs-summary'></div></div><div class='pbs-list'></div>`;
+    root.appendChild(overlay);
+    const list = overlay.querySelector('.pbs-list');
+    function showResults() {
+      const cards = Array.from(source.querySelectorAll('a.card'));
+      const fragment = document.createDocumentFragment();
+      for (const card of cards) {
+        const copy = card.cloneNode(true);
+        copy.className = 'pbs-row';
+        fragment.appendChild(copy);
+      }
+      if (!cards.length) {
+        const p = document.createElement('p');
+        p.textContent = 'まだ表示できる作品がありません。調査結果が表示されるまで少し待つか、最低ブクマ数を下げてください。';
+        p.style.cssText = 'padding:15px;color:#586277;font-size:13px;';
+        fragment.appendChild(p);
+      }
+      list.replaceChildren(fragment);
+      overlay.querySelector('.pbs-summary').textContent =
+        counted.textContent + ' ／ 一覧を表示中：' + cards.length + '作品';
+    }
+    button.addEventListener('click', () => {
+      showResults(); overlay.classList.add('pbs-open'); overlay.scrollTop = 0;
+    });
+    overlay.querySelector('.pbs-back').addEventListener('click', () => overlay.classList.remove('pbs-open'));
+    // 取得が続く場合にも、表示中の一覧を自動で更新する。
+    new MutationObserver(() => {
+      if (overlay.classList.contains('pbs-open')) showResults();
+    }).observe(source, { childList: true });
+    const oldClose = root.querySelector('.close');
+    if (oldClose) oldClose.addEventListener('click', () => overlay.classList.remove('pbs-open'));
+    return true;
+  }
+  if (!attachViewer()) {
+    let count = 0;
+    const t = setInterval(() => { if (attachViewer() || ++count > 120) clearInterval(t); }, 250);
+  }
 })();
