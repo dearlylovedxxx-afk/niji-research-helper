@@ -1,0 +1,46 @@
+name: Verify and publish mobile cooldown/filter status (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-mobile-status-apply-once.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch and validate syntax
+        run: |
+          python3 .github/scripts/nrh_mobile_status_patch_once.py
+          node --check Niji_Research_Helper.user.js
+      - name: Check cooldown and category filter invariants
+        run: |
+          node - <<'JS'
+          const fs = require('node:fs'), assert = require('node:assert/strict');
+          const s = fs.readFileSync('Niji_Research_Helper.user.js', 'utf8');
+          assert(s.includes("const VERSION = '1.0.29';"));
+          assert(s.includes('function updateResearchCooldownDisplay()'));
+          assert(s.includes('if (research.holodexPaused || wikiRequestsPaused) updateResearchCooldownDisplay();'));
+          assert(s.includes('分類だけなら ${tagOnly}/${total}本'));
+          assert(s.includes('if (research.excludedTags.size && [...research.excludedTags].some(t => tags.includes(t))) return false;'));
+          assert(s.includes('return !research.activeTags.size || [...research.activeTags].some(t => tags.includes(t));'));
+          const candidates = [
+            { title: '[VCR Rust] 最終日', game: 'Rust', want:true },
+            { title: '[NEW TOWN] バトロワ', game: 'Grand Theft Auto V', want:true },
+            { title: '普通のRUST配信', game: 'Rust', want:false },
+          ];
+          const body = s.match(/  function isStreamServerSession\(game = '', title = ''\) \{([\s\S]*?)\n  \}/);
+          assert(body, 'missing stream server classifier');
+          const normalizeResearchText = x => String(x);
+          const classifier = new Function('normalizeResearchText', 'return function isStreamServerSession(game, title) {'+body[1]+'\n}')(normalizeResearchText);
+          for (const c of candidates) assert.equal(classifier(c.game,c.title),c.want,c.title);
+          console.log('PASS: countdown update registered and category conditions retained; VCR/NEW TOWN classified');
+          JS
+      - name: Publish verified script
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git commit -m 'Refresh mobile 429 countdown and explain combined category filters (v1.0.29)'
+          git push origin HEAD:main
