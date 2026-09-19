@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.27
+// @version      1.0.28
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.27';
+  const VERSION = '1.0.28';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -1517,50 +1517,40 @@
 
   function mentionIds(video) {
     const arr = Array.isArray(video?.mentions) ? video.mentions : [];
-    return new Set(arr.map(x => x?.id).filter(Boolean));
+    return new Set(arr.map(x => x?.id || x?.channel?.id).filter(Boolean));
   }
 
+  // Conservative: sharing a time, game, event, generic hashtag or title alone
+  // is not proof that two streams are different POVs of the same activity.
   function relationInfo(source, candidate, sim, event) {
     const srcChannel = channelId(source);
     const candChannel = channelId(candidate);
     const srcMentions = mentionIds(source);
     const candMentions = mentionIds(candidate);
-
-    const directMention =
-      (candChannel && srcMentions.has(candChannel)) ||
-      (srcChannel && candMentions.has(srcChannel));
-
+    const directMention = !!((candChannel && srcMentions.has(candChannel)) ||
+      (srcChannel && candMentions.has(srcChannel)));
+    const sourceGame = researchGameFromText(source?.title || '', source?.topic_id || '');
+    const candidateGame = researchGameFromText(candidate?.title || '', candidate?.topic_id || '');
+    const gameCompatible = !(sourceGame && candidateGame &&
+      normalizeResearchText(sourceGame) !== normalizeResearchText(candidateGame));
+    const sameTopic = !!(source?.topic_id && candidate?.topic_id &&
+      source.topic_id === candidate.topic_id);
     const tags = sharedHashtags(source?.title || '', candidate?.title || '');
-    const sameTopic = !!(
-      source?.topic_id &&
-      candidate?.topic_id &&
-      source.topic_id === candidate.topic_id
-    );
-
-    let related = false;
+    const specificTags = tags.filter(tag =>
+      !/^#?(?:nijisanji|にじさんじ|vtuber|vcr(?:gta|rust|ark|mc)?|スト鯖|apex|valorant|gta|rust|ark|crcup|crカップ|v最協|v最|ゲーム実況)$/i.test(tag));
+    const boring = /^(?:vcr|gta|rust|ark|apex|valorant|minecraft|配信|実況|初見|本日|今日|昨日|明日|コラボ|ゲーム|最終日|初日|練習|スクリム|大会|本番|にじさんじ|nijisanji|vtuber|new|town|lol|live|stream|day\d*|#?\d+)$/i;
+    const srcTokens = tokenize(source?.title || '');
+    const distinctive = [...tokenize(candidate?.title || '')].filter(t =>
+      t.length >= 4 && srcTokens.has(t) && !boring.test(t));
+    // A shared broad event like VCR RUST can last days; it is never sufficient.
+    const wellMatchedEvent = !!(event && sameTopic && sim >= 0.65 && distinctive.length);
+    const wellMatchedTag = !!(specificTags.length && sameTopic && sim >= 0.5 && distinctive.length);
+    const related = !!(gameCompatible && (directMention || wellMatchedEvent || wellMatchedTag));
     const reasons = [];
-
-    if (event) {
-      related = true;
-      reasons.push('同イベント');
-    }
-    if (directMention) {
-      related = true;
-      reasons.push('参加者情報');
-    }
-    if (tags.length) {
-      related = true;
-      reasons.push(`共通タグ ${tags[0]}`);
-    }
-    if (sim >= 0.20) {
-      related = true;
-      reasons.push('タイトル近似');
-    } else if (sameTopic && sim >= 0.07) {
-      related = true;
-      reasons.push('同ゲーム＋タイトル近似');
-    }
-
-    return { related, reasons, directMention, tags, sameTopic };
+    if (related && directMention) reasons.push('相互の参加者情報');
+    if (related && wellMatchedEvent) reasons.push('同イベント＋特徴的なタイトル');
+    if (related && wellMatchedTag) reasons.push(`固有タグ ${specificTags[0]}`);
+    return { related, reasons, directMention, tags:specificTags, sameTopic };
   }
 
   function updateInlineButtonLabels(videoId) {
@@ -2562,12 +2552,70 @@
     }
   }
 
-  function renderMatches(source, matches, syncOffset = null) {
+  // POV search: channel membership comes from the verified *current* fan-Wiki
+  // roster, not from the Holodex search org (which can include guest streams).
+  function povChannelGroup(video) {
+    if (!researchRoster.ready) return 'unknown';
+    const ch = video?.channel || {};
+    const names = [ch.name, ch.english_name, video?.channel_name]
+      .map(researchRosterKey).filter(Boolean);
+    if (names.some(name => researchRoster.names.has(name))) return 'nijisanji';
+    // An explicit Nijisanji org and a missing name/alias is an unresolved
+    // roster match, not proof of being outside.
+    if (!names.length || /^(?:nijisanji|にじさんじ)$/i.test(String(ch.org || '').trim()))
+      return 'unknown';
+    return 'outside';
+  }
+
+  function povGroupPass(video, filter) {
+    return filter === 'all' || povChannelGroup(video) === filter;
+  }
+
+  function povAttachFilter(area, active, onSelect) {
+    if (!area) return;
+    const bar = document.createElement('div');
+    bar.className = 'npf-pov-org-filter';
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:7px 0 12px;';
+    const label = document.createElement('span');
+    label.textContent = '投稿者の所属';
+    label.style.cssText = 'font-size:12px;font-weight:700;color:inherit;margin-right:2px;';
+    bar.appendChild(label);
+    for (const [mode, title] of [['all','すべて'],['nijisanji','にじさんじ'],['outside','にじさんじ以外']]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = title;
+      button.style.cssText = 'border:1px solid #6b7490;border-radius:9px;padding:8px 10px;min-height:36px;font-size:12px;font-weight:750;cursor:pointer;color:#fff;background:#354158;';
+      if (mode === active) button.style.cssText += 'background:#5368d8;border-color:#a4b2ff;';
+      button.setAttribute('aria-pressed', String(mode === active));
+      button.addEventListener('click', async () => {
+        if (mode === active) return;
+        if (mode !== 'all' && !researchRoster.ready) {
+          button.disabled = true;
+          label.textContent = 'Wiki名簿を確認中…';
+          try {
+            if (!(await ensureResearchRoster())) {
+              label.textContent = `所属名簿を取得できません：${researchRoster.error || '再試行してください'}`;
+              toast('Wiki名簿を取得できません。所属フィルターは適用していません');
+              return;
+            }
+          } catch (err) {
+            label.textContent = `名簿の確認失敗：${err?.message || err}`;
+            return;
+          } finally { button.disabled = false; }
+        }
+        onSelect(mode);
+      });
+      bar.appendChild(button);
+    }
+    area.prepend(bar);
+  }
+
+  function renderMatches(source, matches, syncOffset = null, povOrgFilter = 'all') {
     const area = $('#npf-result-area', state.sheet);
     if (!area) return;
 
-    const related = matches.filter(m => m.related);
-    const others = matches.filter(m => !m.related);
+    const related = matches.filter(m => m.related && povGroupPass(m.v, povOrgFilter));
+    const others = []; // Never offer unrelated parallel streams as POVs.
     const hasSync = Number.isFinite(Number(syncOffset));
     let showOthers = false;
 
@@ -2588,7 +2636,8 @@
               <button id="npf-show-others" class="npf-ghost" type="button">同時刻のその他 ${others.length}件を見る</button>
             </div>` : ''}
         `;
-        $('#npf-show-others', area)?.addEventListener('click', () => {
+        povAttachFilter(area, povOrgFilter, mode => renderMatches(source, matches, syncOffset, mode));
+      $('#npf-show-others', area)?.addEventListener('click', () => {
           showOthers = true;
           draw();
         });
@@ -2651,6 +2700,7 @@
           </div>` : ''}
       `;
 
+      povAttachFilter(area, povOrgFilter, mode => renderMatches(source, matches, syncOffset, mode));
       $$('.npf-open-point', area).forEach(btn => {
         btn.addEventListener('click', () => {
           const m = visible[Number(btn.dataset.idx)];
@@ -2924,14 +2974,15 @@
     }
   }
 
-  function renderYoutubeMatches(source, matches, syncOffset) {
+  function renderYoutubeMatches(source, matches, syncOffset, povOrgFilter = 'all') {
     const area = $('#npf-yt-results');
     if (!area) return;
 
     area.replaceChildren();
+    povAttachFilter(area, povOrgFilter, mode => renderYoutubeMatches(source, matches, syncOffset, mode));
 
-    const related = matches.filter(m => m.related);
-    const others = matches.filter(m => !m.related);
+    const related = matches.filter(m => m.related && povGroupPass(m.v, povOrgFilter));
+    const others = []; // Hide unrelated overlapping broadcasts completely.
     // お気に入りは「関連候補の中」でのみ優先する。
     // 関連判定に入らない同時刻配信は、お気に入りでも自動表示しない。
     const list = related;
