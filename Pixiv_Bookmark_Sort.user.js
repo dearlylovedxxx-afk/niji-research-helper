@@ -1,569 +1,69 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.5.1
+// @version      0.5.2
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
-// @description  pixivの小説・イラスト・漫画検索を横断してブクマ順に表示。最低件数指定・中断再開・保存対応。
+// @description  pixiv検索をページ横断してブックマーク数順に表示。最低ブクマ数・中断再開・保存・小説対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
-
 (() => {
-  'use strict';
-  if (window.__pixivBookmarkCrossPageV05) return;
-  window.__pixivBookmarkCrossPageV05 = true;
-
-  const DB_NAME = 'pixiv-bookmark-sort-cross-page-v02';
-  const DB_VERSION = 1;
-  const HOST_ID = 'pixiv-bookmark-sort-cross-page-v05';
-  const MIN_PREF_KEY = 'pixiv-bookmark-sort-minimum-v03';
-  const REQUEST_INTERVAL_MS = 2500; // 検索・詳細とも連続アクセスしない。制限時の迂回や自動リトライは行わない。
-  const MAX_PAGES_SAFETY = 1000; // 暴走防止。超過した場合、全件取得したとは表示しない。
-  const fmt = new Intl.NumberFormat('ja-JP');
-  let dbPromise;
-  let active = null;
-  let currentContext = null;
-  let queryKey = '';
-  let lastRequestAt = 0;
-  let renderTimer = null;
-  let listLimit = 100;
-  let minBookmarks = loadMinBookmarks();
-  let renderSequence = 0;
-  let lastFailedRequest = null;
-
-  function normalizeMinBookmarks(value) {
-    const raw = String(value).trim();
-    if (!/^\d+$/.test(raw)) return 0;
-    return Math.min(1000000000, Math.floor(Number(raw)));
-  }
-  function loadMinBookmarks() {
-    try { return normalizeMinBookmarks(localStorage.getItem(MIN_PREF_KEY) || '0'); }
-    catch (_) { return 0; }
-  }
-
-  function contextFromUrl() {
-    const url = new URL(location.href);
-    // pixivのタグ検索: /tags/タグ名/novels, /tags/タグ名/artworks 等
-    const m = url.pathname.match(/^\/tags\/([^/]+)(?:\/(artworks|illustrations|manga|novels))?(?:\/|$)/);
-    let word, kind, sMode;
-    if (m) {
-      try { word = decodeURIComponent(m[1]); } catch (_) { return null; }
-      kind = m[2] || 'artworks';
-      sMode = url.searchParams.get('s_mode') || 's_tag_full';
-    } else if (url.pathname === '/novel/search.php') {
-      // 旧形式の小説検索にも対応。
-      word = url.searchParams.get('word') || url.searchParams.get('q');
-      kind = 'novels';
-      sMode = url.searchParams.get('s_mode') || 's_tag';
-    } else if (url.pathname === '/search.php' || url.pathname === '/search') {
-      // /search?q=...&type=novel のような検索URL。
-      word = url.searchParams.get('word') || url.searchParams.get('q');
-      const searchType = url.searchParams.get('type');
-      kind = searchType === 'novel' || searchType === 'novels' ? 'novels' :
-        searchType === 'manga' ? 'manga' :
-        searchType === 'illust' || searchType === 'illustrations' ? 'illustrations' : 'artworks';
-      sMode = url.searchParams.get('s_mode') || 's_tag';
-    } else return null;
-    if (!word) return null;
-    const params = new URLSearchParams();
-    const common = ['mode', 'scd', 'ecd', 'ai_type', 'work_lang', 'lang'];
-    const novelOnly = ['tlt', 'tgt', 'wlt', 'wgt', 'original_only', 'genre'];
-    const artOnly = ['wlt', 'wgt', 'hlt', 'hgt', 'ratio', 'tool'];
-    for (const name of [...common, ...(kind === 'novels' ? novelOnly : artOnly)]) {
-      for (const value of url.searchParams.getAll(name)) params.append(name, value);
-    }
-    params.set('word', word);
-    params.set('s_mode', sMode);
-    params.set('mode', params.get('mode') || 'all');
-    // 小説検索ではpixiv側に存在しない可能性のある条件を勝手に付け足さない。
-    // URLにgs=0/1が指定されているときのみ引き継ぐ。
-    if (kind === 'novels') {
-      const gs = url.searchParams.get('gs');
-      if (gs === '0' || gs === '1') params.set('gs', gs);
-    } else {
-      // 同じ作者の作品を束ねない（検索対象が抜け落ちるのを防止）。
-      params.set('csw', '0');
-      if (kind === 'artworks') params.set('type', 'all');
-      if (kind === 'illustrations') {
-        const type = url.searchParams.get('type');
-        if (type === 'illust' || type === 'ugoira' || type === 'illust_and_ugoira') params.set('type', type);
-      }
-      if (kind === 'manga') params.set('type', 'manga');
-    }
-    params.sort();
-    const key = JSON.stringify([kind, word, [...params.entries()]]);
-    return { word, kind, params, key };
-  }
-
-  function openDb() {
-    if (!dbPromise) dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        const works = db.createObjectStore('works', { keyPath: 'key' });
-        works.createIndex('pending', ['searchKey', 'status']);
-        works.createIndex('rank', ['searchKey', 'count']);
-        db.createObjectStore('meta', { keyPath: 'key' });
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || new Error('IndexedDBを開けません'));
-    });
-    return dbPromise;
-  }
-
-  function transactionPromise(tx) {
-    return new Promise((resolve, reject) => {
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || new Error('保存に失敗しました'));
-      tx.onabort = () => reject(tx.error || new Error('保存が中断されました'));
-    });
-  }
-  function requestPromise(req) {
-    return new Promise((resolve, reject) => {
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || new Error('読み込みに失敗しました'));
-    });
-  }
-  async function getMeta(key) {
-    const db = await openDb();
-    const tx = db.transaction('meta', 'readonly');
-    const m = await requestPromise(tx.objectStore('meta').get(key));
-    return m || { key, nextPage: 1, total: null, discovered: 0, processed: 0,
-      skipped: 0, pageSize: null, searchDone: false, note: '' };
-  }
-  async function putMeta(meta) {
-    const db = await openDb();
-    const tx = db.transaction('meta', 'readwrite');
-    tx.objectStore('meta').put(meta);
-    await transactionPromise(tx);
-  }
-  async function clearSearch(key) {
-    const db = await openDb();
-    const tx = db.transaction(['works', 'meta'], 'readwrite');
-    const store = tx.objectStore('works');
-    const cursorReq = store.index('pending').openCursor(
-      IDBKeyRange.bound([key, 0], [key, 2]));
-    cursorReq.onsuccess = () => {
-      const cursor = cursorReq.result;
-      if (cursor) { cursor.delete(); cursor.continue(); }
-    };
-    tx.objectStore('meta').delete(key);
-    await transactionPromise(tx);
-  }
-  async function nextPending(key) {
-    const db = await openDb();
-    const tx = db.transaction('works', 'readonly');
-    return requestPromise(tx.objectStore('works').index('pending').get([key, 0]));
-  }
-  async function savePage(key, meta, works, rawSize) {
-    const db = await openDb();
-    const tx = db.transaction(['works', 'meta'], 'readwrite');
-    const store = tx.objectStore('works');
-    const unique = new Map(works.map(w => [String(w.id), w]));
-    let left = unique.size;
-    let added = 0;
-    const done = transactionPromise(tx);
-    function finish() {
-      meta.discovered += added;
-      meta.nextPage++;
-      if (!meta.pageSize && rawSize) meta.pageSize = rawSize;
-      tx.objectStore('meta').put(meta);
-    }
-    if (!left) finish();
-    for (const [id, work] of unique) {
-      const rowKey = key + ':' + id;
-      const req = store.get(rowKey);
-      req.onsuccess = () => {
-        if (!req.result) {
-          added++;
-          const direct = Number(work.bookmarkCount);
-          const hasDirect = work.bookmarkCount != null && Number.isFinite(direct) && direct >= 0;
-          store.put({ key: rowKey, searchKey: key, id, status: hasDirect ? 1 : 0,
-            count: hasDirect ? direct : -1, title: work.title || work.illustTitle || '',
-            userName: work.userName || '', thumb: work.url || '',
-            date: work.createDate || '' });
-          if (hasDirect) meta.processed++;
-        }
-        if (--left === 0) finish();
-      };
-    }
-    await done;
-  }
-  async function saveDetail(meta, row, detail, skipped) {
-    const db = await openDb();
-    const tx = db.transaction(['works', 'meta'], 'readwrite');
-    tx.objectStore('works').put({ ...row, status: skipped ? 2 : 1,
-      count: skipped ? -1 : Number(detail.bookmarkCount),
-      title: detail.title || row.title, userName: detail.userName || row.userName,
-      thumb: row.thumb || detail.coverUrl || detail.url || (detail.urls && (detail.urls.thumb || detail.urls.small)) || '' });
-    if (skipped) meta.skipped++;
-    else meta.processed++;
-    tx.objectStore('meta').put(meta);
-    await transactionPromise(tx);
-  }
-  async function getTop(key, limit, minimum) {
-    const db = await openDb();
-    const tx = db.transaction('works', 'readonly');
-    const index = tx.objectStore('works').index('rank');
-    const range = IDBKeyRange.bound([key, minimum], [key, Number.MAX_SAFE_INTEGER]);
-    return new Promise((resolve, reject) => {
-      const out = [];
-      const req = index.openCursor(range, 'prev');
-      req.onsuccess = () => {
-        const cursor = req.result;
-        if (!cursor || out.length >= limit) return resolve(out);
-        out.push(cursor.value);
-        cursor.continue();
-      };
-      req.onerror = () => reject(req.error || new Error('順位を読み込めません'));
-    });
-  }
-  async function getEligibleCount(key, minimum) {
-    const db = await openDb();
-    const tx = db.transaction('works', 'readonly');
-    const range = IDBKeyRange.bound([key, minimum], [key, Number.MAX_SAFE_INTEGER]);
-    return requestPromise(tx.objectStore('works').index('rank').count(range));
-  }
-  function abortIfNeeded(signal) {
-    if (signal.aborted) throw new DOMException('中断されました', 'AbortError');
-  }
-  async function pacedJson(url, signal) {
-    const wait = Math.max(0, REQUEST_INTERVAL_MS - (Date.now() - lastRequestAt));
-    if (wait) await new Promise((resolve, reject) => {
-      const t = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, wait);
-      function onAbort() { clearTimeout(t); reject(new DOMException('中断されました', 'AbortError')); }
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-    abortIfNeeded(signal);
-    lastRequestAt = Date.now();
-    const res = await fetch(url, { credentials: 'same-origin', signal, headers: { Accept: 'application/json' } });
-    if (res.status === 429) throw new Error('429: pixivのアクセス制限です。自動再試行はしません。時間を置いてから再開してください。');
-    if (res.status === 401 || res.status === 403) throw new Error('pixivへのアクセスが制限されています (HTTP ' + res.status + ')。');
-    if (res.status === 404) { const e = new Error('404'); e.notFound = true; throw e; }
-    if (!res.ok) {
-      // 400はパラメータの不整合の可能性がある。pixiv側の応答を残し、再試行せず停止する。
-      // HTMLのエラーページやCookie/トークンは表示しない。
-      let reason = '';
-      if (res.status === 400) {
-        try {
-          const data = await res.json();
-          const message = data && (data.message || (data.body && data.body.message));
-          if (typeof message === 'string') reason = message.slice(0, 180);
-        } catch (_) { /* JSONでなければHTTPコードだけ表示 */ }
-      }
-      const e = new Error('通信エラー HTTP ' + res.status +
-        (reason ? '：' + reason : '') +
-        (res.status === 400 ? '。検索条件やAPIの仕様が変わっている可能性があります。' : ''));
-      e.requestUrl = url;
-      e.httpStatus = res.status;
-      throw e;
-    }
-    const data = await res.json();
-    if (!data || data.error) throw new Error((data && data.message) || 'pixivのAPIでエラーが発生しました');
-    return data.body;
-  }
-  async function fetchPage(ctx, page, signal) {
-    const u = new URL('/ajax/search/' + ctx.kind + '/' + encodeURIComponent(ctx.word), location.origin);
-    u.search = ctx.params.toString();
-    u.searchParams.set('order', 'date_d');
-    u.searchParams.set('p', String(page));
-    const body = await pacedJson(u.href, signal);
-    const group = body && (ctx.kind === 'novels' ? body.novel : (body.illustManga || body.illust || body.manga));
-    if (!group || !Array.isArray(group.data)) throw new Error('検索結果の形式が変わった可能性があります');
-    return { total: Number(group.total), lastPage: Number(group.lastPage), data: group.data,
-      works: group.data.filter(w => w && /^\d+$/.test(String(w.id)) && !w.isAdContainer) };
-  }
-  async function fetchDetail(id, kind, signal) {
-    const route = kind === 'novels' ? 'novel' : 'illust';
-    const body = await pacedJson('/ajax/' + route + '/' + encodeURIComponent(id), signal);
-    if (!body || !Number.isFinite(Number(body.bookmarkCount))) throw new Error('ブックマーク数が取得できませんでした');
-    return body;
-  }
-
-  const host = document.createElement('div');
-  host.id = HOST_ID;
-  const root = host.attachShadow({ mode: 'open' });
-  root.innerHTML = `
-    <style>
-      :host { all: initial; font-family: -apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif; color-scheme:light; }
-      * { box-sizing:border-box; }
-      button,select,input { font:inherit; }
-      .launch { position:fixed; right:12px; bottom:max(50px,env(safe-area-inset-bottom)); z-index:2147483645; border:0;
-        border-radius:30px; color:#fff; background:#eb3e63; padding:13px 16px; font-size:14px; font-weight:700;
-        box-shadow:0 4px 18px #0004; cursor:pointer; }
-      .veil { display:none; position:fixed; z-index:2147483646; inset:0; background:#111a; }
-      .veil.open { display:flex; }
-      .panel { display:flex; flex-direction:column; margin:auto; width:min(1100px,100%); height:min(94dvh,100%);
-        overflow:hidden; background:#f5f6fb; color:#232938; border-radius:16px; }
-      .head { flex:none; padding:13px 15px; background:white; border-bottom:1px solid #e4e6ed; }
-      .heading,.controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
-      .heading { justify-content:space-between; } h2 { margin:0; font-size:17px; }
-      .controls { margin-top:10px; } button,select,input { border-radius:8px; padding:9px 10px; border:1px solid #d4d8e1; background:white; color:#232938; font-size:13px; }
-      button,select { cursor:pointer; }
-      .min-filter { display:inline-flex; flex-wrap:wrap; align-items:center; gap:5px; font-size:13px; }
-      .minimum { width:110px; min-width:80px; } .min-preset { max-width:132px; }
-      .match-count { font-size:12px; font-weight:600; color:#bd2850; margin-top:6px; }
-      button.primary { background:#eb3e63; border-color:#eb3e63; color:white; font-weight:bold; }
-      button:disabled { opacity:.55; cursor:default; } .close { font-size:19px; padding:5px 10px; }
-      .status { font-size:13px; line-height:1.5; margin-top:10px; white-space:pre-wrap; }
-      .note { font-size:11px; color:#586277; line-height:1.5; margin:6px 0 0; }
-      .debug-button[hidden] { display:none; }
-      .results { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; padding:13px;
-        display:grid; grid-template-columns:repeat(auto-fill,minmax(145px,1fr)); align-content:start; gap:11px; }
-      a.card { display:flex; flex-direction:column; min-width:0; border-radius:9px; overflow:hidden;
-        text-decoration:none; background:white; color:#232938; box-shadow:0 1px 5px #1315231b; }
-      img { width:100%; aspect-ratio:1/1; object-fit:cover; background:#e6e9ef; }
-      a.novel img { aspect-ratio:3/4; object-fit:contain; }
-      .info { padding:8px; } .count { font-size:14px; color:#e33159; font-weight:800; }
-      .name { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden;
-        font-size:12px; line-height:1.5; font-weight:600; }
-      .author { font-size:11px; color:#657187; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-      @media (max-width:600px) { .panel { height:100dvh; border-radius:0; } .head { padding:10px; }
-        .results { grid-template-columns:repeat(2,minmax(0,1fr)); padding:9px; gap:9px; } }
-    </style>
-    <button type="button" class="launch">♥ 全体ブクマ順</button>
-    <div class="veil" role="dialog" aria-modal="true" aria-label="検索結果を横断したブックマーク数順">
-      <section class="panel">
-        <div class="head">
-          <div class="heading"><h2>♥ 検索結果をブックマーク数順に</h2><button class="close" type="button" aria-label="閉じる">×</button></div>
-          <div class="controls">
-            <button type="button" class="start primary">全件の調査を開始／再開</button>
-            <button type="button" class="stop" disabled>一時停止</button>
-            <button type="button" class="reset">保存結果を消して再調査</button>
-            <select class="limit" aria-label="一覧に表示する件数"><option value="100">上位100件</option><option value="300">上位300件</option><option value="1000">上位1000件</option></select>
-            <label class="min-filter">最低ブクマ数 <input class="minimum" type="number" inputmode="numeric" min="0" max="1000000000" step="1" aria-label="最低ブックマーク数" value="0">件以上</label>
-            <select class="min-preset" aria-label="最低ブックマーク数の候補"><option value="custom">件数を選ぶ</option><option value="0">指定なし</option><option value="100">100件以上</option><option value="500">500件以上</option><option value="1000">1,000件以上</option><option value="5000">5,000件以上</option><option value="10000">10,000件以上</option></select>
-          </div>
-          <div class="status" aria-live="polite">検索条件を確認しています…</div>
-          <button type="button" class="debug-button" hidden>エラーの診断用URLを表示</button>
-          <div class="match-count" aria-live="polite"></div>
-          <p class="note">イラスト・漫画・小説の検索結果に対応。小説はpixivの検索条件をできるだけ引き継ぎ、取得できた作品を調査します。対象は検索結果の各ページです。調査済み作品から順位を表示し、途中で止めても保存されます。調査完了前の順位は暫定です。最低ブクマ数は表示を絞るもので、無料アカウントの検索時の取得件数は減りません。保存済みデータは下限を変更しても消えません。<br>作品数が多い場合は長時間かかり、pixivのページ・アクセス制限によって全件を取得できないことがあります。通信エラー時は停止し、制限の迂回はしません。閲覧できない作品は順位に含まれません。</p>
-        </div>
-        <div class="results"></div>
-      </section>
-    </div>`;
-  document.body.appendChild(host);
-  const $ = s => root.querySelector(s);
-  const launch = $('.launch');
-  const veil = $('.veil');
-  const startBtn = $('.start');
-  const stopBtn = $('.stop');
-  const resetBtn = $('.reset');
-  const status = $('.status');
-  const results = $('.results');
-  const limitSelect = $('.limit');
-  const minInput = $('.minimum');
-  const minPreset = $('.min-preset');
-  const matchCount = $('.match-count');
-  const debugButton = $('.debug-button');
-  minInput.value = String(minBookmarks);
-  if ([0, 100, 500, 1000, 5000, 10000].includes(minBookmarks)) minPreset.value = String(minBookmarks);
-
-  function setStatus(text) { status.textContent = text; }
-  function showRequestError(error) {
-    lastFailedRequest = error && error.requestUrl || null;
-    debugButton.hidden = !lastFailedRequest;
-  }
-  function stats(meta, suffix = '') {
-    const expected = Number.isFinite(meta.total) ? fmt.format(meta.total) : '不明';
-    return `${currentContext && currentContext.kind === 'novels' ? '小説' : 'イラスト・漫画'}の検索結果：約${expected}作品 ｜ 発見 ${fmt.format(meta.discovered)}件 ｜ ブクマ確認 ${fmt.format(meta.processed)}件 ｜ 閲覧不可 ${fmt.format(meta.skipped)}件\n` +
-      (meta.searchDone ? '検索ページの取得終了' : `次の検索ページ：${meta.nextPage}`) +
-      (suffix ? ` ｜ ${suffix}` : '') + (meta.note ? '\n' + meta.note : '');
-  }
-  function makeCard(row) {
-    const a = document.createElement('a');
-    a.className = 'card';
-    const isNovel = currentContext && currentContext.kind === 'novels';
-    if (isNovel) a.classList.add('novel');
-    a.href = (isNovel ? '/novel/show.php?id=' : '/artworks/') + row.id;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    const image = document.createElement('img');
-    image.loading = 'lazy';
-    image.alt = row.title || '作品のサムネイル';
-    if (/^https:\/\/(?:i|s)\.pximg\.net\//.test(row.thumb)) image.src = row.thumb;
-    const info = document.createElement('div'); info.className = 'info';
-    const count = document.createElement('div'); count.className = 'count';
-    count.textContent = '♥ ' + fmt.format(row.count);
-    const title = document.createElement('div'); title.className = 'name'; title.textContent = row.title || '無題';
-    const author = document.createElement('div'); author.className = 'author'; author.textContent = row.userName || '';
-    info.append(count, title, author); a.append(image, info);
-    return a;
-  }
-  async function renderTop(key) {
-    if (!key || queryKey !== key || !veil.classList.contains('open')) return;
-    const sequence = ++renderSequence;
-    const minimum = minBookmarks;
-    const limit = listLimit;
-    const [top, eligibleCount] = await Promise.all([
-      getTop(key, limit, minimum), getEligibleCount(key, minimum)
-    ]);
-    if (queryKey !== key || sequence !== renderSequence || !veil.classList.contains('open')) return;
-    results.replaceChildren(...top.map(makeCard));
-    matchCount.textContent = `確認済みで ♥ ${fmt.format(minimum)}件以上：${fmt.format(eligibleCount)}作品（表示 ${fmt.format(top.length)}作品）`;
-    if (!top.length) {
-      const p = document.createElement('p');
-      p.textContent = minimum > 0
-        ? `確認済み作品にはブックマーク${fmt.format(minimum)}件以上の作品がまだありません。調査を進めるか、最低件数を下げてください。`
-        : '確認済みの作品はまだありません。調査を開始してください。';
-      p.style.cssText = 'font-size:13px;color:#647087;grid-column:1/-1;';
-      results.appendChild(p);
-    }
-  }
-  function scheduleRender(key, immediate = false) {
-    if (renderTimer) clearTimeout(renderTimer);
-    renderTimer = setTimeout(() => {
-      renderTimer = null;
-      renderTop(key).catch(e => setStatus('表示エラー：' + e.message));
-    }, immediate ? 0 : 600);
-  }
-  function stop() { if (active) active.abort(); }
-  function buttons(running) { startBtn.disabled = running; stopBtn.disabled = !running; }
-  async function refresh() {
-    const ctx = contextFromUrl();
-    launch.style.display = ctx ? '' : 'none';
-    if (!ctx) { stop(); veil.classList.remove('open'); return; }
-    if (queryKey !== ctx.key) {
-      stop();
-      queryKey = ctx.key;
-      currentContext = ctx;
-      showRequestError(null);
-      results.replaceChildren();
-      matchCount.textContent = '';
-      setStatus('検索条件：' + ctx.word + '（' + (ctx.kind === 'novels' ? '小説' : 'イラスト・漫画') + '）\n保存済みの調査結果を読み込んでいます…');
-    }
-    if (!veil.classList.contains('open')) return;
-    try {
-      const m = await getMeta(ctx.key);
-      if (queryKey !== ctx.key) return;
-      setStatus('検索条件：' + ctx.word + '\n' + stats(m, active ? '調査中' : '開始／再開できます'));
-      scheduleRender(ctx.key, true);
-    } catch (e) { setStatus('保存領域が使えません：' + e.message); }
-  }
-
-  async function runScan(ctx, ctrl) {
-    let meta = await getMeta(ctx.key);
-    if (meta.searchDone && !await nextPending(ctx.key)) {
-      setStatus(stats(meta, 'APIから取得できた範囲の調査は終了しています'));
-      scheduleRender(ctx.key, true);
-      return;
-    }
-    while (true) {
-      abortIfNeeded(ctrl.signal);
-      if (ctx.key !== queryKey) throw new DOMException('検索条件が変更されました', 'AbortError');
-      const pending = await nextPending(ctx.key);
-      if (pending) {
-        setStatus(stats(meta, '作品のブクマ数を確認中'));
-        try {
-          const detail = await fetchDetail(pending.id, ctx.kind, ctrl.signal);
-          await saveDetail(meta, pending, detail, false);
-        } catch (e) {
-          if (e.notFound) await saveDetail(meta, pending, {}, true);
-          else throw e;
-        }
-        if (meta.processed % 5 === 0) scheduleRender(ctx.key);
-        continue;
-      }
-      if (meta.searchDone) {
-        meta.note = meta.skipped ? '一部の作品は削除・閲覧不可のため順位に含まれません。' : meta.note;
-        await putMeta(meta);
-        setStatus(stats(meta, '取得できた検索ページの調査が終了しました'));
-        scheduleRender(ctx.key, true);
-        return;
-      }
-      if (meta.nextPage > MAX_PAGES_SAFETY) {
-        meta.note = `安全上、${MAX_PAGES_SAFETY}ページで停止しました。検索全件を取得したわけではありません。`;
-        await putMeta(meta);
-        setStatus(stats(meta, 'ページの上限で停止'));
-        scheduleRender(ctx.key, true);
-        return;
-      }
-      setStatus(stats(meta, `検索ページ ${meta.nextPage} を取得中`));
-      const page = await fetchPage(ctx, meta.nextPage, ctrl.signal);
-      if (Number.isFinite(page.total)) meta.total = page.total;
-      if (Number.isInteger(page.lastPage) && page.lastPage > 0) meta.lastPage = page.lastPage;
-      if (!page.data.length) {
-        meta.searchDone = true;
-        await putMeta(meta);
-        continue;
-      }
-      const pageNumber = meta.nextPage;
-      await savePage(ctx.key, meta, page.works, page.data.length);
-      // 検索件数が実際に取得されたページ数と整合する場合だけ末尾を判定。
-      if (Number.isFinite(meta.total) && meta.total >= 0 && meta.pageSize &&
-          pageNumber * meta.pageSize >= meta.total) {
-        meta.searchDone = true;
-        await putMeta(meta);
-      } else if (meta.lastPage && pageNumber >= meta.lastPage) {
-        // 公開APIの返却可能ページ数が検索総件数より少ない場合は、全件調査と誤表示しない。
-        meta.searchDone = true;
-        meta.note = `pixiv側が返した最終ページ（${meta.lastPage}ページ）まで取得しました。検索総件数の全作品を取得できたとは限りません。`;
-        await putMeta(meta);
-      }
-      scheduleRender(ctx.key);
-    }
-  }
-  function start() {
-    if (active || !currentContext) return;
-    const ctx = currentContext;
-    const ctrl = new AbortController();
-    active = ctrl;
-    showRequestError(null);
-    buttons(true);
-    runScan(ctx, ctrl).catch(e => {
-      if (e.name === 'AbortError') setStatus('一時停止しました。結果は保存済みです。再開できます。');
-      else {
-        showRequestError(e);
-        setStatus('調査を停止しました：' + e.message + '\n保存済みの結果は残っています。' +
-          (e.httpStatus === 400 ? '\n「エラーの診断用URLを表示」から内容を確認できます。' : ''));
-      }
-    }).finally(() => {
-      if (active === ctrl) { active = null; buttons(false); }
-      scheduleRender(ctx.key, true);
-    });
-  }
-  launch.addEventListener('click', () => { veil.classList.add('open'); refresh(); });
-  $('.close').addEventListener('click', () => { stop(); veil.classList.remove('open'); });
-  veil.addEventListener('click', e => { if (e.target === veil) { stop(); veil.classList.remove('open'); } });
-  root.addEventListener('keydown', e => { if (e.key === 'Escape') { stop(); veil.classList.remove('open'); } });
-  debugButton.addEventListener('click', () => {
-    if (!lastFailedRequest) return;
-    // iPhone・Macaqueでもコピーできるよう、選択可能な標準入力ダイアログを使う。
-    prompt('失敗したpixivのリクエストURLです。個人の検索語を含むので、共有前に確認してください。', lastFailedRequest);
-  });
-  startBtn.addEventListener('click', start);
-  stopBtn.addEventListener('click', stop);
-  resetBtn.addEventListener('click', async () => {
-    if (active || !queryKey) return;
-    if (!confirm('この検索条件について、保存した作品とブックマーク数を削除して最初から調べ直しますか？')) return;
-    resetBtn.disabled = true;
-    try { await clearSearch(queryKey); await refresh(); }
-    catch (e) { setStatus('保存結果を削除できませんでした：' + e.message); }
-    finally { resetBtn.disabled = false; }
-  });
-  limitSelect.addEventListener('change', () => { listLimit = Number(limitSelect.value); scheduleRender(queryKey, true); });
-  function applyMinimum(value) {
-    const next = normalizeMinBookmarks(value);
-    minBookmarks = next;
-    minInput.value = String(next);
-    minPreset.value = [0, 100, 500, 1000, 5000, 10000].includes(next) ? String(next) : 'custom';
-    try { localStorage.setItem(MIN_PREF_KEY, String(next)); } catch (_) { /* 保存できない環境でも画面内の設定は有効 */ }
-    scheduleRender(queryKey, true);
-  }
-  minInput.addEventListener('change', () => applyMinimum(minInput.value));
-  minInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { applyMinimum(minInput.value); minInput.blur(); }
-  });
-  minPreset.addEventListener('change', () => {
-    if (minPreset.value !== 'custom') applyMinimum(minPreset.value);
-    else minInput.focus();
-  });
-  const observeLocation = () => {
-    const ctx = contextFromUrl();
-    if ((!ctx && queryKey) || (ctx && ctx.key !== queryKey)) refresh();
-  };
-  setInterval(observeLocation, 1200);
-  refresh();
+'use strict';
+if (window.__pixivBookmarkCrossPageV05) return;
+window.__pixivBookmarkCrossPageV05 = true;
+const DB='pixiv-bookmark-sort-cross-page-v02', PREF='pixiv-bookmark-sort-minimum-v03', MAX=1000, WAIT=2500;
+const fmt=n=>Number(n).toLocaleString('ja-JP');
+let dbPromise, context, searchKey='', running=null, lastRequest=0, timer, seq=0, limit=100, failedUrl='';
+const number=v=>/^\d+$/.test(String(v).trim()) ? Math.min(1e9,Math.floor(Number(v))) : 0;
+let minimum=(()=>{try{return number(localStorage.getItem(PREF)||'0')}catch{return 0}})();
+function current(){
+ const u=new URL(location.href), m=u.pathname.match(/^\/tags\/([^/]+)(?:\/(artworks|illustrations|manga|novels))?(?:\/|$)/);
+ let word,kind,mode;
+ if(m){try{word=decodeURIComponent(m[1])}catch{return null} kind=m[2]||'artworks'; mode=u.searchParams.get('s_mode')||'s_tag_full'}
+ else if(u.pathname==='/novel/search.php'){word=u.searchParams.get('word')||u.searchParams.get('q');kind='novels';mode=u.searchParams.get('s_mode')||'s_tag'}
+ else if(['/search','/search.php'].includes(u.pathname)){word=u.searchParams.get('word')||u.searchParams.get('q'); const t=u.searchParams.get('type');kind=['novel','novels'].includes(t)?'novels':t==='manga'?'manga':['illust','illustrations'].includes(t)?'illustrations':'artworks';mode=u.searchParams.get('s_mode')||'s_tag'}
+ else return null;
+ if(!word)return null;
+ const p=new URLSearchParams(), art=kind!=='novels';
+ for(const key of ['mode','scd','ecd','ai_type','work_lang','lang',...(art?['wlt','wgt','hlt','hgt','ratio','tool']:['tlt','tgt','wlt','wgt','original_only','genre'])])
+  for(const v of u.searchParams.getAll(key))p.append(key,v);
+ // pixivの検索画面とAJAX検索APIの検索モード表記を合わせる。
+ mode=mode==='tag_tc'?(art?'s_tag_tc':'s_tag'):mode==='tc'?'s_tc':mode;
+ p.set('word',word);p.set('s_mode',mode);p.set('mode',p.get('mode')||'all');
+ if(art){p.set('csw','0');if(kind==='artworks')p.set('type','all');else if(kind==='manga')p.set('type','manga');else if(kind==='illustrations'){const t=u.searchParams.get('type');if(['illust','ugoira','illust_and_ugoira'].includes(t))p.set('type',t)}}
+ else{const gs=u.searchParams.get('gs');if(['0','1'].includes(gs))p.set('gs',gs)}
+ p.sort();return {word,kind,params:p,key:JSON.stringify([kind,word,[...p.entries()]])};
+}
+function db(){if(!dbPromise)dbPromise=new Promise((ok,no)=>{const r=indexedDB.open(DB,1);r.onupgradeneeded=()=>{const d=r.result,w=d.createObjectStore('works',{keyPath:'key'});w.createIndex('pending',['searchKey','status']);w.createIndex('rank',['searchKey','count']);d.createObjectStore('meta',{keyPath:'key'})};r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)});return dbPromise}
+function req(r){return new Promise((ok,no)=>{r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
+function done(t){return new Promise((ok,no)=>{t.oncomplete=ok;t.onerror=()=>no(t.error);t.onabort=()=>no(t.error)})}
+const fresh=k=>({key:k,nextPage:1,total:null,discovered:0,processed:0,skipped:0,pageSize:null,searchDone:false,note:''});
+async function meta(k){const d=await db(),t=d.transaction('meta','readonly');return await req(t.objectStore('meta').get(k))||fresh(k)}
+async function putMeta(m){const d=await db(),t=d.transaction('meta','readwrite'),wait=done(t);t.objectStore('meta').put(m);await wait}
+async function pending(k){const d=await db();return req(d.transaction('works').objectStore('works').index('pending').get([k,0]))}
+async function clear(k){const d=await db(),t=d.transaction(['works','meta'],'readwrite'),wait=done(t),s=t.objectStore('works');s.index('pending').openCursor(IDBKeyRange.bound([k,0],[k,2])).onsuccess=e=>{const c=e.target.result;if(c){c.delete();c.continue()}};t.objectStore('meta').delete(k);await wait}
+async function savePage(k,m,works,size){const d=await db(),t=d.transaction(['works','meta'],'readwrite'),wait=done(t),s=t.objectStore('works'),unique=new Map(works.map(w=>[String(w.id),w]));let left=unique.size,added=0;
+ const finish=()=>{m.discovered+=added;m.nextPage++;if(!m.pageSize&&size)m.pageSize=size;t.objectStore('meta').put(m)};
+ if(!left)finish();for(const [id,w] of unique){s.get(k+':'+id).onsuccess=e=>{if(!e.target.result){added++;const c=Number(w.bookmarkCount),has=w.bookmarkCount!=null&&Number.isFinite(c)&&c>=0;s.put({key:k+':'+id,searchKey:k,id,status:has?1:0,count:has?c:-1,title:w.title||w.illustTitle||'',userName:w.userName||'',thumb:w.url||w.coverUrl||'',date:w.createDate||''});if(has)m.processed++}if(!--left)finish()}}await wait}
+async function saveDetail(m,row,body,skip){const d=await db(),t=d.transaction(['works','meta'],'readwrite'),wait=done(t);t.objectStore('works').put({...row,status:skip?2:1,count:skip?-1:Number(body.bookmarkCount),title:body.title||row.title,userName:body.userName||row.userName,thumb:row.thumb||body.coverUrl||body.url||body.urls?.thumb||body.urls?.small||''});if(skip)m.skipped++;else m.processed++;t.objectStore('meta').put(m);await wait}
+async function ranked(k,min,max){const d=await db(),t=d.transaction('works'),i=t.objectStore('works').index('rank'),range=IDBKeyRange.bound([k,min],[k,Number.MAX_SAFE_INTEGER]);return Promise.all([req(i.count(range)),new Promise((ok,no)=>{const out=[],r=i.openCursor(range,'prev');r.onsuccess=()=>{if(!r.result||out.length>=max)return ok(out);out.push(r.result.value);r.result.continue()};r.onerror=()=>no(r.error)})])}
+function abort(signal){if(signal.aborted)throw new DOMException('中断','AbortError')}
+async function json(url,signal){const remain=Math.max(0,WAIT-(Date.now()-lastRequest));if(remain)await new Promise((ok,no)=>{const t=setTimeout(()=>{signal.removeEventListener('abort',cancel);ok()},remain);function cancel(){clearTimeout(t);no(new DOMException('中断','AbortError'))}signal.addEventListener('abort',cancel,{once:true})});abort(signal);lastRequest=Date.now();const r=await fetch(url,{credentials:'same-origin',signal,headers:{Accept:'application/json'}});
+ if(r.status===404){const e=new Error('404');e.notFound=true;throw e}if(r.status===429)throw new Error('429：pixivのアクセス制限です。時間を置いてから再開してください。自動再試行はしません。');if(!r.ok){const e=new Error('通信エラー HTTP '+r.status);e.requestUrl=url;e.httpStatus=r.status;throw e}const data=await r.json();if(!data||data.error)throw new Error(data?.message||'pixiv APIエラー');return data.body}
+async function page(ctx,n,signal){const u=new URL('/ajax/search/'+ctx.kind+'/'+encodeURIComponent(ctx.word),location.origin);u.search=ctx.params.toString();u.searchParams.set('order','date_d');u.searchParams.set('p',String(n));const b=await json(u.href,signal),g=ctx.kind==='novels'?b?.novel:(b?.illustManga||b?.illust||b?.manga);if(!Array.isArray(g?.data))throw new Error('検索結果の形式が変わった可能性があります');return {total:Number(g.total),last:Number(g.lastPage),data:g.data,works:g.data.filter(w=>w&&/^\d+$/.test(String(w.id))&&!w.isAdContainer)}}
+async function detail(id,kind,signal){const b=await json('/ajax/'+(kind==='novels'?'novel':'illust')+'/'+encodeURIComponent(id),signal);if(!Number.isFinite(Number(b?.bookmarkCount)))throw new Error('ブックマーク数が取得できません');return b}
+const host=document.createElement('div');host.id='pixiv-bookmark-sort-cross-page-v05';const root=host.attachShadow({mode:'open'});root.innerHTML=`<style>:host{all:initial;font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;color-scheme:light}*{box-sizing:border-box}button,select,input{font:inherit;border:1px solid #d5d9e2;background:#fff;color:#263040;padding:9px;border-radius:8px}button,select{cursor:pointer}button:disabled{opacity:.5}.launch{position:fixed;right:12px;bottom:max(50px,env(safe-area-inset-bottom));z-index:2147483645;background:#eb3e63;color:white;border:0;border-radius:30px;font-weight:700;padding:13px 16px;box-shadow:0 4px 18px #0004}.veil{display:none;position:fixed;z-index:2147483646;inset:0;background:#111a}.veil.open{display:flex}.panel{margin:auto;width:min(1100px,100%);height:min(94dvh,100%);display:flex;flex-direction:column;overflow:hidden;background:#f5f6fb;color:#263040;border-radius:16px}.head{flex:none;padding:12px;background:white;border-bottom:1px solid #ddd}.heading,.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.heading{justify-content:space-between}.heading h2{font-size:17px;margin:0}.controls{margin-top:10px}.primary{background:#eb3e63;color:white}.minimum{width:105px}.status{white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:10px}.counted{font-size:12px;color:#b4294e;margin-top:8px}.note{font-size:11px;line-height:1.5;color:#586277;margin:8px 0 0}.results{flex:1;overflow:auto;min-height:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));align-content:start;gap:10px;padding:12px}.card{display:flex;flex-direction:column;text-decoration:none;color:#263040;background:white;border-radius:9px;overflow:hidden;min-width:0}.card img{width:100%;aspect-ratio:1/1;object-fit:cover;background:#e6e9ef}.card.novel img{aspect-ratio:3/4;object-fit:contain}.info{padding:8px}.num{color:#e33159;font-weight:700}.title{font-size:12px;overflow-wrap:anywhere}.author{font-size:11px;color:#647087}@media(max-width:600px){.panel{height:100dvh;border-radius:0}.results{grid-template-columns:repeat(2,minmax(0,1fr))}}</style><button class="launch">♥ 全体ブクマ順</button><div class="veil" role="dialog" aria-modal="true"><section class="panel"><div class="head"><div class="heading"><h2>♥ 検索結果をブックマーク数順に</h2><button class="close" aria-label="閉じる">×</button></div><div class="controls"><button class="start primary">全件の調査を開始／再開</button><button class="stop" disabled>一時停止</button><button class="reset">保存結果を消して再調査</button><select class="limit" aria-label="表示数"><option value="100">上位100件</option><option value="300">上位300件</option><option value="1000">上位1000件</option></select><label>最低ブクマ数 <input class="minimum" type="number" inputmode="numeric" min="0" max="1000000000" step="1">件以上</label><select class="preset" aria-label="最低ブクマ数の候補"><option value="custom">件数を選ぶ</option><option value="0">指定なし</option><option value="100">100件以上</option><option value="500">500件以上</option><option value="1000">1000件以上</option><option value="5000">5000件以上</option><option value="10000">10000件以上</option></select></div><div class="status" aria-live="polite"></div><button class="debug" hidden>エラーの診断用URLを表示</button><div class="counted" aria-live="polite"></div><p class="note">検索結果の各ページから作品を調べ、確認済み作品を人気順に表示します。途中で止めても結果は保存され、全件調査が終わるまでは暫定順位です。最低ブクマ数は表示だけを絞り、取得件数を減らすものではありません。作品数やpixivの制限により全件取得できない場合があります。アクセス制限の迂回・自動再試行はしません。</p></div><div class="results"></div></section></div>`;document.body.append(host);
+const $=s=>root.querySelector(s),launch=$('.launch'),veil=$('.veil'),startBtn=$('.start'),stopBtn=$('.stop'),status=$('.status'),items=$('.results'),minInput=$('.minimum'),preset=$('.preset'),counted=$('.counted'),debug=$('.debug');minInput.value=String(minimum);preset.value=[0,100,500,1000,5000,10000].includes(minimum)?String(minimum):'custom';
+const message=s=>{status.textContent=s},buttons=on=>{startBtn.disabled=on;stopBtn.disabled=!on},stop=()=>running?.abort();
+function stats(m,extra=''){return `${context?.kind==='novels'?'小説':'イラスト・漫画'}：検索結果 約${Number.isFinite(m.total)?fmt(m.total):'不明'}作品｜発見 ${fmt(m.discovered)}件｜確認 ${fmt(m.processed)}件｜閲覧不可 ${fmt(m.skipped)}件\n${m.searchDone?'検索ページの取得終了':'次のページ：'+m.nextPage}${extra?'｜'+extra:''}${m.note?'\n'+m.note:''}`}
+async function render(k){if(!k||k!==searchKey||!veil.classList.contains('open'))return;const id=++seq,[count,rows]=await ranked(k,minimum,limit);if(k!==searchKey||id!==seq||!veil.classList.contains('open'))return;items.replaceChildren();counted.textContent=`確認済みで ♥ ${fmt(minimum)}件以上：${fmt(count)}作品（表示 ${fmt(rows.length)}作品）`;for(const w of rows){const novel=context?.kind==='novels',a=document.createElement('a');a.className='card'+(novel?' novel':'');a.href=(novel?'/novel/show.php?id=':'/artworks/')+w.id;a.target='_blank';a.rel='noopener noreferrer';const image=document.createElement('img');image.loading='lazy';image.alt=w.title||'表紙';if(/^https:\/\/(i|s)\.pximg\.net\//.test(w.thumb||''))image.src=w.thumb;const info=document.createElement('div');info.className='info';const n=document.createElement('div');n.className='num';n.textContent='♥ '+fmt(w.count);const title=document.createElement('div');title.className='title';title.textContent=w.title||'無題';const author=document.createElement('div');author.className='author';author.textContent=w.userName||'';info.append(n,title,author);a.append(image,info);items.append(a)}if(!rows.length){const p=document.createElement('p');p.textContent='条件に一致する確認済み作品はまだありません。調査を進めるか最低件数を下げてください。';items.append(p)}}
+function schedule(k,instant=false){clearTimeout(timer);timer=setTimeout(()=>render(k).catch(e=>message('表示エラー：'+e.message)),instant?0:600)}
+async function refresh(){const c=current();launch.style.display=c?'':'none';if(!c){stop();veil.classList.remove('open');return}if(c.key!==searchKey){stop();searchKey=c.key;context=c;failedUrl='';debug.hidden=true;items.replaceChildren();counted.textContent=''}if(!veil.classList.contains('open'))return;try{const m=await meta(c.key);if(searchKey===c.key){message('検索条件：'+c.word+'\n'+stats(m,running?'調査中':'開始／再開できます'));schedule(c.key,true)}}catch(e){message('保存領域を開けません：'+e.message)}}
+async function scan(c,ctrl){const m=await meta(c.key);while(true){abort(ctrl.signal);if(c.key!==searchKey)throw new DOMException('検索条件変更','AbortError');const w=await pending(c.key);if(w){message(stats(m,'ブクマ数を確認中'));try{await saveDetail(m,w,await detail(w.id,c.kind,ctrl.signal),false)}catch(e){if(e.notFound)await saveDetail(m,w,{},true);else throw e}if(m.processed%5===0)schedule(c.key);continue}if(m.searchDone){message(stats(m,'取得可能な検索結果の調査終了'));schedule(c.key,true);return}if(m.nextPage>MAX){m.note='安全上1000ページで停止。検索全件を取得したわけではありません。';await putMeta(m);message(stats(m));return}message(stats(m,'検索ページ '+m.nextPage+' を取得中'));const p=await page(c,m.nextPage,ctrl.signal);if(Number.isFinite(p.total))m.total=p.total;if(Number.isInteger(p.last)&&p.last>0)m.lastPage=p.last;if(!p.data.length){m.searchDone=true;await putMeta(m);continue}const n=m.nextPage;await savePage(c.key,m,p.works,p.data.length);if(Number.isFinite(m.total)&&m.total>=0&&m.pageSize&&n*m.pageSize>=m.total){m.searchDone=true;await putMeta(m)}else if(m.lastPage&&n>=m.lastPage){m.searchDone=true;m.note='pixivが返した最終ページまで取得。全作品を取得できたとは限りません。';await putMeta(m)}schedule(c.key)}}
+function start(){if(running||!context)return;const c=context,ctrl=new AbortController();running=ctrl;failedUrl='';debug.hidden=true;buttons(true);scan(c,ctrl).catch(e=>{if(e.name==='AbortError')message('一時停止しました。保存済みの結果から再開できます。');else{failedUrl=e.requestUrl||'';debug.hidden=!failedUrl;message('調査を停止しました：'+e.message+'\n保存済みの結果は残っています。')}}).finally(()=>{if(running===ctrl){running=null;buttons(false)}schedule(c.key,true)})}
+launch.addEventListener('click',()=>{veil.classList.add('open');refresh()});$('.close').addEventListener('click',()=>{stop();veil.classList.remove('open')});veil.addEventListener('click',e=>{if(e.target===veil){stop();veil.classList.remove('open')}});startBtn.addEventListener('click',start);stopBtn.addEventListener('click',stop);debug.addEventListener('click',()=>{if(failedUrl)prompt('失敗したpixivのURLです。検索語を含むため共有前に確認してください。',failedUrl)});$('.reset').addEventListener('click',async()=>{if(running||!searchKey||!confirm('この検索条件の保存結果を削除して最初から調べ直しますか？'))return;await clear(searchKey);await refresh()});$('.limit').addEventListener('change',e=>{limit=Number(e.target.value);schedule(searchKey,true)});
+function changeMin(v){minimum=number(v);minInput.value=String(minimum);preset.value=[0,100,500,1000,5000,10000].includes(minimum)?String(minimum):'custom';try{localStorage.setItem(PREF,String(minimum))}catch{}schedule(searchKey,true)}
+minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEventListener('keydown',e=>{if(e.key==='Enter'){changeMin(minInput.value);minInput.blur()}});preset.addEventListener('change',()=>{if(preset.value!=='custom')changeMin(preset.value);else minInput.focus()});setInterval(()=>{const c=current();if((!c&&searchKey)||(c&&c.key!==searchKey))refresh()},1200);refresh();
 })();
