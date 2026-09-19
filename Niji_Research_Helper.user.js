@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.26
+// @version      1.0.27
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.26';
+  const VERSION = '1.0.27';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -3572,7 +3572,7 @@
 
 
   // ---------- YouTube archive research (search / channel videos) ----------
-  const RESEARCH_TAGS = ['FPS', 'スト鯖', 'ソロゲー', 'コラボ', '雑談', '歌'];
+  const RESEARCH_TAGS = ['FPS', 'スト鯖', '大会', 'ソロゲー', 'コラボ', '雑談', '歌'];
   const research = {
     // 一覧にアクセスしただけでは外部APIを叩かない。開始操作はページ遷移で解除。
     collectionActive: false,
@@ -4529,6 +4529,14 @@
     return /\bvcr\b/i.test(t) && /(?:grand theft auto|\bgta\b|\brust\b|\bark\b|minecraft|マイクラ|マインクラフト)/i.test(`${game} ${t}`);
   }
 
+  // ゲームタイトルとは独立した大会関連分類。スクリムや大会の練習・振り返りも含める。
+  function isTournamentRelated(title = '') {
+    const t = normalizeResearchText(title).normalize('NFKC');
+    if (/(?:大会|選手権|トーナメント|スクリム|scrim|対抗戦|予選|準決勝|決勝|本戦|決定戦)/i.test(t)) return true;
+    // 大会名をタイトルに書き、配信自体は「顔合わせ」「練習」「振り返り」のケース。
+    return /(?:v最(?:協|強)?|v\s*saikyo|にじ(?:さんじ)?甲(?:子園)?|にじさんじ(?:マリカ|麻雀|スプラ|歌謡)杯|(?:cr|crazy\s*raccoon)\s*(?:cup|カップ)|(?:えぺ|エペ|apex)まつり|\bvcc\b|\bv\s*cc\b)/i.test(t);
+  }
+
   function researchMentionList(meta) {
     const arr = Array.isArray(meta?.mentions) ? meta.mentions : [];
     const seen = new Set();
@@ -4555,6 +4563,7 @@
     const tags = [];
     if (isFpsGame(game, title)) tags.push('FPS');
     if (isStreamServerSession(game, title)) tags.push('スト鯖');
+    if (isTournamentRelated(title)) tags.push('大会');
     if (gameish && !collab) tags.push('ソロゲー');
     if (collab) tags.push('コラボ');
     if (chat) tags.push('雑談');
@@ -4892,7 +4901,8 @@
 
     const wiki = entry.wikiInfo || null;
     const wikiPeople = [...(wiki?.collaborators || [])];
-    const baseCategories = researchCategories(entry.title, meta, entry.game);
+    const categoryTitle = [entry.title, meta?.title, wiki?.wikiTitle].filter(Boolean).join(' ');
+    const baseCategories = researchCategories(categoryTitle, meta, entry.game);
     entry.categories = [...baseCategories];
     if ((wikiPeople.length || wiki?.hasCollabNote) && !entry.categories.includes('コラボ')) entry.categories.push('コラボ');
     if (entry.categories.includes('コラボ')) entry.categories = entry.categories.filter(x => x !== 'ソロゲー');
