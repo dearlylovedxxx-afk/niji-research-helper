@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.24
+// @version      1.0.25
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.24';
+  const VERSION = '1.0.25';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -3572,7 +3572,7 @@
 
 
   // ---------- YouTube archive research (search / channel videos) ----------
-  const RESEARCH_TAGS = ['FPS', 'ソロゲー', 'コラボ', '雑談', '歌'];
+  const RESEARCH_TAGS = ['FPS', 'スト鯖', 'ソロゲー', 'コラボ', '雑談', '歌'];
   const research = {
     // 一覧にアクセスしただけでは外部APIを叩かない。開始操作はページ遷移で解除。
     collectionActive: false,
@@ -4521,6 +4521,14 @@
     return /valorant|apex|overwatch|counter-strike|rainbow[\s_-]*six|\br6s\b|シージ|tarkov|pubg|fortnite|delta force|marvel rivals|battlefield|call of duty/i.test(`${game} ${title}`);
   }
 
+  // ゲームタイトルではなく、ストリーマー向け共有サーバー企画の分類。
+  // GTA/RUST/ARKをプレイしているだけではスト鯖と判定しない。
+  function isStreamServerSession(game = '', title = '') {
+    const t = normalizeResearchText(title).normalize('NFKC');
+    if (/(?:スト(?:鯖|サバ)|ストリーマー(?:専用)?(?:サーバー|鯖)|ストグラ|\bnew\s*town\b|\bmad\s*town\b)/i.test(t)) return true;
+    return /\bvcr\b/i.test(t) && /(?:grand theft auto|\bgta\b|\brust\b|\bark\b|minecraft|マイクラ|マインクラフト)/i.test(`${game} ${t}`);
+  }
+
   function researchMentionList(meta) {
     const arr = Array.isArray(meta?.mentions) ? meta.mentions : [];
     const seen = new Set();
@@ -4546,6 +4554,7 @@
     const gameish = !!game || /(実況|初見プレイ|ゲーム|gameplay)/i.test(title);
     const tags = [];
     if (isFpsGame(game, title)) tags.push('FPS');
+    if (isStreamServerSession(game, title)) tags.push('スト鯖');
     if (gameish && !collab) tags.push('ソロゲー');
     if (collab) tags.push('コラボ');
     if (chat) tags.push('雑談');
