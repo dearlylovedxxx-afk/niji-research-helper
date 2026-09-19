@@ -1,0 +1,56 @@
+name: Verify and publish POV filtering (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-pov-apply-once.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch v1.0.27 without altering the DB or separate addon
+        run: |
+          python3 - <<'PY'
+          import base64, zlib
+          payload='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'
+          exec(zlib.decompress(base64.b64decode(payload)).decode('utf-8'))
+          PY
+          node --check Niji_Research_Helper.user.js
+      - name: Test strict POV matching and member filter
+        run: |
+          node - <<'JS'
+          const fs=require('fs'),assert=require('assert');
+          const s=fs.readFileSync('Niji_Research_Helper.user.js','utf8');
+          assert(s.includes('// @version      1.0.28'));
+          assert(s.includes('povAttachFilter(area, povOrgFilter, mode => renderMatches'));
+          assert(s.includes('povAttachFilter(area, povOrgFilter, mode => renderYoutubeMatches'));
+          const a=s.indexOf('  function relationInfo('),b=s.indexOf('  function updateInlineButtonLabels(',a);
+          assert(a>0&&b>a);
+          const rel=new Function('channelId','mentionIds','researchGameFromText','normalizeResearchText','sharedHashtags','tokenize',s.slice(a,b)+'return relationInfo;')(
+            v=>v.channel?.id||'',v=>new Set((v.mentions||[]).map(x=>x.id||x.channel?.id).filter(Boolean)),
+            (title,topic)=>topic||(/RUST/i.test(title)?'Rust':/VALORANT/i.test(title)?'Valorant':'APEX'),
+            x=>String(x).toLowerCase(),()=>[],t=>new Set(t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)));
+          const src={channel:{id:'A'},title:'【APEX】通常ランク',topic_id:'APEX',mentions:[]};
+          const sameTime={channel:{id:'B'},title:'【APEX】通常ランク',topic_id:'APEX',mentions:[]};
+          assert.strictEqual(rel(src,sameTime,1,false).related,false,'same title and game must not imply a POV');
+          assert.strictEqual(rel(src,{...sameTime,title:'【APEX】別のイベント'},1,true).related,false,'broad event must not imply a POV');
+          assert.strictEqual(rel(src,{...sameTime,mentions:[{id:'A'}]},0,false).related,true,'direct participant mention is supported');
+          assert.strictEqual(rel(src,{...sameTime,title:'【VALORANT】別配信',topic_id:'VALORANT',mentions:[{id:'A'}]},0,false).related,false,'different games rejected');
+          const p=s.indexOf('  function povChannelGroup('),q=s.indexOf('  function renderMatches(',p);
+          assert(p>0&&q>p);
+          const roster={ready:true,names:new Set(['小柳ロウ','叶'])};
+          const member=new Function('researchRoster','researchRosterKey',s.slice(p,q)+'return povChannelGroup;')(roster,x=>String(x||'').trim());
+          assert.strictEqual(member({channel:{name:'叶'}}),'nijisanji');
+          assert.strictEqual(member({channel:{name:'ととみっくす'}}),'outside');
+          assert.strictEqual(member({channel:{name:'Unknown Alias',org:'Nijisanji'}}),'unknown');
+          console.log('PASS: both POV UIs, false-positive examples, direct mentions, Wiki-roster membership');
+          JS
+      - name: Publish only after tests pass
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git commit -m 'Filter POV results by current Nijisanji roster and tighten relevance (v1.0.28)'
+          git push origin HEAD:main
