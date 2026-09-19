@@ -1,0 +1,55 @@
+name: Verify mobile Trusted Types roster fix (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-trustedtypes-apply-once.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch and validate syntax
+        run: |
+          python3 .github/scripts/nrh_trustedtypes_patch_once.py
+          node --check Niji_Research_Helper.user.js
+      - name: Validate roster against live Wiki with DOMParser disabled
+        run: |
+          python3 - <<'PY'
+          import requests
+          u='https://wikiwiki.jp/nijisanji/%E5%85%AC%E5%BC%8F%E3%83%A9%E3%82%A4%E3%83%90%E3%83%BC'
+          r=requests.get(u, timeout=25, headers={'User-Agent':'Mozilla/5.0'})
+          r.raise_for_status()
+          open('/tmp/nrh-official-roster.html','w',encoding='utf-8').write(r.text)
+          print('Wiki HTTP',r.status_code,'bytes',len(r.content))
+          PY
+          node - <<'JS'
+          const fs=require('node:fs'),assert=require('node:assert/strict');
+          const s=fs.readFileSync('Niji_Research_Helper.user.js','utf8');
+          const fn=(name)=>{const escaped=name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');const m=s.match(new RegExp('  function '+escaped+'\\([^\\n]*\\) \\{[\\s\\S]*?\\n  \\}')); assert(m,'Missing '+name);return m[0]};
+          const start=s.indexOf('  const RESEARCH_COLLAB_GROUPS = ');
+          const end=s.indexOf('  function paintResearchCollaboratorButton(',start);
+          assert(start>0&&end>start);
+          const rosterBlock=s.slice(start,end);
+          assert(!rosterBlock.includes('new DOMParser()'),'DOMParser must not parse roster');
+          const code=[fn('normalizeResearchText'),fn('wikiDecodeEntities'),fn('normalizeCollaboratorName'),rosterBlock,'return {parseNijisanjiRosterHtml,researchRosterKey,researchCollaboratorOrgGroups,researchRoster};'].join('\n');
+          const parserThatMustNeverRun=class {parseFromString(){throw new TypeError('This assignment requires a TrustedHTML.')}};
+          const impl=new Function('DOMParser','WIKI_BASE',code)(parserThatMustNeverRun,'https://wikiwiki.jp/nijisanji');
+          const roster=impl.parseNijisanjiRosterHtml(fs.readFileSync('/tmp/nrh-official-roster.html','utf8'));
+          console.log('Current members',roster.members,'aliases',roster.names.length);
+          assert(roster.members>=190&&roster.members<=260);
+          impl.researchRoster.names=new Set(roster.names);impl.researchRoster.ready=true;
+          for(const person of ['小柳ロウ','叶','Elira Pendora'])assert(roster.names.includes(impl.researchRosterKey(person)),'missing member '+person);
+          for(const person of ['ととみっくす','白雪レイド','渋谷ハル','勇気ちひろ'])assert(!roster.names.includes(impl.researchRosterKey(person)),'incorrect member '+person);
+          assert.deepEqual([...impl.researchCollaboratorOrgGroups({collaborators:['叶','ととみっくす']})].sort(),['nijisanji','outside']);
+          assert.deepEqual([...impl.researchCollaboratorOrgGroups({collaborators:['叶','ととみっくす'],meta:{mentions:[{name:'叶',english_name:'Kanae'}]}})].sort(),['nijisanji','outside']);
+          console.log('PASS: live Wiki roster and TotoMix outside classification; no TrustedHTML required');
+          JS
+      - name: Publish verified script
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git commit -m 'Fix Wiki roster parsing under mobile Trusted Types (v1.0.26)'
+          git push origin HEAD:main
