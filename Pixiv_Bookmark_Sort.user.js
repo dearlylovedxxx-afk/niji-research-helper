@@ -1,106 +1,162 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.5.3
-// @description  ブックマーク順の検索結果を、スマホでも見える独立した一覧に表示。
+// @version      0.5.4
+// @description  ブクマ順の結果カードにタグとキャプションの冒頭抜粋を表示。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
 // @require      https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/9eb97e51cedba0d081db3cc7331ecc8c01ea6685/Pixiv_Bookmark_Sort.user.js
+// @require      https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/3f0ff7bae96d515e81a9c78116b58c0b3a014f51/Pixiv_Bookmark_Sort.user.js
 // ==/UserScript==
 (() => {
   'use strict';
-  // v0.5.2 を同じリポジトリの固定コミットから読み込む。DB・調査結果はそのまま。
-  const oldHostId = 'pixiv-bookmark-sort-cross-page-v05';
-  let attached = false;
-  function attachViewer() {
-    if (attached) return true;
-    const host = document.getElementById(oldHostId), root = host && host.shadowRoot;
-    const source = root && root.querySelector('.results');
-    const counted = root && root.querySelector('.counted');
-    if (!source || !counted) return false;
-    attached = true;
+  // 既存の検索・順位・保存機能には触れず、v0.5.3の結果画面だけを拡張する。
+  const cache = new Map();
+  let dbPromise;
+  function openDb() {
+    if (!dbPromise) dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open('pixiv-bookmark-sort-extras-v01', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('details', {keyPath: 'key'});
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }).catch(() => null);
+    return dbPromise;
+  }
+  async function load(key) {
+    if (cache.has(key)) return cache.get(key);
+    const db = await openDb();
+    if (!db) return null;
+    return new Promise(resolve => {
+      const req = db.transaction('details', 'readonly').objectStore('details').get(key);
+      req.onsuccess = () => {if (req.result) cache.set(key, req.result); resolve(req.result || null);};
+      req.onerror = () => resolve(null);
+    });
+  }
+  async function save(data) {
+    cache.set(data.key, data);
+    const db = await openDb();
+    if (!db) return;
+    try {db.transaction('details', 'readwrite').objectStore('details').put(data);} catch (_) {}
+  }
+  function excerpt(html) {
+    const doc = new DOMParser().parseFromString(String(html || '').replace(/<br\s*\/?\s*>/gi, '\n').replace(/<\/p\s*>/gi, '\n'), 'text/html');
+    const text = (doc.body.textContent || '').replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n[ \t]*\n+/g, '\n').trim();
+    const chars = Array.from(text);
+    return chars.slice(0, 180).join('') + (chars.length > 180 ? '…' : '');
+  }
+  function parse(body, key) {
+    const raw = Array.isArray(body.tags) ? body.tags : body.tags && body.tags.tags;
+    const tags = Array.isArray(raw) ? raw.map(t => typeof t === 'string' ? t : t && t.tag)
+      .filter(t => typeof t === 'string' && t.trim()).map(t => t.trim()) : [];
+    return {key, tags: [...new Set(tags)], caption: excerpt(body.description || body.caption || '')};
+  }
+  function workKey(row) {
+    let url;
+    try {url = new URL(row.href);} catch (_) {return null;}
+    const novel = url.pathname === '/novel/show.php' || /^\/novels\/\d+\/?$/.test(url.pathname);
+    const id = novel ? (url.searchParams.get('id') || url.pathname.match(/\/novels\/(\d+)/)?.[1])
+      : url.pathname.match(/^\/artworks\/(\d+)/)?.[1];
+    return id && /^\d+$/.test(id) ? (novel ? 'novel:' : 'illust:') + id : null;
+  }
+  function attach() {
+    const root = document.getElementById('pixiv-bookmark-sort-cross-page-v05')?.shadowRoot;
+    const overlay = root?.querySelector('.pbs-overlay');
+    const list = overlay?.querySelector('.pbs-list');
+    if (!list || overlay.dataset.pbsExtrasAttached) return !!list;
+    overlay.dataset.pbsExtrasAttached = '1';
     const css = document.createElement('style');
     css.textContent = `
-      .pbs-view-button { display:block!important; width:100%!important; padding:13px!important;
-        margin:10px 0 0!important; border:0!important; border-radius:9px!important;
-        background:#1976d2!important; color:#fff!important; font-size:16px!important;
-        font-weight:700!important; cursor:pointer!important; }
-      .pbs-overlay { display:none!important; position:fixed!important; inset:0!important;
-        width:100vw!important; height:100vh!important; height:100dvh!important;
-        background:#f5f6fb!important; z-index:2147483647!important;
-        overflow-y:scroll!important; -webkit-overflow-scrolling:touch; }
-      .pbs-overlay.pbs-open { display:block!important; }
-      .pbs-header { position:sticky; top:0; z-index:1; background:white;
-        border-bottom:1px solid #ddd; padding:12px; color:#263040; }
-      .pbs-toolbar { display:flex; align-items:center; justify-content:space-between; gap:8px; }
-      .pbs-toolbar strong { font-size:17px; }
-      .pbs-back { color:#263040!important; font-size:14px!important; }
-      .pbs-summary { font-size:12px; color:#586277; margin-top:7px; line-height:1.5; }
-      .pbs-list { display:block!important; padding:10px 10px 70px!important; }
-      .pbs-row { display:flex!important; align-items:flex-start!important; gap:12px!important;
-        margin:0 0 10px!important; padding:10px!important; min-height:65px!important;
-        background:#fff!important; border:1px solid #e2e6ed!important;
-        border-radius:10px!important; text-decoration:none!important; color:#263040!important; }
-      .pbs-row img { display:block!important; flex:none!important; width:76px!important;
-        height:100px!important; max-width:76px!important; object-fit:contain!important;
-        background:#eef0f4!important; }
-      .pbs-row .info { display:block!important; min-width:0!important; flex:1!important;
-        padding:0!important; font-size:13px!important; overflow-wrap:anywhere!important; }
-      .pbs-row .num,.pbs-row .count { color:#c52650!important; font-size:16px!important;
-        font-weight:800!important; margin-bottom:5px!important; }
-      .pbs-row .title,.pbs-row .name { font-size:13px!important; font-weight:600!important; }
-      .pbs-row .author { font-size:12px!important; color:#667286!important; margin-top:5px!important; }
+      .pbs-extra {display:block!important;margin-top:10px!important;font-size:12px!important;line-height:1.5!important;color:#4b5870!important;}
+      .pbs-extra-tags {display:flex!important;flex-wrap:wrap!important;gap:4px!important;margin-bottom:7px!important;}
+      .pbs-extra-tag {display:inline-block!important;border-radius:5px!important;padding:2px 5px!important;background:#edf5fe!important;color:#24689d!important;font-size:11px!important;}
+      .pbs-extra-caption {display:-webkit-box!important;-webkit-box-orient:vertical!important;-webkit-line-clamp:5!important;overflow:hidden!important;white-space:pre-line!important;overflow-wrap:anywhere!important;}
+      .pbs-extra-status {font-size:12px!important;line-height:1.5!important;color:#586277!important;margin-top:6px!important;}
+      .pbs-extra-status.error {color:#bb244a!important;}
     `;
     root.appendChild(css);
-    const button = document.createElement('button');
-    button.type = 'button'; button.className = 'pbs-view-button';
-    button.textContent = '📚 ブクマ順の結果を見る';
-    counted.after(button);
-    const overlay = document.createElement('section');
-    overlay.className = 'pbs-overlay';
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.innerHTML = `<div class='pbs-header'>
-      <div class='pbs-toolbar'><strong>♥ ブックマーク数順</strong>
-      <button type='button' class='pbs-back'>← 調査画面へ戻る</button></div>
-      <div class='pbs-summary'></div></div><div class='pbs-list'></div>`;
-    root.appendChild(overlay);
-    const list = overlay.querySelector('.pbs-list');
-    function showResults() {
-      const cards = Array.from(source.querySelectorAll('a.card'));
-      const fragment = document.createDocumentFragment();
-      for (const card of cards) {
-        const copy = card.cloneNode(true);
-        copy.className = 'pbs-row';
-        fragment.appendChild(copy);
-      }
-      if (!cards.length) {
-        const p = document.createElement('p');
-        p.textContent = 'まだ表示できる作品がありません。調査結果が表示されるまで少し待つか、最低ブクマ数を下げてください。';
-        p.style.cssText = 'padding:15px;color:#586277;font-size:13px;';
-        fragment.appendChild(p);
-      }
-      list.replaceChildren(fragment);
-      overlay.querySelector('.pbs-summary').textContent =
-        counted.textContent + ' ／ 一覧を表示中：' + cards.length + '作品';
+    const status = document.createElement('div');
+    status.className = 'pbs-extra-status';
+    overlay.querySelector('.pbs-summary')?.after(status);
+    const queue = [], queued = new Set();
+    let working = false, halted = false, lastRequest = 0;
+    function display(row, detail) {
+      if (!row.isConnected) return;
+      const extra = row.querySelector('.pbs-extra');
+      if (!extra) return;
+      const tags = document.createElement('div'); tags.className = 'pbs-extra-tags';
+      if (detail.tags.length) for (const tag of detail.tags) {
+        const chip = document.createElement('span'); chip.className = 'pbs-extra-tag';
+        chip.textContent = '#' + tag; tags.append(chip);
+      } else tags.textContent = 'タグなし';
+      const caption = document.createElement('div'); caption.className = 'pbs-extra-caption';
+      caption.textContent = detail.caption ? 'キャプション：' + detail.caption : 'キャプションの記載なし';
+      extra.replaceChildren(tags, caption);
     }
-    button.addEventListener('click', () => {
-      showResults(); overlay.classList.add('pbs-open'); overlay.scrollTop = 0;
-    });
-    overlay.querySelector('.pbs-back').addEventListener('click', () => overlay.classList.remove('pbs-open'));
-    // 取得が続く場合にも、表示中の一覧を自動で更新する。
-    new MutationObserver(() => {
-      if (overlay.classList.contains('pbs-open')) showResults();
-    }).observe(source, { childList: true });
-    const oldClose = root.querySelector('.close');
-    if (oldClose) oldClose.addEventListener('click', () => overlay.classList.remove('pbs-open'));
+    function enqueue(row) {
+      const key = row.dataset.pbsExtraKey;
+      if (!key || queued.has(key) || halted || cache.has(key)) return;
+      queued.add(key); queue.push({key, row}); void pump();
+    }
+    async function pump() {
+      if (working || halted || !overlay.classList.contains('pbs-open')) return;
+      working = true;
+      try {
+        while (queue.length && !halted && overlay.classList.contains('pbs-open')) {
+          const {key, row} = queue.shift(); queued.delete(key);
+          if (!row.isConnected) continue;
+          let detail = await load(key);
+          if (!detail) {
+            const wait = Math.max(0, 2600 - (Date.now() - lastRequest));
+            if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+            if (!overlay.classList.contains('pbs-open')) {enqueue(row); break;}
+            lastRequest = Date.now();
+            let res;
+            try {res = await fetch('/ajax/' + key.replace(':', '/'), {credentials: 'same-origin', headers: {Accept: 'application/json'}});}
+            catch (_) {halted = true; status.textContent = '通信に失敗しました。再読み込み後にお試しください。'; status.classList.add('error'); break;}
+            if (!res.ok) {
+              if (res.status === 404) {row.querySelector('.pbs-extra').textContent = '作品情報を取得できません（404）'; continue;}
+              halted = true; status.textContent = `追加情報の取得を停止しました（HTTP ${res.status}）。時間を置いて再読み込みしてください。自動再試行はしません。`;
+              status.classList.add('error'); break;
+            }
+            const json = await res.json().catch(() => null);
+            if (!json || json.error || !json.body) {halted = true; status.textContent = '作品情報を確認できないため取得を停止しました。'; status.classList.add('error'); break;}
+            detail = parse(json.body, key); await save(detail);
+          }
+          // 表示中のカードのみ更新。調査DBや順位は変更しない。
+          if (row.isConnected) display(row, detail);
+          if (!halted) status.textContent = `タグ・キャプション：${cache.size}件を保存済み。画面に見えている作品から順に取得します。`;
+        }
+      } finally {working = false;}
+    }
+    const io = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+      for (const item of entries) if (item.isIntersecting) enqueue(item.target);
+    }, {root: overlay, rootMargin: '160px 0px'}) : null;
+    function enhance() {
+      for (const row of list.querySelectorAll('a.pbs-row:not([data-pbs-extra-ready])')) {
+        row.dataset.pbsExtraReady = '1';
+        const key = workKey(row);
+        if (!key) continue;
+        row.dataset.pbsExtraKey = key;
+        const extra = document.createElement('div'); extra.className = 'pbs-extra';
+        extra.textContent = 'タグ・キャプションを読み込み待ち…';
+        (row.querySelector('.info') || row).append(extra);
+        if (cache.has(key)) display(row, cache.get(key));
+        else if (io) io.observe(row);
+        else if (list.querySelectorAll('a.pbs-row').length <= 30) enqueue(row);
+      }
+      if (!halted) status.textContent = `タグ・キャプションは表示中の作品から順に追加取得します（約2.6秒に1件）。取得済み分は保存します。`;
+      void pump();
+    }
+    new MutationObserver(enhance).observe(list, {childList: true});
+    overlay.querySelector('.pbs-back')?.addEventListener('click', () => io?.disconnect());
+    enhance();
     return true;
   }
-  if (!attachViewer()) {
-    let count = 0;
-    const t = setInterval(() => { if (attachViewer() || ++count > 120) clearInterval(t); }, 250);
+  if (!attach()) {
+    let tries = 0;
+    const timer = setInterval(() => {if (attach() || ++tries > 120) clearInterval(timer);}, 250);
   }
 })();
