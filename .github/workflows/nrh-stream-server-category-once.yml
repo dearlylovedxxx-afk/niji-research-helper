@@ -25,7 +25,7 @@ jobs:
           once("const VERSION = '1.0.24';", "const VERSION = '1.0.25';")
           once("const RESEARCH_TAGS = ['FPS', 'ソロゲー', 'コラボ', '雑談', '歌'];", "const RESEARCH_TAGS = ['FPS', 'スト鯖', 'ソロゲー', 'コラボ', '雑談', '歌'];")
           anchor="  function researchMentionList(meta) {"
-          helper=r'''  // ゲームタイトルではなく、ストリーマー向け共有サーバー企画の分類。
+          helper=r'''// ゲームタイトルではなく、ストリーマー向け共有サーバー企画の分類。
           // GTA/RUST/ARKをプレイしているだけではスト鯖と判定しない。
           function isStreamServerSession(game = '', title = '') {
             const t = normalizeResearchText(title).normalize('NFKC');
@@ -34,6 +34,7 @@ jobs:
           }
 
           '''
+          helper='\n'.join(('  '+line if line else '') for line in helper.split('\n'))
           once(anchor,helper+anchor)
           once("    if (isFpsGame(game, title)) tags.push('FPS');", "    if (isFpsGame(game, title)) tags.push('FPS');\n    if (isStreamServerSession(game, title)) tags.push('スト鯖');")
           p.write_text(s,'utf-8')
