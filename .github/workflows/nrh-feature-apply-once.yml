@@ -1,0 +1,48 @@
+name: Apply channel-auto and live-POV improvements (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-feature-apply-once.yml
+permissions:
+  contents: write
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply guarded patch
+        run: python tools/nrh_compact_patch_1030.py
+      - name: Check JavaScript syntax
+        run: node --check Niji_Research_Helper.user.js
+      - name: Test on-demand candidate discovery and channel key isolation
+        run: |
+          node <<'JS'
+          const fs = require('fs'), assert = require('assert');
+          const s = fs.readFileSync('Niji_Research_Helper.user.js','utf8');
+          const fn = (first,last,dependencies,values) => {
+            const a=s.indexOf(first), b=s.indexOf(last,a+first.length);
+            assert(a>=0&&b>a,`Function not found: ${first}`);
+            return Function(...dependencies,s.slice(a,b)+'\nreturn '+first.match(/function\s+(\w+)/)[1]+';')(...values);
+          };
+          const paths=[];
+          const source={id:'source',topic_id:'splatoon3',start_actual:'2026-09-20T10:00:00Z',end_actual:'2026-09-20T12:00:00Z'};
+          const apiGet=async path=>{paths.push(path);return path.includes('org=Nijisanji')
+            ? [{id:'nijisanji-view'}] : [{id:'external-view'}];};
+          const fetch=fn('async function fetchCandidates(source) {','function buildMatches(source, videos, syncOffset = null) {',
+            ['startOf','endOf','state','apiGet'],[x=>new Date(x.start_actual),x=>new Date(x.end_actual),{settings:{searchWindowHours:24}},apiGet]);
+          fetch(source).then(v=>{
+            assert.deepStrictEqual(v.map(x=>x.id),['nijisanji-view','external-view']);
+            assert(paths.some(x=>x.includes('topic=splatoon3')&&!x.includes('org=')));
+            assert(!s.includes('const others = []; // Hide unrelated overlapping broadcasts completely.'));
+            assert(s.includes('sameGame: relation.sameGame'));
+            assert(s.includes('autoResearchChannels'));
+            console.log('PASS: live on-demand POV search, no-org topic pass, preference and candidate markers');
+          }).catch(e=>{console.error(e);process.exitCode=1;});
+          JS
+      - name: Commit tested userscript without touching IndexedDB or credentials
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git commit -m 'Add per-channel opt-in archive collection and unverified same-game POV candidates (v1.0.30)'
+          git push origin HEAD:main
