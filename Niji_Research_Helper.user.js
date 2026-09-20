@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.30
+// @version      1.0.31
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.30';
+  const VERSION = '1.0.31';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -3739,6 +3739,33 @@
     return out;
   }
 
+  // Wiki free-text: "1:03:10~からAがVC合流、1:28:00~からB、2:15:30~からCが合流".
+  // A timestamp + an explicit participation word in the SAME note are required;
+  // never infer participants from ordinary timestamps, titles or interviews.
+  function wikiExtractJoinPeople(line = '') {
+    const text = String(line || '').replace(/[\u00a0\u3000]/g, ' ').trim();
+    if (!/(?:VC|ボイチャ|通話|合流|途中参加)/i.test(text)) return [];
+    const stamp = /(\d{1,2}:\d{2}(?::\d{2})?)\s*[~～〜]\s*から\s*/g;
+    const hits = [...text.matchAll(stamp)];
+    const out = [];
+    for (let i = 0; i < hits.length; i++) {
+      const end = i + 1 < hits.length ? hits[i + 1].index : text.length;
+      let segment = text.slice(hits[i].index + hits[i][0].length, end)
+        .replace(/^[、，,・･\s]+|[、，,。．.!！\s]+$/g, '')
+        .replace(/(?:が|と|も)?\s*(?:VC|ボイチャ|通話)?\s*(?:に)?(?:合流|途中参加)(?:した|する|予定)?\s*$/i, '')
+        .replace(/[、，,。．.!！\s]+$/g, '').trim();
+      // Only a short name / comma-separated names are supported. Do not turn
+      // arbitrary prose, notes or the channel owner into collaborators.
+      if (!segment || segment.length > 65 || /(?:https?:|[：:]|配信|コメント|時間|から|まで|実況|解説|インタビュー|不参加|なし)/i.test(segment)) continue;
+      for (const raw of segment.split(/[、，,]/)) {
+        const name = wikiCleanPersonName(raw).trim();
+        if (!name || name.length > 32 || /[。.!！?？()（）]/.test(name)) continue;
+        if (!out.some(p => p.name === name)) out.push({name, at: hits[i][1]});
+      }
+    }
+    return out;
+  }
+
   function wikiParsePage(html = '', sourceUrl = '') {
     const raw = String(html || '');
     const anchors = [];
@@ -3780,6 +3807,7 @@
       const lines = text.split('\n').map(x => x.trim()).filter(Boolean);
       const collaborators = [];
       const collaboratorLabels = [];
+      const collaboratorJoinTimes = {};
       const notes = [];
       let hasCollabNote = false;
 
@@ -3796,6 +3824,11 @@
 
       for (let li = 0; li < lines.length; li++) {
         const line = lines[li];
+        for (const {name, at} of wikiExtractJoinPeople(line)) {
+          collaborators.push(name);
+          collaboratorJoinTimes[name] ||= at;
+          hasCollabNote = true;
+        }
         // 行頭固定にしない。Wikiのテーブル記号・注記・案件文の後に
         // 「コラボ相手：」が続くケースも拾う。
         const pm = line.match(personAnyRe);
@@ -3846,12 +3879,13 @@
         seenPeople.add(key); uniquePeople.push(p);
       }
       const info = entries[a.id] || {
-        videoId: a.id, wikiTitle: a.title, collaborators: [], collaboratorLabels: [], notes: [], hasCollabNote: false, sourceUrl
+        videoId: a.id, wikiTitle: a.title, collaborators: [], collaboratorLabels: [], collaboratorJoinTimes: {}, notes: [], hasCollabNote: false, sourceUrl
       };
       info.wikiTitle ||= a.title;
       info.hasCollabNote = info.hasCollabNote || hasCollabNote;
       info.collaborators = [...new Set([...(info.collaborators || []), ...uniquePeople])];
       info.collaboratorLabels = [...new Set([...(info.collaboratorLabels || []), ...collaboratorLabels])];
+      info.collaboratorJoinTimes = {...(info.collaboratorJoinTimes || {}), ...collaboratorJoinTimes};
       info.notes = [...new Set([...(info.notes || []), ...notes])].slice(0, 8);
       info.sourceUrl = sourceUrl;
       entries[a.id] = info;
@@ -3982,6 +4016,7 @@
           wikiDate: wikiDate || '',
           collaborators: [],
           collaboratorLabels: [],
+          collaboratorJoinTimes: {},
           notes: [],
           hasCollabNote: false,
           sourceUrl,
@@ -4012,6 +4047,11 @@
       const plain = wikiSourceLineToPlain(rawLine);
       if (!plain) continue;
 
+      for (const {name, at} of wikiExtractJoinPeople(plain)) {
+        info.hasCollabNote = true;
+        info.collaborators.push(name);
+        info.collaboratorJoinTimes[name] ||= at;
+      }
       const fields = wikiExtractPeopleFields(plain);
       for (const { label, value } of fields) {
         const people = wikiParsePeople(value);
@@ -4045,13 +4085,14 @@
     const out = { ...base };
     for (const [id, e] of Object.entries(extra || {})) {
       const cur = out[id] || {
-        videoId: id, wikiTitle: '', wikiDate: '', wikiYear: null, collaborators: [], collaboratorLabels: [], notes: [], hasCollabNote: false, sourceUrl: e?.sourceUrl || ''
+        videoId: id, wikiTitle: '', wikiDate: '', wikiYear: null, collaborators: [], collaboratorLabels: [], collaboratorJoinTimes: {}, notes: [], hasCollabNote: false, sourceUrl: e?.sourceUrl || ''
       };
       cur.wikiTitle ||= e?.wikiTitle || '';
       cur.wikiDate ||= e?.wikiDate || '';
       cur.wikiYear ||= e?.wikiYear || null;
       cur.collaborators = [...new Set([...(cur.collaborators || []), ...(e?.collaborators || [])])];
       cur.collaboratorLabels = [...new Set([...(cur.collaboratorLabels || []), ...(e?.collaboratorLabels || [])])];
+      cur.collaboratorJoinTimes = {...(cur.collaboratorJoinTimes || {}), ...(e?.collaboratorJoinTimes || {})};
       cur.notes = [...new Set([...(cur.notes || []), ...(e?.notes || [])])].slice(0, 8);
       cur.hasCollabNote = !!(cur.hasCollabNote || e?.hasCollabNote || cur.collaborators.length);
       cur.sourceUrl = e?.sourceUrl || cur.sourceUrl || '';
@@ -4426,7 +4467,10 @@
     entry.wikiError = '';
     entry.wikiSkipReason = '';
     // 新しい年別ページが一時的に欠けても、DBの既存コラボ情報を消さない。
-    entry.wikiInfo = info || entry.wikiInfo || null;
+    // A successful refresh adds new participants without discarding saved ones.
+    entry.wikiInfo = info && entry.wikiInfo
+      ? wikiMergeEntries({[entry.id]: entry.wikiInfo}, {[entry.id]: info})[entry.id]
+      : (info || entry.wikiInfo || null);
     entry.wikiSourceUrl = info?.sourceUrl || entry.wikiInfo?.sourceUrl || dataset?.sourceUrl || '';
     if (entry?.id) void nrhDbSaveWikiInfo(entry.id, entry.wikiInfo, entry.wikiSourceUrl).catch(() => {});
   }
@@ -5014,7 +5058,8 @@
         const b = document.createElement('button');
         b.type = 'button';
         b.className = `npf-r-pill npf-r-collab-person${wikiPeople.length ? ' npf-r-wiki' : ''}`;
-        b.textContent = `🤝 ${person}`;
+        const joinedAt = wiki?.collaboratorJoinTimes?.[person];
+        b.textContent = `🤝 ${person}${joinedAt ? ` (${joinedAt}〜)` : ''}`;
         b.dataset.collaborator = person;
         b.title = `${person}：絞り込み → 除外 → 解除`;
         b.addEventListener('click', e => {
