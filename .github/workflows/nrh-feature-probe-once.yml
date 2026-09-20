@@ -1,0 +1,30 @@
+name: Inspect NRH research and POV functions (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh-feature-probe-once.yml
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Print relevant function excerpts
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          lines = Path('Niji_Research_Helper.user.js').read_text().splitlines()
+          markers = ['async function fetchCandidates(', 'function buildMatches(', 'function renderYoutubeMatches(', 'async function searchOtherPovsFromYoutube(', 'const research =', 'function updateResearchCollectionControls(', 'function startResearchCollection(', 'function handleResearchNavigation(', 'function bindResearchCard(', 'function scanYoutubeResearchCards(', 'function researchCategories(', 'function isYoutubeResearchPage(', 'function apiGet(', 'function researchCategoryPassesFilters(', 'function createResearchPanel(', 'function ensureResearchUi(', 'function nrhDbSaveVideoMeta(', 'function correctedCandidateOffset(']
+          print('TOTAL_LINES', len(lines))
+          for marker in markers:
+              indexes = [i for i,s in enumerate(lines) if marker in s]
+              for i in indexes[:2]:
+                  print('\n==========', marker, 'AT', i + 1, '==========')
+                  for j in range(max(0, i - 2), min(len(lines), i + 64)):
+                      print(f'{j+1}: {lines[j]}')
+          print('\n========== REFERENCES ==========')
+          for i,s in enumerate(lines):
+              if any(x in s for x in ['fetchCandidates(', 'buildMatches(', 'collectionActive', 'renderYoutubeMatches(', 'npf-r-collection-toggle']):
+                  print(f'{i+1}: {s[:200]}')
+          PY
