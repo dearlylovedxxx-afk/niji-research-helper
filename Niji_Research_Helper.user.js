@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.29
+// @version      1.0.30
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.29';
+  const VERSION = '1.0.30';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -407,6 +407,7 @@
     eventFirst: true,
     searchWindowHours: 24,
     youtubeCopyMode: 'title-url',
+    autoResearchChannels: [],
   };
 
   const state = {
@@ -1545,12 +1546,14 @@
     // A shared broad event like VCR RUST can last days; it is never sufficient.
     const wellMatchedEvent = !!(event && sameTopic && sim >= 0.65 && distinctive.length);
     const wellMatchedTag = !!(specificTags.length && sameTopic && sim >= 0.5 && distinctive.length);
+    const sameGame = !!(sourceGame && candidateGame && gameCompatible &&
+      normalizeResearchText(sourceGame) === normalizeResearchText(candidateGame));
     const related = !!(gameCompatible && (directMention || wellMatchedEvent || wellMatchedTag));
     const reasons = [];
     if (related && directMention) reasons.push('相互の参加者情報');
     if (related && wellMatchedEvent) reasons.push('同イベント＋特徴的なタイトル');
     if (related && wellMatchedTag) reasons.push(`固有タグ ${specificTags[0]}`);
-    return { related, reasons, directMention, tags:specificTags, sameTopic };
+    return { related, sameGame, reasons, directMention, tags:specificTags, sameTopic };
   }
 
   function updateInlineButtonLabels(videoId) {
@@ -2343,39 +2346,35 @@
   // ---------- POV search ----------
   async function fetchCandidates(source) {
     const ss = startOf(source), se = endOf(source);
-    if (!ss || !se) throw new Error('元アーカイブの開始・終了時刻を取得できませんでした');
-
+    if (!ss || !se || Number.isNaN(+ss) || Number.isNaN(+se))
+      throw new Error('元アーカイブの開始・終了時刻を取得できませんでした');
     const h = Number(state.settings.searchWindowHours || 24);
-    const from = new Date(ss.getTime() - h * 3600 * 1000);
-    const to = new Date(se.getTime() + h * 3600 * 1000);
-
-    const all = [];
-    for (let offset = 0, pages = 0; pages < 20; pages++, offset += 50) {
-      const q = new URLSearchParams({
-        org: 'Nijisanji',
-        type: 'stream',
-        status: 'past',
-        include: 'live_info,mentions',
-        sort: 'available_at',
-        order: 'asc',
-        limit: '50',
-        offset: String(offset),
-        from: from.toISOString(),
-        to: to.toISOString(),
-      });
-
-      const arr = await apiGet(`/videos?${q.toString()}`);
-      if (!Array.isArray(arr)) break;
-      all.push(...arr);
-      if (arr.length < 50) break;
+    const searches = [
+      {org:'Nijisanji',from:new Date(+ss-h*3600000),to:new Date(+se+h*3600000),max:20},
+      // A separate live Holodex request, never requiring the archive DB.
+      {topic:String(source.topic_id || '').trim(),from:new Date(+ss-3600000),to:new Date(+se+3600000),max:10},
+    ];
+    const found = new Map();
+    for (const query of searches) {
+      for (let offset=0, pages=0; pages<query.max; pages++,offset+=50) {
+        const q = new URLSearchParams({type:'stream',status:'past',include:'live_info,mentions',
+          sort:'available_at',order:'asc',limit:'50',offset:String(offset),
+          from:query.from.toISOString(),to:query.to.toISOString()});
+        if (query.org) q.set('org',query.org);
+        if (query.topic) q.set('topic',query.topic);
+        const arr = await apiGet(`/videos?${q.toString()}`);
+        if (!Array.isArray(arr)) break;
+        for (const v of arr) if (v?.id) found.set(v.id,v);
+        if (arr.length<50) break;
+      }
     }
-    return all;
+    return [...found.values()];
   }
 
   function buildMatches(source, videos, syncOffset = null) {
     const ss = startOf(source), se = endOf(source);
     const sourceDuration = Math.max(1, (se - ss) / 1000);
-    const hasSync = Number.isFinite(Number(syncOffset));
+    const hasSync = syncOffset != null && Number.isFinite(Number(syncOffset));
     const syncSec = hasSync ? Number(syncOffset) : null;
     const targetMoment = hasSync ? new Date(ss.getTime() + syncSec * 1000) : null;
 
@@ -2414,6 +2413,7 @@
         return {
           v, cs, ce, overlapStart, overlapEnd, overlap, overlapRatio, sim, event, favorite, score,
           related: relation.related,
+          sameGame: relation.sameGame,
           reasons: relation.reasons,
           sameTopic: relation.sameTopic,
           directMention: relation.directMention,
@@ -2615,9 +2615,9 @@
     if (!area) return;
 
     const related = matches.filter(m => m.related && povGroupPass(m.v, povOrgFilter));
-    const others = []; // Never offer unrelated parallel streams as POVs.
-    const hasSync = Number.isFinite(Number(syncOffset));
-    let showOthers = false;
+    const others = matches.filter(m => !m.related && m.sameGame && povGroupPass(m.v,povOrgFilter)).slice(0,40);
+    const hasSync = syncOffset != null && Number.isFinite(Number(syncOffset));
+    let showOthers = true;
 
     function draw() {
       const visible = showOthers ? [...related, ...others] : related;
@@ -2668,7 +2668,7 @@
                     ? `<span class="npf-badge relation">${escapeHtml(m.reasons.join(' / '))}</span>`
                     : ''}
                   ${m.event ? '<span class="npf-badge event">同イベント候補</span>' : ''}
-                  ${!m.related ? '<span class="npf-badge">同時刻のみ</span>' : ''}
+                  ${!m.related ? '<span class="npf-badge">同時刻・同ゲーム／参加者未確認</span>' : ''}
                 </div>
                 ${hasSync ? `
                   <div class="npf-cal-row">
@@ -2982,9 +2982,7 @@
     povAttachFilter(area, povOrgFilter, mode => renderYoutubeMatches(source, matches, syncOffset, mode));
 
     const related = matches.filter(m => m.related && povGroupPass(m.v, povOrgFilter));
-    const others = []; // Hide unrelated overlapping broadcasts completely.
-    // お気に入りは「関連候補の中」でのみ優先する。
-    // 関連判定に入らない同時刻配信は、お気に入りでも自動表示しない。
+    const others = matches.filter(m => !m.related && m.sameGame && povGroupPass(m.v,povOrgFilter)).slice(0,40);
     const list = related;
 
     const summary = document.createElement('div');
@@ -2994,7 +2992,7 @@
       : `関連候補なし${others.length ? ` ／ 同時刻のその他 ${others.length}件` : ''}`;
     area.appendChild(summary);
 
-    if (!list.length) {
+    if (!list.length && !others.length) {
       const empty = document.createElement('div');
       empty.className = 'npf-yt-result-empty';
       empty.textContent = others.length
@@ -3020,7 +3018,7 @@
       const meta = document.createElement('div');
       meta.className = 'npf-yt-result-meta';
       const reasons = m.reasons?.length ? `・${m.reasons.join(' / ')}` : '';
-      meta.textContent = `対応位置 ${formatClock(correctedCandidateOffset(source, m))}${reasons}`;
+      meta.textContent = `対応位置 ${formatClock(correctedCandidateOffset(source, m))}${m.related ? reasons : '・同時刻・同ゲーム／参加者未確認'}`;
       card.appendChild(meta);
 
       const buttons = document.createElement('div');
@@ -3029,7 +3027,7 @@
       const openBtn = document.createElement('button');
       openBtn.type = 'button';
       openBtn.className = 'npf-yt-btn primary';
-      openBtn.textContent = '同じ瞬間を開く';
+      openBtn.textContent = m.related ? '同じ瞬間を開く' : '同じ時刻で開く（未確認）';
       openBtn.addEventListener('click', () => {
         openUrl(youtubeUrl(m.v.id, correctedCandidateOffset(source, m)));
       });
@@ -3069,26 +3067,15 @@
     list.forEach(m => area.appendChild(drawOne(m)));
 
     if (others.length) {
-      const more = document.createElement('button');
-      more.type = 'button';
-      more.className = 'npf-yt-btn npf-yt-show-more';
-      more.textContent = `同時刻のその他 ${others.length}件も表示`;
-      let expanded = false;
-      more.addEventListener('click', () => {
-        expanded = !expanded;
-        [...area.querySelectorAll('.npf-yt-other-card')].forEach(n => n.remove());
-        if (expanded) {
-          others.slice(0, 20).forEach(m => {
-            const card = drawOne(m);
-            card.classList.add('npf-yt-other-card');
-            area.insertBefore(card, more);
-          });
-          more.textContent = 'その他を閉じる';
-        } else {
-          more.textContent = `同時刻のその他 ${others.length}件も表示`;
-        }
-      });
-      area.appendChild(more);
+      const label = document.createElement('div');
+      label.className = 'npf-yt-result-summary';
+      label.textContent = `🔎 同時刻・同ゲーム／参加者未確認 ${others.length}件（別企画の可能性あり）`;
+      area.appendChild(label);
+      for (const m of others) {
+        const card = drawOne(m);
+        card.style.borderStyle = 'dashed';
+        area.appendChild(card);
+      }
     }
     if (isMobileYoutubeUi()) styleMobileYoutubePanel($('#npf-yt-panel'));
   }
@@ -3628,6 +3615,7 @@
     // 一覧にアクセスしただけでは外部APIを叩かない。開始操作はページ遷移で解除。
     collectionActive: false,
     collectionRoute: '',
+    autoChannelKeys: new Set(),
     observer: null,
     scanTimer: null,
     entries: new Set(),
@@ -3678,6 +3666,11 @@
     const p = location.pathname || '';
     if (p === '/results') return true;
     return /\/(videos|streams)\/?$/i.test(p) && (/^\/@/.test(p) || /^\/channel\//.test(p) || /^\/c\//.test(p) || /^\/user\//.test(p));
+  }
+
+  function researchChannelKey() {
+    const m = String(location.pathname || '').match(/^\/(@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)\/(?:videos|streams)\/?$/i);
+    return m ? m[1].toLowerCase() : '';
   }
 
   function splitResearchWords(raw = '') {
@@ -5150,6 +5143,13 @@
     button.title = research.collectionActive
       ? '未着手のHolodex/Wiki取得を停止します。すでに通信中の1件は終了する場合があります。'
       : 'この一覧の未取得動画をHolodex/Wikiで調査します。スクロールで増えた動画も対象です。';
+    const auto = $('#npf-r-auto-channel-toggle');
+    if (auto) {
+      const key = researchChannelKey();
+      auto.style.display = key ? 'block' : 'none';
+      auto.textContent = research.autoChannelKeys.has(key)
+        ? '☑ このチャンネルの自動取得 ON' : '□ このチャンネルの自動取得 OFF';
+    }
     const hint = $('#npf-r-collection-hint');
     if (hint) hint.textContent = research.collectionActive
       ? '取得中：この一覧で追加表示された動画も調査。止めると未着手の取得は実行しません。'
@@ -6675,7 +6675,20 @@ e.el.classList.toggle('npf-r-hidden', !show);
     collectionHint.id = 'npf-r-collection-hint';
     collectionHint.className = 'npf-r-note';
     collectionHint.style.marginBottom = '10px';
-    body.append(collectionButton, collectionHint);
+    const auto = document.createElement('button');
+    auto.id = 'npf-r-auto-channel-toggle'; auto.type = 'button'; auto.className = 'npf-r-btn';
+    auto.style.cssText = 'display:none;width:100%;margin:6px 0;padding:10px;';
+    auto.addEventListener('click', async () => {
+      const key = researchChannelKey(); if (!key) return;
+      if (research.autoChannelKeys.has(key)) research.autoChannelKeys.delete(key);
+      else research.autoChannelKeys.add(key);
+      state.settings.autoResearchChannels = [...research.autoChannelKeys];
+      await gmSet(KEY_SETTINGS, state.settings);
+      updateResearchCollectionControls();
+      if (research.autoChannelKeys.has(key) && !research.collectionActive && !research.holodexPaused)
+        startResearchCollection();
+    });
+    body.append(collectionButton, auto, collectionHint);
 
     // 旧UIの重複残骸があれば除去してからDB欄を1つだけ作る。
     $$('#npf-r-db-status').forEach(n => n.remove());
@@ -6858,7 +6871,12 @@ e.el.classList.toggle('npf-r-hidden', !show);
     if (fab) fab.style.display = isMobileYoutubeUi() ? 'none' : active ? '' : 'none';
     if (isMobileYoutubeUi()) mobileResearchPageHint();
     if (!active && panel && !isMobileYoutubeUi()) closeResearchPanel();
-    if (active) scheduleResearchScan(250);
+    if (active) {
+      scheduleResearchScan(250);
+      const key = researchChannelKey();
+      if (key && research.autoChannelKeys.has(key) && !research.collectionActive && !research.holodexPaused)
+        startResearchCollection();
+    }
   }
 
   function startYoutubeResearch() {
@@ -6955,6 +6973,8 @@ e.el.classList.toggle('npf-r-hidden', !show);
   state.favorites = await gmGet(KEY_FAVS, []);
   state.liverFavorites = await gmGet(KEY_LIVER_FAVS, []);
   state.settings = { ...DEFAULT_SETTINGS, ...(await gmGet(KEY_SETTINGS, DEFAULT_SETTINGS)) };
+  research.autoChannelKeys = new Set(Array.isArray(state.settings.autoResearchChannels)
+    ? state.settings.autoResearchChannels.filter(x => typeof x === 'string') : []);
   state.syncPoints = await gmGet(KEY_SYNC, {});
   state.calibration = await gmGet(KEY_CAL, {});
   state.wikiCache = await gmGet(KEY_WIKI_CACHE, {});
@@ -6974,6 +6994,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       ensureYoutubePanel();
       updateYoutubePanel();
       if (isMobileYoutubeUi()) { void updateResearchDbStatus(); updateResearchStatus(); }
+      handleResearchNavigation(); // Preferences loaded; enable opted-in channel.
     } else {
       await initResearchDb();
       startYoutubeHelper();
