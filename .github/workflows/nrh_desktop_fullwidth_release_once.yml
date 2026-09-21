@@ -1,4 +1,4 @@
-name: Release full-width desktop research rows v1.0.34 (one time)
+name: Release full-width desktop research rows v1.0.34 (guarded)
 on:
   push:
     paths:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Apply guarded layout repair and test it
+      - name: Apply guarded layout repair and regression tests
         run: |
           python .github/scripts/nrh_desktop_fullwidth_patch_once.py
       - name: Publish tested userscript
