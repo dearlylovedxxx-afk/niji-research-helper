@@ -1,0 +1,24 @@
+name: Repair repeated research badge rows v1.0.35 (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/nrh_badge_dedupe_release_once.yml
+permissions:
+  contents: write
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch duplicate badge rendering and run regression tests
+        run: |
+          python .github/scripts/nrh_badge_dedupe_v1035.py
+          node .github/scripts/nrh_badge_dedupe_test.js
+          git diff --check
+      - name: Publish only the tested userscript
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Niji_Research_Helper.user.js
+          git commit -m "Stop duplicate research badges while preserving desktop rows (v1.0.35)"
+          git push origin HEAD:main
