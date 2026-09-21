@@ -1,0 +1,64 @@
+name: Release Pixiv newest/date filter v0.5.5
+on:
+  push:
+    paths:
+      - .github/workflows/pixiv_v055_release_once.yml
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check candidate syntax and behavior
+        run: |
+          node --check .github/scripts/pixiv_v055_candidate.user.js
+          node <<'JS'
+          const fs = require('node:fs');
+          const vm = require('node:vm');
+          const assert = require('node:assert/strict');
+          const src = fs.readFileSync('.github/scripts/pixiv_v055_candidate.user.js','utf8');
+          const old = fs.readFileSync('Pixiv_Bookmark_Sort.user.js','utf8');
+          assert(src.includes('// @version      0.5.5'));
+          assert(src.includes('// @namespace    local.pixiv.bookmark-sort.cross-page'));
+          assert.equal((src.match(/^\/\/ @require\s+/gm)||[]).length,1);
+          assert(src.includes('9eb97e51cedba0d081db3cc7331ecc8c01ea6685/Pixiv_Bookmark_Sort.user.js'));
+          assert(src.includes("const RESEARCH_DB = 'pixiv-bookmark-sort-cross-page-v02';"));
+          assert(src.includes("const EXTRA_DB = 'pixiv-bookmark-sort-extras-v01';"));
+          assert(src.includes('index.openCursor(range)'));
+          assert(src.includes("u.searchParams.set('scd', from)"));
+          assert(src.includes("u.searchParams.set('ecd', to)"));
+          assert(src.includes('new MutationObserver(scheduleRender).observe(source'));
+          assert(old.includes('// @version      0.5.4'));
+          const start = src.indexOf('  const day = value =>');
+          const end = src.indexOf('  let researchPromise',start);
+          assert(start > 0 && end > start);
+          const c = {URL,URLSearchParams,location:{href:'https://www.pixiv.net/tags/ktru/novels?mode=all&s_mode=tag_tc&scd=2026-09-01&ecd=2026-09-21'}};
+          vm.runInNewContext(src.slice(start,end)+'\nthis.testFns={day,better,allowedDate,searchContext}',c);
+          const {day,better,allowedDate,searchContext} = c.testFns;
+          assert.equal(day('2026-09-10T21:03:04+09:00'),'2026-09-10');
+          assert.equal(day('2026-02-30'),'');
+          const ctx=searchContext();
+          assert.equal(ctx.kind,'novels');
+          assert.equal(ctx.from,'2026-09-01');
+          assert.equal(ctx.to,'2026-09-21');
+          const params = new Map(JSON.parse(ctx.key)[2]);
+          assert.equal(params.get('s_mode'),'s_tag');
+          assert.equal(params.get('scd'),'2026-09-01');
+          assert(allowedDate({date:'2026-09-21T09:00:00'},'2026-09-01','2026-09-21'));
+          assert(!allowedDate({date:'2026-08-31T20:00:00'},'2026-09-01','2026-09-21'));
+          assert(!allowedDate({date:''},'2026-09-01','2026-09-21'));
+          assert(better({id:'2',date:'2026-09-20',count:1},{id:'1',date:'2026-09-19',count:999},'newest')>0);
+          assert(better({id:'2',date:'2026-09-20',count:1},{id:'1',date:'2026-09-19',count:999},'bookmarks')<0);
+          assert(better({id:'2',date:'',count:1000},{id:'1',date:'2026-09-19',count:1},'newest')<0);
+          console.log('PASS Pixiv: same namespace/DB, newest vs bookmark sorting, inclusive date bounds, novels and search parameters');
+          JS
+          git diff --check
+      - name: Publish verified userscript
+        run: |
+          cp .github/scripts/pixiv_v055_candidate.user.js Pixiv_Bookmark_Sort.user.js
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Pixiv_Bookmark_Sort.user.js
+          git commit -m "Add Pixiv newest sort and publication-date filters (v0.5.5)"
+          git push origin HEAD:main
