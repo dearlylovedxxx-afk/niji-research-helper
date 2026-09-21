@@ -1,0 +1,40 @@
+name: Integrate pCloud into existing script menus once
+on:
+  push:
+    paths:
+      - .github/workflows/integrate_native_backup_once.yml
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guarded integration
+        run: python3 .github/scripts/integrate_native_backup_once.py
+      - name: Validate syntax and preserve original app identities
+        run: |
+          node --check Niji_Cloud_Backup.user.js
+          node --check Niji_OR_Results_Merger.user.js
+          git diff --check
+          grep -q '^// @version      0.1.3$' Niji_Cloud_Backup.user.js
+          grep -q '^// @version      0.4.12$' Niji_OR_Results_Merger.user.js
+          grep -q '^// @namespace    niji-cloud-backup-three-apps$' Niji_Cloud_Backup.user.js
+          grep -q '^// @namespace    niji-or-results-merger-standalone$' Niji_OR_Results_Merger.user.js
+          python3 - <<'PY'
+          from pathlib import Path
+          cloud=Path('Niji_Cloud_Backup.user.js').read_text()
+          orcode=Path('Niji_OR_Results_Merger.user.js').read_text()
+          for code in [cloud,orcode]:
+              for name in ['nor-body > details','xsf-userscript-root','pixiv-bookmark-sort-cross-page-v05','ncb_app_cloud_v1_','function integrateNativeBackup()']:
+                  assert name in code, name
+          assert 'NCB_OR_EMBEDDED_BEGIN' in orcode
+          print('PASS: native menu slots and original backup logic retained')
+          PY
+      - name: Publish both in one commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Cloud_Backup.user.js Niji_OR_Results_Merger.user.js
+          git commit -m 'Integrate cloud backup into OR X Pixiv existing menus'
+          git push origin HEAD:main
