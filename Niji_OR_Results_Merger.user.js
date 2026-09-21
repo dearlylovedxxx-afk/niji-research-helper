@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.4.12
+// @version      0.4.13
 // @description  コメントOR試験版。動画タイトル・配信日時の補完、明示的な並び順、正しい動画IDのタイムスタンプと直接開けるコメント一覧。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
@@ -31,9 +31,15 @@
   const boot=document.createElement('button');
   boot.id=bootId;
   boot.type='button';
-  boot.textContent='🔀 OR起動中 0.4.12';
+  boot.textContent='🔀 OR起動中 0.4.13';
   boot.style.cssText='position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:104px!important;min-height:44px!important;background:#4d35a4!important;color:white!important;border:2px solid #fff!important;border-radius:24px!important;padding:10px!important;pointer-events:auto!important;display:block!important;font:700 13px system-ui!important;';
   (document.body||document.documentElement).append(boot);
+  const mergedStyleId='niji-or-pov-combined-style';
+  document.getElementById(mergedStyleId)?.remove();
+  const mergedStyle=document.createElement('style');
+  mergedStyle.id=mergedStyleId;
+  mergedStyle.textContent='html #npf-fab.npf-comment-fab{display:none!important}';
+  document.documentElement.append(mergedStyle);
   let restoreBootEnabled=true;
   const restoreBoot=()=>{
     if (!restoreBootEnabled) return;
@@ -46,14 +52,15 @@
     clearInterval(recoveryTimer);
     if (hostRecoveryTimer) clearInterval(hostRecoveryTimer);
     boot.remove();
+    mergedStyle.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.4.12 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.13 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.4.12';
+  const VERSION = '0.4.13';
   const VIDEO_META_KEY = 'niji_or_merger_addon_video_metadata_v046';
   const RESULT_SORT_KEY = 'niji_or_merger_addon_result_sort_v046';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
@@ -335,15 +342,20 @@
   const trigger = boot;
   trigger.id='niji-or-trigger';
   trigger.className='nor-fab';
-  trigger.textContent='🔀 OR統合';
+  trigger.textContent='🔎 検索';
   trigger.style.cssText = 'position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:96px!important;min-height:44px!important;background:#4d35a4!important;color:#fff!important;border:1px solid #aa9aff!important;border-radius:25px!important;padding:10px!important;font:700 14px system-ui!important;pointer-events:auto!important;display:block!important;';
+  const entryMenu=el('div',{class:'nor-entry-menu'});
+  entryMenu.hidden=true;
+  const orEntry=el('button',{type:'button',class:'nor-entry-option',text:'🔀 OR検索'});
+  const povEntry=el('button',{type:'button',class:'nor-entry-option',text:'👥 視点検索'});
+  entryMenu.append(orEntry,povEntry);
   const panel = el('section', { class:'nor-panel' }); panel.hidden = true;
   const head = el('div', { class:'nor-head' }, el('strong', { text:'🔀 検索結果のOR統合' }));
   const close = el('button', { class:'nor-button', type:'button', text:'閉じる' }); head.append(close);
   const body = el('div', { class:'nor-body' }); panel.append(head, body);
   const viewer = el('section', { class:'nor-viewer' });
   viewer.hidden = true;
-  root.append(panel, viewer); (document.body || document.documentElement).append(host);
+  root.append(entryMenu, panel, viewer); (document.body || document.documentElement).append(host);
   const style = el('style'); style.textContent = `
     #niji-or-root .nor-root{font-family:system-ui,-apple-system,'Noto Sans JP',sans-serif;font-size:13px;line-height:1.5;color:#e9edf3;pointer-events:none}
     #niji-or-root .nor-fab,#niji-or-root .nor-panel{pointer-events:auto}
@@ -365,6 +377,12 @@
     }
   `;
   root.append(style);
+  style.textContent += `
+    #niji-or-root .nor-entry-menu{position:fixed!important;top:99px!important;left:8px!important;right:auto!important;bottom:auto!important;width:min(260px,calc(100vw - 16px))!important;z-index:2147483647!important;display:flex!important;flex-direction:column!important;gap:8px!important;padding:11px!important;border:1px solid #aaa2eb!important;border-radius:13px!important;background:#222233!important;box-shadow:0 8px 24px #0007!important;pointer-events:auto!important}
+    #niji-or-root .nor-entry-menu[hidden]{display:none!important}
+    #niji-or-root .nor-entry-option{width:100%!important;min-height:46px!important;padding:10px!important;background:#44348b!important;color:#fff!important;border:1px solid #8f83d1!important;border-radius:9px!important;font:700 14px system-ui!important;text-align:left!important;pointer-events:auto!important;cursor:pointer!important}
+    #niji-or-root .nor-entry-option:disabled{opacity:.5!important;cursor:not-allowed!important}
+  `;
   style.textContent += `
     #niji-or-root .nor-viewer{background:#fff!important;color:#202124!important;padding:0 0 30px!important;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif!important}
     #niji-or-root .nor-viewer-header{background:#fff!important;color:#202124!important;top:0;padding:13px 15px;border-bottom:1px solid #e5e7eb;box-shadow:0 1px 3px #0001}
@@ -1207,7 +1225,22 @@
       body.append(button('診断をコピー',copyDiag));
     }
   };
-  trigger.addEventListener('click',toggle);close.addEventListener('click',toggle);
+  trigger.addEventListener('click',()=>{
+    if(!panel.hidden || !viewer.hidden) return;
+    const opening=entryMenu.hidden;
+    entryMenu.hidden=!opening;
+    const fab=document.getElementById('npf-fab');
+    povEntry.disabled=!(fab && fab.classList.contains('npf-comment-fab'));
+    povEntry.title=povEntry.disabled?'にじヘルパーの読み込みを待ってください':'';
+  });
+  orEntry.addEventListener('click',()=>{entryMenu.hidden=true;toggle();});
+  povEntry.addEventListener('click',()=>{
+    entryMenu.hidden=true;
+    const fab=document.getElementById('npf-fab');
+    if(fab?.classList.contains('npf-comment-fab')) fab.click();
+    else alert('視点検索はまだ読み込まれていません。ページの読み込み後に再試行してください。');
+  });
+  close.addEventListener('click',toggle);
   try {
     const saved=await storeGet(STORAGE_KEY,[]);
     if(Array.isArray(saved))batches=saved.filter(b=>b&&typeof b.label==='string'&&Array.isArray(b.rows));
@@ -1255,6 +1288,7 @@
 })().catch(err => {
   if (location.protocol !== 'https:' || !['comment2434.com','www.comment2434.com'].includes(location.hostname.toLowerCase())) return;
   console.error('[Niji OR Merger] 起動エラー', err);
+  document.getElementById('niji-or-pov-combined-style')?.remove();
   const boot=document.getElementById('niji-or-trigger') || document.getElementById('niji-or-boot-check');
   if(boot){
     boot.textContent='⚠ OR起動エラー';
@@ -1541,7 +1575,7 @@ async function showBackups(){
 const host=el('div');host.id='ncb-backup-root';host.style.cssText='all:initial!important;position:fixed!important;inset:0!important;width:0!important;height:0!important;z-index:2147483647!important;pointer-events:none!important';
 (document.body||document.documentElement).append(host);const shadow=host.attachShadow({mode:'open'});
 const css=el('style');css.textContent=`:host{all:initial}*{box-sizing:border-box}button,input{font:inherit}button{cursor:pointer}#launch{position:fixed;left:10px;bottom:70px;z-index:3;min-height:45px;padding:10px 13px;border:0;border-radius:24px;color:#fff;background:#156a89;box-shadow:0 4px 14px #0005;pointer-events:auto;font:700 13px system-ui}#panel{position:fixed;inset:0;z-index:4;width:100vw;height:100dvh;overflow:auto;background:#f6f8fc;color:#172337;pointer-events:auto;padding:24px max(14px,calc((100vw - 690px)/2));font:15px/1.5 system-ui}#panel[hidden]{display:none!important}h2{font-size:21px;margin:0 0 12px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}button:not(#launch){padding:10px 12px;min-height:44px;border-radius:9px;border:1px solid #95a7bf;background:white;color:#14304c;font-weight:600}button:disabled{opacity:.5}input{width:100%;min-height:42px;padding:8px;border:1px solid #9eb0c5;border-radius:8px}.status{border:1px solid #ced9e7;border-radius:9px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;background:white;margin:13px 0}.entry{padding:12px;border-bottom:1px solid #ccd6e2;display:flex;gap:9px;align-items:center;justify-content:space-between;flex-wrap:wrap}.note{font-size:12px;color:#526178;margin:10px 0}label{display:block;font-weight:600;margin:12px 0 6px}@media(max-width:600px){#panel{padding:15px 13px 70px}h2{font-size:18px}}`;
-shadow.append(css);const launch=el('button','',`☁️ ${app.label}`);launch.id='launch';const panel=el('section');panel.id='panel';panel.hidden=true;shadow.append(launch,panel);
+shadow.append(css);const launch=el('button','',`☁️ ${app.label}`);launch.id='launch';launch.style.setProperty('display','none','important');const panel=el('section');panel.id='panel';panel.hidden=true;shadow.append(launch,panel);
 const header=el('h2','',`☁️ ${app.label}：pCloudバックアップ`);
 const note=el('p','note','既存のにじヘルパー用バックアップは変更しません。保存済みデータのみ対象です。Xの一時的ないいね順一覧は保存しません。自動保存はこのサイトを開いている間だけ実行されます。');
 const tokenLabel=el('label','','このアプリ専用のバックアップトークン');const tokenInput=el('input');tokenInput.type='password';tokenInput.placeholder='Cloudflareに設定した専用トークン（チャットには送らない）';tokenInput.autocomplete='off';
@@ -1608,7 +1642,7 @@ function integrateNativeBackup() {
     else slot.append(button);
    } else slot.append(button);
   }
-  if(nativeReady) launch.style.setProperty('display','none','important');
+  if(app.id==='or'||nativeReady) launch.style.setProperty('display','none','important');
   else launch.style.removeProperty('display');
  } catch(e) { console.warn('[NCB] native menu attachment failed',e); }
 }

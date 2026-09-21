@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.1.4
+// @version      0.1.5
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR検索・X保存検索・Pixiv調査DBをアプリ別にpCloudへ保存・検証・安全に統合復元。Xの一時的ないいね順投稿は含めません。
@@ -286,7 +286,7 @@ async function showBackups(){
 const host=el('div');host.id='ncb-backup-root';host.style.cssText='all:initial!important;position:fixed!important;inset:0!important;width:0!important;height:0!important;z-index:2147483647!important;pointer-events:none!important';
 (document.body||document.documentElement).append(host);const shadow=host.attachShadow({mode:'open'});
 const css=el('style');css.textContent=`:host{all:initial}*{box-sizing:border-box}button,input{font:inherit}button{cursor:pointer}#launch{position:fixed;left:10px;bottom:70px;z-index:3;min-height:45px;padding:10px 13px;border:0;border-radius:24px;color:#fff;background:#156a89;box-shadow:0 4px 14px #0005;pointer-events:auto;font:700 13px system-ui}#panel{position:fixed;inset:0;z-index:4;width:100vw;height:100dvh;overflow:auto;background:#f6f8fc;color:#172337;pointer-events:auto;padding:24px max(14px,calc((100vw - 690px)/2));font:15px/1.5 system-ui}#panel[hidden]{display:none!important}h2{font-size:21px;margin:0 0 12px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}button:not(#launch){padding:10px 12px;min-height:44px;border-radius:9px;border:1px solid #95a7bf;background:white;color:#14304c;font-weight:600}button:disabled{opacity:.5}input{width:100%;min-height:42px;padding:8px;border:1px solid #9eb0c5;border-radius:8px}.status{border:1px solid #ced9e7;border-radius:9px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;background:white;margin:13px 0}.entry{padding:12px;border-bottom:1px solid #ccd6e2;display:flex;gap:9px;align-items:center;justify-content:space-between;flex-wrap:wrap}.note{font-size:12px;color:#526178;margin:10px 0}label{display:block;font-weight:600;margin:12px 0 6px}@media(max-width:600px){#panel{padding:15px 13px 70px}h2{font-size:18px}}`;
-shadow.append(css);const launch=el('button','',`☁️ ${app.label}`);launch.id='launch';const panel=el('section');panel.id='panel';panel.hidden=true;shadow.append(launch,panel);if(app.id==='x')launch.style.setProperty('display','none','important');
+shadow.append(css);const launch=el('button','',`☁️ ${app.label}`);launch.id='launch';launch.style.setProperty('display','none','important');const panel=el('section');panel.id='panel';panel.hidden=true;shadow.append(launch,panel);if(app.id==='x')launch.style.setProperty('display','none','important');
 const header=el('h2','',`☁️ ${app.label}：pCloudバックアップ`);
 const note=el('p','note','既存のにじヘルパー用バックアップは変更しません。保存済みデータのみ対象です。Xの一時的ないいね順一覧は保存しません。自動保存はこのサイトを開いている間だけ実行されます。');
 const tokenLabel=el('label','','このアプリ専用のバックアップトークン');const tokenInput=el('input');tokenInput.type='password';tokenInput.placeholder='Cloudflareに設定した専用トークン（チャットには送らない）';tokenInput.autocomplete='off';
