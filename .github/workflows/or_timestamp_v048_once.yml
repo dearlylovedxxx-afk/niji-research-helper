@@ -1,0 +1,35 @@
+name: Release OR timestamp isolation v0.4.8
+on:
+  push:
+    paths:
+      - .github/workflows/or_timestamp_v048_once.yml
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch
+        run: python .github/scripts/or_timestamp_v048_once.py
+      - name: Syntax and regression
+        run: |
+          node --check Niji_OR_Results_Merger.user.js
+          git diff --check
+          node <<'JS'
+          const s=require('fs').readFileSync('Niji_OR_Results_Merger.user.js','utf8'),assert=require('assert');
+          assert(s.includes('// @version      0.4.8'));
+          const block=s.slice(s.indexOf('  function showMergedViewer(video)'),s.indexOf('  function render()',s.indexOf('  function showMergedViewer(video)')));
+          assert(block.includes("time.dataset.npfSyncBound='1'"));
+          assert(block.includes('time.dataset.norVideoId=video.id'));
+          assert(block.includes('watch?v=${video.id}&t=${Math.max'));
+          assert(s.includes("const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';"));
+          console.log('PASS video-specific OR links, legacy main helper isolation, persistent data');
+          JS
+      - name: Publish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Niji_OR_Results_Merger.user.js
+          git commit -m "Isolate OR timestamps from NRH click handlers (v0.4.8)"
+          git push origin HEAD:main
