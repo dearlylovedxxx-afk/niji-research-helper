@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Pixiv イラスト・小説 ブクマ順・新着順（検索結果横断）
+// @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.5.5
+// @version      0.5.6
 // @description  既存の検索調査結果をブクマ順・新着順で表示。投稿日フィルターと期間を検索条件に反映。小説対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
