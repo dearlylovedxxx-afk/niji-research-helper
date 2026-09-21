@@ -1,0 +1,37 @@
+name: Release OR timestamp results v0.4.2
+on:
+  push:
+    paths:
+      - .github/workflows/or_v042_release_once.yml
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply title and legacy regression patch
+        run: python .github/scripts/or_v042_titles_once.py
+      - name: Verify syntax and compatibility
+        run: |
+          node --check Niji_OR_Results_Merger.user.js
+          git diff --check
+          node - <<'JS'
+          const fs=require('fs'), assert=require('assert');
+          const s=fs.readFileSync('Niji_OR_Results_Merger.user.js','utf8');
+          for(const x of ['// @version      0.4.2','function usableVideoTitle','function detailedVideoTitle','async function driveRun()','const comments=extractComments(main,v.id);','function showResultsViewer()','function showMergedViewer(video)','const STORAGE_KEY = \'niji_or_merger_addon_batches_v1\';']) assert(s.includes(x),x);
+          const m=s.match(/function usableVideoTitle\(text, id=''\) \{([\s\S]*?)\n  \}/);
+          assert(m);
+          const title=new Function('clip',`return function usableVideoTitle(text,id=''){${m[1]}}`)( (v,n)=>String(v||'').replace(/\s+/g,' ').trim().slice(0,n) );
+          assert.strictEqual(title('13コメント','abc123def45'),'');
+          assert.strictEqual(title('【APEX】シルバーウィーク DAY1','abc123def45'),'【APEX】シルバーウィーク DAY1');
+          assert.strictEqual(title('41:39','abc123def45'),'');
+          console.log('PASS title quality, old records retain new titles, comment collection workflow');
+          JS
+      - name: Publish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Niji_OR_Results_Merger.user.js
+          git commit -m "Use actual video titles in timestamped OR results (v0.4.2)"
+          git push origin HEAD:main
