@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.4.7
+// @version      0.4.8
 // @description  コメントOR試験版。動画タイトル・配信日時の補完、明示的な並び順、正しい動画IDのタイムスタンプと直接開けるコメント一覧。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
@@ -26,7 +26,7 @@
   const boot=document.createElement('button');
   boot.id=bootId;
   boot.type='button';
-  boot.textContent='🔀 OR起動中 0.4.7';
+  boot.textContent='🔀 OR起動中 0.4.8';
   boot.style.cssText='position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:104px!important;min-height:44px!important;background:#4d35a4!important;color:white!important;border:2px solid #fff!important;border-radius:24px!important;padding:10px!important;pointer-events:auto!important;display:block!important;font:700 13px system-ui!important;';
   (document.body||document.documentElement).append(boot);
   let restoreBootEnabled=true;
@@ -43,12 +43,12 @@
     boot.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.4.7 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.8 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.4.7';
+  const VERSION = '0.4.8';
   const VIDEO_META_KEY = 'niji_or_merger_addon_video_metadata_v046';
   const RESULT_SORT_KEY = 'niji_or_merger_addon_result_sort_v046';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
@@ -1145,7 +1145,13 @@
       // Never trust c.url in older saved data: it can point to another video's POV.
       const safeUrl=`https://www.youtube.com/watch?v=${video.id}&t=${Math.max(0,Math.floor(Number(c.sec)||0))}s`;
       const time=el('a',{class:'nor-time',href:safeUrl,target:'_blank',rel:'noopener noreferrer',text:hhmmss(c.sec)});
-      time.addEventListener('click',e=>e.stopPropagation());
+      // The main Niji helper's legacy timestamp scanner binds every clock-like
+      // anchor on the page and redirects it to the BACKGROUND video's POV.
+      // Mark this independent OR link before it enters the document so even an
+      // older helper skips it; the helper v1.0.39 also excludes this whole UI.
+      time.dataset.npfSyncBound='1';
+      time.dataset.norVideoId=video.id;
+      time.addEventListener('click',e=>e.stopPropagation(),true);
       line.append(time);
       const text=el('div',{class:'nor-comment-text',text:c.text});
       for(const word of c.matchLabels||[]) text.append(el('span',{class:'nor-light-pill',text:word}));
