@@ -1,0 +1,37 @@
+name: Release NRH game filter v1.0.37
+on:
+  push:
+    paths:
+      - .github/workflows/nrh_game_filter_v1037_once.yml
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply guarded game filter
+        run: python .github/scripts/nrh_game_filter_v1037_once.py
+      - name: Syntax and regression checks
+        run: |
+          node --check Niji_Research_Helper.user.js
+          git diff --check
+          node <<'JS'
+          const fs=require('fs'),assert=require('node:assert/strict'),vm=require('node:vm');
+          const s=fs.readFileSync('Niji_Research_Helper.user.js','utf8');
+          for(const str of ['// @version      1.0.37',"const VERSION = '1.0.37';",'gameIncluded: new Map()','gameExcluded: new Map()','function cycleResearchGame(','function updateResearchGameSuggestions()',"const gameOk=",'tagOk && gameOk && includeOk',"gameInput.id='npf-r-game-input'",'research.gameIncluded.clear(); research.gameExcluded.clear();','NijiResearchHelperDB']) assert(s.includes(str),str);
+          const block=s.slice(s.indexOf('  function researchGameKey('),s.indexOf('  // Preserve each YouTube card',s.indexOf('  function researchGameKey(')));
+          const context={normalizeResearchText:x=>String(x).toLowerCase().trim(),research:{gameIncluded:new Map(),gameExcluded:new Map()},applyResearchFilters:()=>{},currentResearchEntries:()=>[], $:()=>null,document:{}};
+          vm.runInNewContext(block,context);
+          context.cycleResearchGame('VALORANT');assert(context.research.gameIncluded.has('valorant'));
+          context.cycleResearchGame('VALORANT');assert(context.research.gameExcluded.has('valorant')&&!context.research.gameIncluded.size);
+          context.cycleResearchGame('VALORANT');assert(!context.research.gameExcluded.size);
+          console.log('PASS game filter tri-state, existing namespace, DB and syntax');
+          JS
+      - name: Publish verified script
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Niji_Research_Helper.user.js
+          git commit -m "Add game-title suggestions and tri-state filters (v1.0.37)"
+          git push origin HEAD:main
