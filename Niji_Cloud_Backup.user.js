@@ -116,7 +116,7 @@ async function snapshot(){
  if(app.id==='or'&&!payload.values.niji_or_merger_addon_batches_v1.length
     &&!payload.values.niji_or_merger_addon_run_v041?.words?.length)
   throw Error('ORの保存データが空のため、既存バックアップを保護して保存しません');
- return {format:1,app:app.name,origin:location.origin,device:device(),exportedAt:new Date().toISOString(),payload};
+ return {format:1,app:app.name,origin:location.origin,device:device(),payload};
 }
 async function mergePixivDatabases(databases){
  let inserted=0;
