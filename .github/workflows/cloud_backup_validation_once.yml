@@ -1,0 +1,38 @@
+name: Verify three-app cloud backup
+on:
+  push:
+    paths:
+      - '.github/workflows/cloud_backup_validation_once.yml'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prevent unnecessary backup generations
+        run: python3 .github/scripts/cloud_backup_fix_stable_snapshot_once.py
+      - name: Check scripts and protection invariants
+        run: |
+          node --check Niji_Cloud_Backup.user.js
+          node --check cloud-backup/multi_app_gateway_extension.js
+          node --check Niji_OR_Results_Merger.user.js
+          python3 - <<'PY'
+          from pathlib import Path
+          c=Path('Niji_Cloud_Backup.user.js').read_text()
+          g=Path('cloud-backup/multi_app_gateway_extension.js').read_text()
+          o=Path('Niji_OR_Results_Merger.user.js').read_text()
+          assert 'exportedAt:' not in c and 'xsf_userscript_v1' in c
+          assert 'sortRows' not in c
+          assert all(n in c for n in ('pixiv-bookmark-sort-cross-page-v02','pixiv-bookmark-sort-extras-v01','ncb-or-request-v1'))
+          assert 'DELETE FROM niji_backups' not in g and 'multi_app_backup_sets' in g
+          assert 'ncb-or-response-v1' in o and '// @version      0.4.9' in o
+          print('JS syntax and data protection checks passed')
+          PY
+      - name: Publish validated snapshot fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Cloud_Backup.user.js
+          git commit -m 'Make cloud backup snapshot hash stable between unchanged scans'
+          git push
