@@ -1,0 +1,33 @@
+name: Release NRH timestamp scope v1.0.39
+on:
+  push:
+    paths:
+      - .github/workflows/nrh_ts_scope_v1039_once.yml
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        run: python .github/scripts/nrh_ts_scope_v1039_once.py
+      - name: Check
+        run: |
+          node --check Niji_Research_Helper.user.js
+          git diff --check
+          node <<'JS'
+          const s=require('fs').readFileSync('Niji_Research_Helper.user.js','utf8'),assert=require('assert');
+          const f=s.slice(s.indexOf('  function bindCommentTimestamps()'),s.indexOf('  const EVENT_GROUPS',s.indexOf('  function bindCommentTimestamps()')));
+          assert(f.includes("$$('.col-md-1 a[href], .col-2 a[href]')"));
+          assert(f.includes("a.closest('#niji-or-root"));
+          assert(!f.includes("$$('a[href]')"));
+          console.log('PASS native column selector without main dependency and OR isolation');
+          JS
+      - name: Publish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Niji_Research_Helper.user.js
+          git commit -m "Support native comment columns without main (v1.0.39)"
+          git push origin HEAD:main
