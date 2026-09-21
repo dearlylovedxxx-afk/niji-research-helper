@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.4.2
-// @description  コメントOR試験版。各動画のコメント本文・時刻を実際に収集する複数語OR検索。白背景の動画・コメント一覧。本体DBは変更しません。
+// @version      0.4.3
+// @description  コメントOR試験版。空の最終ページで止まる問題を修正。取得したコメントは動画単位で保存。白背景のOR結果一覧。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
 // @include      https://comment2434.com/*
@@ -25,7 +25,7 @@
   const boot=document.createElement('button');
   boot.id=bootId;
   boot.type='button';
-  boot.textContent='🔀 OR起動中 0.4.2';
+  boot.textContent='🔀 OR起動中 0.4.3';
   boot.style.cssText='position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:104px!important;min-height:44px!important;background:#4d35a4!important;color:white!important;border:2px solid #fff!important;border-radius:24px!important;padding:10px!important;pointer-events:auto!important;display:block!important;font:700 13px system-ui!important;';
   (document.body||document.documentElement).append(boot);
   let restoreBootEnabled=true;
@@ -42,12 +42,12 @@
     boot.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.4.2 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.3 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.4.2';
+  const VERSION = '0.4.3';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
   const MULTI_KEY = 'niji_or_merger_addon_multi_v1';
   const RUN_KEY = 'niji_or_merger_addon_run_v041';
@@ -691,17 +691,47 @@
     runJob.active=true;runJob.error='';
     await saveRun();render();void driveRun();
   }
+  async function persistRunPartial() {
+    if (!runJob?.partial?.length) return;
+    const word=runWord();
+    if (!word) throw new Error('保存する検索語を復元できません');
+    const rows=runJob.partial.filter(v=>Array.isArray(v.comments)&&v.comments.length);
+    if (!rows.length) return;
+    const signature=`or-v041|${runJob.startedAt}|${word}`;
+    const existing=batches.find(b=>b.signature===signature);
+    if(existing) {
+      const previous=existing.rows;
+      const byId=new Map((previous||[]).map(v=>[v.id,v]));
+      for(const v of rows) {
+        const old=byId.get(v.id);
+        if (!old) {byId.set(v.id,v);continue;}
+        const comments=new Map([...(old.comments||[]),...v.comments].map(c=>[`${c.sec}|${c.text}`,c]));
+        byId.set(v.id,{...old,...v,comments:[...comments.values()]});
+      }
+      existing.rows=[...byId.values()];
+      try {await persist();} catch(err){existing.rows=previous;throw err;}
+      return;
+    }
+    if(batches.length>=MAX_BATCHES) throw new Error('保存回数上限に達しました');
+    const batch={id:`or-${runJob.startedAt}-${runJob.index}`,label:word,page:runJob.searchUrl||location.href,signature,savedAt:Date.now(),rows:[...rows]};
+    batches.push(batch);
+    try {await persist();} catch(err){batches.pop();throw err;}
+  }
+  async function beginDetailsAfterList() {
+    if (!runJob?.list?.length) throw new Error('コメント取得対象の動画がありません');
+    runJob.stage='detail-open';runJob.detailIndex=0;
+    await saveRun();
+    const first=runJob.list[0];
+    await goRun(normalizedDetailUrl(first));
+  }
+  function looksLikeAccessDenied() {
+    const main=document.querySelector('main')||document.body;
+    const text=String(main?.textContent||'').slice(0,9000);
+    return /\b(?:429|403|503|Too Many Requests|Access Denied|Rate Limit)\b|アクセス(?:制限|が集中)|しばらく時間をおいて/i.test(`${document.title} ${text}`);
+  }
   async function finishRunWord() {
     const word=runWord();
-    if (runJob.partial.length) {
-      const signature=`or-v041|${runJob.startedAt}|${word}`;
-      if (!batches.some(b=>b.signature===signature)) {
-        if (batches.length>=MAX_BATCHES) throw new Error('保存回数上限に達しました');
-        const batch={id:`or-${runJob.startedAt}-${runJob.index}`,label:word,page:runJob.searchUrl||location.href,signature,savedAt:Date.now(),rows:runJob.partial};
-        batches.push(batch);
-        try {await persist();} catch(err){batches.pop();throw err;}
-      }
-    }
+    await persistRunPartial();
     runJob.index++;
     if (runJob.index>=runJob.words.length) {
       lastRunWords=[...runJob.words];
@@ -746,10 +776,24 @@
       if (runJob.stage==='list') {
         if (isDetailPage() || new URLSearchParams(location.search).get('keyword')!==word) throw new Error('検索結果ページを確認できません。サイトの検索形式が変わった可能性があります');
         if (runJob.seenPages.includes(location.href)) throw new Error('同じ検索ページが繰り返されたため停止しました');
-        const found=captureDisplayed().rows;
+        let found=captureDisplayed().rows;
         if (!found.length) {
-          if (runJob.pages===0 && /(?:検索結果|コメント).{0,20}(?:0件|ありません|見つかりません|該当なし)/.test(document.body.textContent||'')) {await finishRunWord();return;}
-          throw new Error('検索結果の動画を取得できません。アクセス制限またはサイト変更の可能性があります');
+          // Some result pagers link one page beyond their actual last page.
+          // Wait for delayed DOM rendering before interpreting a blank page.
+          for (let attempt=0;attempt<3 && !found.length;attempt++) {
+            await wait(650);
+            found=captureDisplayed().rows;
+          }
+        }
+        if (!found.length) {
+          if (looksLikeAccessDenied()) throw new Error('アクセス制限と思われるページです。自動収集を停止しました');
+          if (runJob.pages===0 && /(?:検索結果|コメント).{0,25}(?:0件|ありません|見つかりません|該当なし)/.test(document.body.textContent||'')) {await finishRunWord();return;}
+          if (runJob.pages>0 && runJob.list.length && findKeywordForm()) {
+            // Keep a note: an unexpected empty page could also mean a changed site.
+            runJob.note=`${runJob.pages}ページ・${runJob.list.length}動画の後に空ページがありました。取得済み動画のコメントを収集中です。`;
+            await beginDetailsAfterList();return;
+          }
+          throw new Error('検索結果の動画を取得できません。検索ページの構造やアクセス制限を確認してください');
         }
         runJob.seenPages.push(location.href);runJob.pages++;
         for(const item of found) if (!runJob.list.some(v=>v.id===item.id)) runJob.list.push({id:item.id,title:item.title,sourceUrl:item.sourceUrl,channel:item.channel});
@@ -760,8 +804,7 @@
         if (nextUrl && (nextUrl.origin!==location.origin || !nextUrl.pathname.startsWith('/comment') || runJob.seenPages.includes(nextUrl.href))) throw new Error('次の検索ページを安全に特定できません');
         if (nextUrl && runJob.pages>=MAX_RUN_PAGES) throw new Error('100ページ上限に達しました（未取得の結果があります）');
         if(nextUrl){await goRun(nextUrl.href);return;}
-        runJob.stage='detail-open';runJob.detailIndex=0;
-        await saveRun();
+        await beginDetailsAfterList();return;
       }
       if (runJob.stage==='detail-open') {
         const v=runJob.list[runJob.detailIndex];
@@ -784,6 +827,9 @@
         runJob.detailIndex++;
         runJob.stage='detail-open';
         await saveRun();
+        // Make each successfully fetched video's comments visible immediately.
+        // A later error must not erase already collected comment timestamps.
+        await persistRunPartial();
         const nextVideo=runJob.list[runJob.detailIndex];
         if(nextVideo){await goRun(normalizedDetailUrl(nextVideo));return;}
         await finishRunWord();return;
@@ -854,7 +900,7 @@
     body.append(el('div',{class:'nor-row'},button('🔍 OR検索開始',()=>void startRun(),'primary'),button('📖 結果を見る',showResultsViewer,'primary')));
     if(runJob) {
       const word=runWord();
-      body.append(el('div',{class:'nor-note',text:`${runJob.active?'🔄 収集中':'⏸ 停止中'} ${runJob.index+1}/${runJob.words.length}「${word}」 ／ ${runJob.stage==='list'?`${runJob.pages}ページ・${runJob.list.length}動画`: `${runJob.detailIndex||0}/${runJob.list?.length||0}動画のコメント取得`} ${runJob.error||''}`}));
+      body.append(el('div',{class:'nor-note',text:`${runJob.active?'🔄 収集中':'⏸ 停止中'} ${runJob.index+1}/${runJob.words.length}「${word}」 ／ ${runJob.stage==='list'?`${runJob.pages}ページ・${runJob.list.length}動画`: `${runJob.detailIndex||0}/${runJob.list?.length||0}動画のコメント取得`} ${runJob.note||''} ${runJob.error||''}`}));
       body.append(el('div',{class:'nor-row'},runJob.active?button('■ 停止',()=>void stopRun()):button('▶ 再開',()=>void resumeRun())));
     }
     const all=mergedVideos(), withComments=all.filter(v=>v.comments.size);
@@ -906,7 +952,7 @@
     panel.hidden = false;
     trigger.style.setProperty('display','none','important');
   }
-  labelInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();void startMultiOr();}});
+  labelInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();void startRun();}});
   try {
     const savedRun=await storeGet(RUN_KEY,null);
     if(savedRun?.words && Array.isArray(savedRun.words)) runJob=savedRun;
