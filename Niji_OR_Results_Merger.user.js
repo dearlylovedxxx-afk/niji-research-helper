@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.4.3
+// @version      0.4.4
 // @description  コメントOR試験版。空の最終ページで止まる問題を修正。取得したコメントは動画単位で保存。白背景のOR結果一覧。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
@@ -42,16 +42,17 @@
     boot.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.4.3 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.4 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.4.3';
+  const VERSION = '0.4.4';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
   const MULTI_KEY = 'niji_or_merger_addon_multi_v1';
   const RUN_KEY = 'niji_or_merger_addon_run_v041';
   const LAST_WORDS_KEY = 'niji_or_merger_addon_last_words_v041';
+  const MIN_COMMENTS_KEY = 'niji_or_merger_addon_minimum_v1';
   const MAX_RUN_VIDEOS = 150;
   const MAX_RUN_PAGES = 100;
   const AUTO_LIMIT = 100;
@@ -353,6 +354,10 @@
   `;
   const message = el('div', { class:'nor-muted' });
   const labelInput = el('input', { class:'nor-input' }); labelInput.placeholder = 'OR検索語（例：不破 ふわっち ぷわ）'; labelInput.maxLength = 500;
+  const minimumInput = el('input', {class:'nor-input', type:'number'});
+  minimumInput.min='1'; minimumInput.max='9999'; minimumInput.step='1'; minimumInput.inputMode='numeric';
+  minimumInput.value='10'; minimumInput.placeholder='例：10';
+  minimumInput.style.cssText='max-width:115px;flex:none;';
   const filterInput = el('input', { class:'nor-input' }); filterInput.placeholder = '統合結果内を絞り込み（タイトル・検索語）';
 
   function button(label, fn, cls='') {
@@ -644,6 +649,13 @@
     if (action.origin!==location.origin || !action.pathname.startsWith('/comment')) throw new Error('検索先URLを確認できません');
     const data=new URLSearchParams(new FormData(form));
     data.set('keyword',word);
+    if (!isDetailPage()) {
+      // The site's search form provides a native minimum-hit filter; filter BEFORE collecting videos.
+      if (!form.querySelector('[name="least_count"]')) throw new Error('検索サイトの最低コメント数欄が見つかりません。フィルターなしで大量取得せず停止しました');
+      const minimum=Number(runJob?.minComments ?? 1); // pre-v0.4.4 paused jobs keep their original unfiltered meaning
+      if (!Number.isSafeInteger(minimum) || minimum<1 || minimum>9999) throw new Error('最低コメント数の設定を確認できません');
+      data.set('least_count',String(minimum));
+    }
     action.search=data.toString();
     action.hash='';
     return action.href;
@@ -673,7 +685,10 @@
     const words=parseOrWords(labelInput.value);
     if (!words.length) {message.textContent='OR検索語を入力してください。';return;}
     if (words.length>10) {message.textContent='1回の検索は10語までにしてください。';return;}
-    runJob={active:true,words,index:0,stage:'search',list:[],seenPages:[],partial:[],detailIndex:0,pages:0,startedAt:Date.now(),lastNavigationAt:0,error:''};
+    const minComments=Number(minimumInput.value.trim());
+    if(!Number.isSafeInteger(minComments)||minComments<1||minComments>9999){message.textContent='最低コメント数は1〜9999の整数で指定してください。';minimumInput.focus();return;}
+    await storeSet(MIN_COMMENTS_KEY,minComments);
+    runJob={active:true,words,minComments,index:0,stage:'search',list:[],seenPages:[],partial:[],detailIndex:0,pages:0,startedAt:Date.now(),lastNavigationAt:0,error:''};
     lastRunWords=[...words];
     await Promise.all([saveRun(),storeSet(LAST_WORDS_KEY,lastRunWords)]);
     // An old v0.4.0 background job must not restart the obsolete video-only path.
@@ -897,11 +912,16 @@
     body.replaceChildren();
     body.append(el('div',{class:'nor-muted',text:'複数の語をまとめて入力 → 検索開始を1回。動画ごとのコメント本文と時刻を収集して統合します。'}));
     body.append(labelInput);
+    const minimumRow=el('div',{class:'nor-row'});
+    minimumRow.append(el('label',{text:'最低コメント数（1語・1動画あたり）'}),minimumInput);
+    body.append(minimumRow);
+    body.append(el('div',{class:'nor-muted',text:'例：10なら、各検索語に一致するコメントが10件以上ある動画だけを検索サイト側で絞り込みます。OR合計10件ではありません。150動画の上限は維持します。'}));
     body.append(el('div',{class:'nor-row'},button('🔍 OR検索開始',()=>void startRun(),'primary'),button('📖 結果を見る',showResultsViewer,'primary')));
     if(runJob) {
       const word=runWord();
-      body.append(el('div',{class:'nor-note',text:`${runJob.active?'🔄 収集中':'⏸ 停止中'} ${runJob.index+1}/${runJob.words.length}「${word}」 ／ ${runJob.stage==='list'?`${runJob.pages}ページ・${runJob.list.length}動画`: `${runJob.detailIndex||0}/${runJob.list?.length||0}動画のコメント取得`} ${runJob.note||''} ${runJob.error||''}`}));
+      body.append(el('div',{class:'nor-note',text:`${runJob.active?'🔄 収集中':'⏸ 停止中'} 最低${runJob.minComments??1}件／語 ${runJob.index+1}/${runJob.words.length}「${word}」 ／ ${runJob.stage==='list'?`${runJob.pages}ページ・${runJob.list.length}動画`: `${runJob.detailIndex||0}/${runJob.list?.length||0}動画のコメント取得`} ${runJob.note||''} ${runJob.error||''}`}));
       body.append(el('div',{class:'nor-row'},runJob.active?button('■ 停止',()=>void stopRun()):button('▶ 再開',()=>void resumeRun())));
+      if(!runJob.active) body.append(el('div',{class:'nor-muted',text:'最低件数を変えた場合は「OR検索開始」で新しく検索してください。「再開」は前回の条件を引き継ぎます。保存済みコメントは削除しません。'}));
     }
     const all=mergedVideos(), withComments=all.filter(v=>v.comments.size);
     body.append(el('div',{class:'nor-note',text:`保存済み：${withComments.length}動画・${withComments.reduce((n,v)=>n+v.comments.size,0)}コメント。コメント0件の動画は結果一覧に出しません。`}),message);
@@ -958,6 +978,8 @@
     if(savedRun?.words && Array.isArray(savedRun.words)) runJob=savedRun;
     const last=await storeGet(LAST_WORDS_KEY,[]);
     if(Array.isArray(last)) lastRunWords=last;
+    const savedMin=await storeGet(MIN_COMMENTS_KEY,null);
+    if(Number.isSafeInteger(savedMin)&&savedMin>=1&&savedMin<=9999) minimumInput.value=String(savedMin);
     if(!labelInput.value && runJob?.words) labelInput.value=runJob.words.join(' ');
   } catch(err) {console.warn('[Niji OR Merger] v0.4.1 restore',err);}
   render();
