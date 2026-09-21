@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.1.0
+// @version      1.1.1
 // @description  X高度検索・保存検索・履歴・本文一致のみ・読み込み済み検索結果のいいね順。保存先はこのスクリプト専用のローカル領域。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,7 +14,7 @@
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.1.0', KEY='xsf_userscript_v1';
+const VERSION='1.1.1', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0;
 const hidden=new Map();
@@ -96,7 +96,12 @@ function restore(){for(const [node,original] of hidden){if(original.value)node.s
 function applyFilter(){if(!filterOn||!activeSearch())return;let count=0,miss=0;for(const article of document.querySelectorAll('article[data-testid="tweet"]')){const txt=textOfTweet(article);if(!txt)continue;count++;const cell=article.closest('[data-testid="cellInnerDiv"]')||article;const matched=matchText(txt,filterQuery);if(matched===false){if(!hidden.has(cell))hidden.set(cell,{value:cell.style.getPropertyValue('display'),priority:cell.style.getPropertyPriority('display')});cell.style.setProperty('display','none','important');miss++;}else if(hidden.has(cell)){const v=hidden.get(cell);if(v.value)cell.style.setProperty('display',v.value,v.priority);else cell.style.removeProperty('display');hidden.delete(cell);}}filterBtn.textContent=`本文一致 ${filterOn?'ON':'OFF'} (${count-miss}/${count})`;}
 filterBtn.onclick=()=>{if(!activeSearch()){alert('Xの検索結果ページで使ってください。');return;}if(filterOn){filterOn=false;restore();filterBtn.textContent='本文一致のみ';return;}filterQuery=urlSearch();if(matchText('検査',filterQuery)===null){alert('本文一致判定に使える検索語がありません。');return;}filterOn=true;applyFilter();};
 function parseLike(value){const s=String(value||'').replace(/,/g,'').trim(),m=s.match(/([\d]+(?:\.\d+)?)\s*(万|億|千|[KkMmBb])?/);if(!m)return null;const mult={'万':1e4,'億':1e8,'千':1e3,k:1e3,m:1e6,b:1e9};return Math.round(Number(m[1])*(mult[m[2]?.toLowerCase()]||1));}
-function tweetLikes(article){const btn=article.querySelector('[data-testid="like"], [data-testid="unlike"]');if(!btn)return null;const labels=[btn.getAttribute('aria-label'),btn.closest('[role="group"]')?.getAttribute('aria-label'),btn.textContent,btn.parentElement?.textContent].filter(Boolean);for(const label of labels){const m=label.match(/(?:いいね|likes?|like)\s*[:：]?\s*([\d,.]+\s*(?:万|億|千|[KkMmBb])?)/i)||label.match(/([\d,.]+\s*(?:万|億|千|[KkMmBb])?)\s*(?:件のいいね|いいね|likes?)/i);if(m)return parseLike(m[1]);}return labels.length?parseLike(labels[0]):null;}
+function tweetLikes(article){const btn=article.querySelector('[data-testid="like"], [data-testid="unlike"]');if(!btn)return null;const labels=[btn.getAttribute('aria-label'),btn.closest('[role="group"]')?.getAttribute('aria-label'),btn.textContent,btn.parentElement?.textContent].filter(Boolean);for(const label of labels){const m=label.match(/(?:いいね|likes?|like)\s*[:：]?\s*([\d,.]+\s*(?:万|億|千|[KkMmBb])?)/i)||label.match(/([\d,.]+\s*(?:万|億|千|[KkMmBb])?)\s*(?:件のいいね|いいね|likes?)/i);if(m)return parseLike(m[1]);}
+// X often labels the button only as 'Like' and displays the number in a
+// separate span. Read ONLY the known like button, never the whole action row.
+const countText=String(btn.textContent||'').trim();
+if(/^([\d,.]+\s*(?:万|億|千|[KkMmBb])?)$/.test(countText))return parseLike(countText);
+return null;}
 function captureLikes(){if(!activeSearch())return;for(const article of document.querySelectorAll('article[data-testid="tweet"]')){const anchor=article.querySelector('time')?.closest('a[href*="/status/"]')||article.querySelector('a[href*="/status/"]');if(!anchor)continue;let url;try{url=new URL(anchor.getAttribute('href'),location.origin);if(!/^(?:x|twitter)\.com$/.test(url.hostname)||!/\/status\/\d+/.test(url.pathname))continue;}catch{continue;}const id=url.pathname.match(/\/status\/(\d+)/)?.[1];if(!id)continue;const existing=sortRows.get(id)||{};const count=tweetLikes(article),text=textOfTweet(article);sortRows.set(id,{id,url:'https://x.com'+url.pathname,text:text||existing.text||'',likes:count??existing.likes??null});}}
 function drawSorted(){sorted.replaceChildren();const head=E('div','flex'),back=E('button','','← 閉じる'),reload=E('button','primary','再取得・いいね順に並べる');head.append(back,reload);sorted.append(E('h2','','♥ 読み込み済みのポストをいいね順に表示'),head);back.onclick=()=>sorted.hidden=true;reload.onclick=()=>{captureLikes();drawSorted();};const rows=[...sortRows.values()].sort((a,b)=>(b.likes??-1)-(a.likes??-1)||b.id.localeCompare(a.id));sorted.append(E('p','muted',`取得済み ${rows.length}件 ／ いいね数不明 ${rows.filter(r=>r.likes===null).length}件。現在の検索でブラウザが読み込んだ投稿のみ。X全体の検索結果を網羅した順位ではありません。`));const list=E('div');for(const row of rows){const card=E('div','post'),a=E('a','','♥ '+(row.likes===null?'不明':row.likes.toLocaleString('ja-JP'))+'　ポストを開く ↗');a.href=row.url;a.target='_blank';a.rel='noopener noreferrer';card.append(a,E('div','body',row.text||'（本文取得不可）'));list.append(card);}sorted.append(list);}
 sortBtn.onclick=()=>{if(!activeSearch()){alert('Xの検索結果ページで使ってください。');return;}const open=sorted.hidden;closeAll();if(open){captureLikes();sorted.hidden=false;drawSorted();}};
