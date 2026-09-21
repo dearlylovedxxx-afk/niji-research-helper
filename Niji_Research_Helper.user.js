@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.34
+// @version      1.0.35
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.34';
+  const VERSION = '1.0.35';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -5093,14 +5093,23 @@
     else entry.collabCount = entry.mentions.length ? entry.mentions.length + 1 : (entry.categories.includes('コラボ') ? null : 1);
     entry.url = youtubeUrl(entry.id);
 
-    let bar = entry.el.querySelector(':scope .npf-research-meta');
+    // The desktop badge row is mounted on the OUTER rich-item, which can be
+    // outside entry.el (e.g. when entry.el is a nested yt-lockup-view-model).
+    // Search the actual mount as well as the inner card and remove leftovers
+    // from older renders; repeated scans must never create another row.
+    const mount = researchMount(entry.el, researchTitleElement(entry.el));
+    if (!mount) return;
+    const bars = [...new Set([
+      ...mount.querySelectorAll(':scope > .npf-research-meta'),
+      ...entry.el.querySelectorAll('.npf-research-meta'),
+    ])];
+    let bar = bars.find(node => node.parentElement === mount) || bars[0];
     if (!bar) {
       bar = document.createElement('div');
       bar.className = 'npf-research-meta';
     }
-    // Also repair an existing badge bar mounted by an earlier render.
-    const mount = researchMount(entry.el, researchTitleElement(entry.el));
-    if (mount && bar.parentElement !== mount) mount.appendChild(bar);
+    for (const duplicate of bars) if (duplicate !== bar) duplicate.remove();
+    if (bar.parentElement !== mount) mount.appendChild(bar);
     bar.replaceChildren();
 
     if (!meta && state.apiKey) {
