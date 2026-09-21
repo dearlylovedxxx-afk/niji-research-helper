@@ -1,0 +1,70 @@
+name: Release XSF timeline collection v1.1.4
+on:
+  push:
+    paths:
+      - .github/workflows/xsf_v114_release_once.yml
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply guarded X timeline patch
+        run: python .github/scripts/xsf_scan_v114_once.py
+      - name: Add server-side high-like search and current manual count
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('X_Search_Favorites.user.js');s=p.read_text(encoding='utf-8')
+          a="if(scanRunning||manualCapture||!sorted.hidden){captureLikes();if(manualCapture)updateScanState();}},1100);"
+          b="if(scanRunning||manualCapture||!sorted.hidden){captureLikes();if(manualCapture){scanNotice=`手動収集中：${sortRows.size}件。Xの投稿をスクロールし、終了時に「停止して結果を見る」を押してね。`;updateScanState();}}},1100);"
+          assert s.count(a)==1;s=s.replace(a,b,1)
+          a="  sorted.append(E('div','result-count',`読み込み済みの投稿 ${rows.length}件 ／ いいね数不明 ${unknown}件。検索結果全体の順位ではありません。スクロールで新しく表示された投稿のみ追加できます。`));"
+          b=a+'''
+          // X's documented min_faves operator is more useful than pretending
+          // that this partial client-side list contains every popular post.
+          const highRow=E('div','flex');
+          const highMin=E('input');highMin.type='number';highMin.min='1';highMin.step='1';highMin.value='5000';
+          highMin.setAttribute('aria-label','Xで再検索する最低いいね数');highMin.style.width='104px';
+          const highBtn=E('button','','🔎 指定いいね以上をXで探す');
+          highBtn.onclick=()=>{
+            const min=Math.floor(Number(highMin.value));
+            if(!Number.isFinite(min)||min<1||min>100000000)return alert('最低いいね数を1以上で入力してください。');
+            const base=urlSearch().replace(/(?:^|\\s)min_faves:\\d+(?=\\s|$)/gi,' ').replace(/\\s+/g,' ').trim();
+            navigate(`${base} min_faves:${min}`,'top');
+          };
+          highRow.append(E('span','muted','X側で最低いいね数を絞って再検索（全件・順位は保証されません）：'),highMin,highBtn);
+          sorted.append(highRow);
+          '''
+          assert s.count(a)==1;s=s.replace(a,b,1)
+          p.write_text(s,encoding='utf-8')
+          print('Added X native min_faves search, live manual collection count')
+          PY
+      - name: Validate script and behavior
+        run: |
+          node --check X_Search_Favorites.user.js
+          git diff --check
+          node <<'JS'
+          const fs=require('fs'), assert=require('node:assert/strict'),vm=require('node:vm');
+          const s=fs.readFileSync('X_Search_Favorites.user.js','utf8');
+          for(const x of ['// @version      1.1.4',"const VERSION='1.1.4', KEY='xsf_userscript_v1'",'function findSearchScroller()',"'[data-testid=\"primaryColumn\"]'",'scrollSearch(target,-Infinity);','sorted.hidden=true;scanBar.hidden=false;','function manualScan()','scanRunning||manualCapture||!sorted.hidden',"min_faves:${min}",'手動収集中：${sortRows.size}件'])assert(s.includes(x),x);
+          assert(s.includes('// @namespace    x-search-favorites-userscript'));
+          const begin=s.indexOf('function findSearchScroller(){'),end=s.indexOf('function manualScan(){',begin);
+          const src=s.slice(begin,end);
+          const scrollable={scrollTop:50,scrollHeight:1000,clientHeight:200,parentElement:null};
+          const document={querySelector:()=>scrollable,scrollingElement:{scrollTop:200},documentElement:{},body:{}};
+          const ctx={document,window:{innerHeight:800,scrollTo(){throw Error('nested scroller should not scroll window')},scrollBy(){throw Error('nested scroller should not scroll window')}},getComputedStyle:()=>({overflowY:'auto'})};
+          vm.runInNewContext(src,ctx);
+          assert.equal(ctx.findSearchScroller(),scrollable);
+          ctx.scrollSearch(scrollable,-Infinity);assert.equal(scrollable.scrollTop,0);
+          ctx.scrollSearch(scrollable,420);assert.equal(scrollable.scrollTop,420);
+          console.log('PASS syntax, stable userscript identity, nested timeline scroller, manual fallback, X minimum-likes search');
+          JS
+      - name: Publish verified userscript
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add X_Search_Favorites.user.js
+          git commit -m "Collect X timeline from top with real scrolling and manual fallback (v1.1.4)"
+          git push origin HEAD:main
