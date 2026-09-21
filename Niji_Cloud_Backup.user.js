@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.1.1
+// @version      0.1.2
+// @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
+// @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR検索・X保存検索・Pixiv調査DBをアプリ別にpCloudへ保存・検証・安全に統合復元。Xの一時的ないいね順投稿は含めません。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
