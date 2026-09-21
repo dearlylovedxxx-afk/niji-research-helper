@@ -1,0 +1,28 @@
+name: Verify OR addon GitHub migration (one time)
+on:
+  push:
+    paths:
+      - .github/workflows/or_merger_verify_once.yml
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check userscript syntax and metadata
+        run: |
+          node --check Niji_OR_Results_Merger.user.js
+          node <<'JS'
+          const fs = require('fs');
+          const assert = require('assert');
+          const s = fs.readFileSync('Niji_OR_Results_Merger.user.js', 'utf8');
+          assert(s.includes('// @namespace    niji-or-results-merger-standalone'));
+          assert(s.includes('// @version      0.3.15'));
+          assert(s.includes('Niji_OR_Results_Merger.user.js'));
+          assert(s.includes("const STORAGE_KEY = 'niji_or_merger_addon_batches_v1'"));
+          assert(s.includes("const AUTO_KEY = 'niji_or_merger_addon_auto_v3'"));
+          assert(s.includes("const VERSION = '0.3.15'"));
+          assert(!s.includes('NijiResearchHelperDB'));
+          console.log('PASS: JS syntax, same script identity, update URLs and storage keys');
+          JS
