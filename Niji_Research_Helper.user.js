@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.38
+// @version      1.0.39
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.38';
+  const VERSION = '1.0.39';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -1700,7 +1700,7 @@
     // Bind ONLY comment2434's own timestamp column. Never bind links in the OR
     // merger's viewer, other extensions, menus, or copied result cards. Otherwise
     // the handler hijacks OR timestamps and opens the BACKGROUND page's video ID.
-    $$('main .col-md-1 a[href], main .col-2 a[href]').forEach(a => {
+    $$('.col-md-1 a[href], .col-2 a[href]').forEach(a => {
       if (a.closest('#niji-or-root, #niji-or-trigger, #niji-or-boot-check, #npf-research-panel, #npf-yt-panel')) return;
       if (!a.closest('.col-md-1, .col-2')) return;
       if (a.dataset.npfSyncBound === '1') return;
