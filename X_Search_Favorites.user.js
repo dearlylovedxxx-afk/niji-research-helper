@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.1.3
+// @version      1.1.4
 // @description  X高度検索・保存検索・履歴・本文一致のみ・読み込み済み検索結果のいいね順。保存先はこのスクリプト専用のローカル領域。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,11 +14,11 @@
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.1.3', KEY='xsf_userscript_v1';
+const VERSION='1.1.4', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0;
 const hidden=new Map();
-let scanRunning=false, scanStop=false, scanStep=0, scanLimit=150, scanNotice='', scanOriginalY=0;
+let scanRunning=false, scanStop=false, scanStep=0, scanLimit=150, scanNotice='', scanOriginalY=0, manualCapture=false;
 
 function load(){try{const obj=JSON.parse(localStorage.getItem(KEY)||'{}');if(obj&&typeof obj==='object'){
 for(const k of ['folders','savedSearches','history'])if(Array.isArray(obj[k]))data[k]=obj[k];
@@ -71,7 +71,18 @@ const css=E('style');css.textContent=`:host{all:initial}*{box-sizing:border-box}
 css.textContent+=`#sorted{inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-height:none!important;bottom:auto!important;right:auto!important;border:0!important;border-radius:0!important;box-shadow:none!important;padding:20px max(18px,calc((100vw - 1060px)/2)) 60px!important;font:15px/1.6 system-ui!important;z-index:5!important;overscroll-behavior:contain!important}#sorted h2{font-size:23px!important;margin:4px 0 12px!important}#sorted .result-head{position:sticky;top:-20px;z-index:2;background:var(--bg);border-bottom:1px solid var(--edge);padding:12px 0;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}#sorted .result-head button{font-size:14px;min-height:42px}#sorted .result-count{font-size:13px;color:var(--muted);margin:12px 0}#sorted .result-card{display:flex;gap:16px;align-items:flex-start;padding:20px 10px;border-bottom:1px solid var(--edge)}#sorted .result-rank{font:750 18px system-ui;min-width:46px;color:var(--muted)}#sorted .result-content{flex:1;min-width:0}#sorted .result-byline{font-weight:700;font-size:14px;overflow-wrap:anywhere}#sorted .result-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:16px;line-height:1.7;margin:8px 0}#sorted .result-link{display:inline-block;padding:8px 0;color:#1d9bf0;font-size:13px}#sorted .result-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}#sorted select{width:auto;max-width:100px}#sorted .scan-state{font-size:13px;color:var(--muted);margin:9px 0}#sorted .result-empty{padding:40px 12px;font-size:15px;color:var(--muted)}@media(max-width:600px){#sorted{padding:12px 13px 80px!important}#sorted h2{font-size:19px!important}#sorted .result-card{gap:8px;padding:14px 0}#sorted .result-rank{min-width:35px;font-size:15px}#sorted .result-text{font-size:15px}}`;
 // Rich post cards: recognize a post from the author, attached image/video and text.
 css.textContent+=`#sorted .result-feed{max-width:780px;margin:0 auto}#sorted .result-card{display:block!important;margin:0 0 14px!important;padding:18px!important;border:1px solid var(--edge)!important;border-radius:18px!important;background:var(--bg)}#sorted .result-card-top{display:flex;gap:12px;align-items:center;margin-bottom:10px}#sorted .result-avatar{width:46px;height:46px;border-radius:50%;object-fit:cover;flex-shrink:0}#sorted .result-user{font-weight:750;font-size:16px;line-height:1.25}#sorted .result-handle{font-size:13px;color:var(--muted);overflow-wrap:anywhere}#sorted .result-rank{margin-left:auto;min-width:auto;border-radius:18px;background:#e7f4ff;color:#175d91;font:700 13px system-ui;padding:6px 10px;white-space:nowrap}#sorted .result-body{font-size:16px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0 12px}#sorted .result-media{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;border-radius:14px;overflow:hidden;margin:12px 0;max-height:540px}#sorted .result-media>a{display:block;position:relative;min-height:120px;max-height:360px;background:#15202b}#sorted .result-media img{width:100%;height:100%;max-height:360px;min-height:120px;object-fit:cover;display:block}#sorted .result-media>a:only-child{grid-column:1/-1;min-height:180px}#sorted .result-media>a:only-child img{max-height:440px;object-fit:contain}#sorted .result-video-tag{position:absolute;left:10px;bottom:10px;background:#000c;color:#fff;border-radius:20px;padding:5px 12px;font:700 14px system-ui}#sorted .result-quote{border:1px solid var(--edge);border-radius:12px;margin:10px 0;padding:10px 12px;white-space:pre-wrap;font-size:14px}#sorted .result-card-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:12px}#sorted .result-likes{font-weight:750;color:#e0245e}#sorted .result-open{display:inline-block;padding:8px 13px!important;background:#1d9bf0!important;color:#fff!important;border-radius:22px;text-decoration:none!important;font-weight:700!important}#sorted .result-no-media{color:var(--muted);font-size:13px;background:#eef5fb;border-radius:10px;padding:12px;margin-top:10px}#sorted .result-quote a{color:#1d9bf0}#sorted .result-media-hint{color:var(--muted);font-size:11px;margin-top:-6px}@media(prefers-color-scheme:dark){#sorted .result-rank{background:#123147;color:#87cfff}#sorted .result-no-media{background:#222}}@media(max-width:600px){#sorted .result-card{padding:12px!important;margin-bottom:10px!important;border-radius:14px!important}#sorted .result-avatar{width:38px;height:38px}#sorted .result-user{font-size:14px}#sorted .result-body{font-size:15px}#sorted .result-media{max-height:420px}#sorted .result-media>a{min-height:90px}}`;
+css.textContent+=`#xsf-scan-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:2147483647;background:#17212b;color:#fff;border:1px solid #6a879a;border-radius:14px;box-shadow:0 6px 24px #0007;padding:10px 12px;display:flex;gap:12px;align-items:center;max-width:calc(100vw - 20px);pointer-events:auto;font:13px/1.5 system-ui}#xsf-scan-bar[hidden]{display:none!important}#xsf-scan-bar span{max-width:min(570px,calc(100vw - 160px));overflow-wrap:anywhere}#xsf-scan-bar button{background:#1d9bf0;color:#fff;border:1px solid #84c8f1;border-radius:9px;padding:9px;min-height:42px;white-space:nowrap}@media(max-width:600px){#xsf-scan-bar{left:8px;right:8px;transform:none;bottom:8px;flex-wrap:wrap}#xsf-scan-bar span{max-width:100%}}`;
 sh.append(css);const bar=E('div');bar.id='bar';const launch=E('button','', '🔎 検索＋');const filterBtn=E('button','', '本文一致のみ');const sortBtn=E('button','', '♥ いいね順');bar.append(launch,filterBtn,sortBtn);sh.append(bar);
+// While collecting, show the real X timeline rather than covering it with a
+// full-screen viewer. The small floating control stays accessible to stop.
+const scanBar=E('div');scanBar.id='xsf-scan-bar';scanBar.hidden=true;
+const scanBarText=E('span');scanBarText.id='xsf-scan-bar-text';
+const scanBarDone=E('button','','■ 停止して結果を見る');
+scanBarDone.onclick=()=>{
+  scanStop=true;manualCapture=false;
+  if(!scanRunning){scanBar.hidden=true;sorted.hidden=false;drawSorted();}
+};
+scanBar.append(scanBarText,scanBarDone);sh.append(scanBar);
 const panel=E('section');panel.id='panel';panel.hidden=true;const sorted=E('section');sorted.id='sorted';sorted.hidden=true;sh.append(panel,sorted);
 function closeAll(){panel.hidden=true;sorted.hidden=true;}
 launch.onclick=()=>{const open=panel.hidden;closeAll();if(open){panel.hidden=false;renderPanel();}};
@@ -169,33 +180,75 @@ function captureLikes(){
   }
 }
 function delay(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
-function updateScanState(){const el=sh.querySelector('#xsf-scan-state');if(el)el.textContent=scanNotice||`読み込み済み ${sortRows.size}件。Xの未読み込み投稿は含まれません。`;}
+function updateScanState(){
+  const text=scanNotice||`読み込み済み ${sortRows.size}件。Xの未読み込み投稿は含まれません。`;
+  const label=sh.querySelector('#xsf-scan-state');if(label)label.textContent=text;
+  if(scanBarText)scanBarText.textContent=text;
+}
+// X may scroll the document or a nested column. Never scroll our own overlay.
+function findSearchScroller(){
+  let node=document.querySelector('[data-testid="primaryColumn"]');
+  while(node){
+    if(node.scrollHeight>node.clientHeight+80 && /(auto|scroll)/i.test(getComputedStyle(node).overflowY))return node;
+    node=node.parentElement;
+  }
+  return document.scrollingElement||document.documentElement;
+}
+function scrollPosition(target){
+  return Number(target?.scrollTop)||0;
+}
+function scrollSearch(target,offset){
+  if(!target)return;
+  if(target===document.scrollingElement||target===document.documentElement||target===document.body){
+    if(offset===-Infinity)window.scrollTo(0,0);else window.scrollBy(0,offset);
+  }else if(offset===-Infinity)target.scrollTop=0;
+  else target.scrollTop+=offset;
+}
+function manualScan(){
+  if(scanRunning)return;
+  if(!activeSearch()){alert('Xの検索結果ページで使ってください。');return;}
+  manualCapture=true;scanStop=false;
+  scanNotice=`手動収集モード：Xの検索画面を上下にスクロールしてね。表示された投稿を蓄積中（${sortRows.size}件）。`;
+  sorted.hidden=true;scanBar.hidden=false;captureLikes();updateScanState();
+}
 async function scanMore(){
   if(scanRunning||!activeSearch())return;
-  captureLikes();scanRunning=true;scanStop=false;scanStep=0;scanOriginalY=window.scrollY;
-  const search=urlSearch();const goal=scanLimit;
-  const initial=sortRows.size;let noGrowth=0,noMove=0;
-  scanNotice=`収集中：${sortRows.size}/${goal}件。背後のX検索画面を順にスクロールしています。`;
-  drawSorted();
+  manualCapture=false;scanRunning=true;scanStop=false;scanStep=0;
+  captureLikes();
+  const search=urlSearch(),goal=scanLimit,initial=sortRows.size;
+  let target=findSearchScroller(),noGrowth=0,noMove=0;
+  scanOriginalY=scrollPosition(target);
+  scanNotice=`先頭から再走査：${sortRows.size}/${goal}件。Xの画面を表示しながら読み込みます。`;
+  sorted.hidden=true;scanBar.hidden=false;updateScanState();
   try{
-    for(let i=0;i<180&&!scanStop&&sortRows.size<goal;i++){
-      if(!activeSearch()||urlSearch()!==search){scanNotice='検索ページが切り替わったので収集を停止しました。';break;}
-      captureLikes();const oldSize=sortRows.size,oldY=window.scrollY;
-      window.scrollBy(0,Math.max(620,Math.round(window.innerHeight*.82)));
-      await delay(1700);
-      captureLikes();scanStep=i+1;
-      noGrowth=sortRows.size===oldSize?noGrowth+1:0;
-      noMove=Math.abs(window.scrollY-oldY)<4?noMove+1:0;
-      scanNotice=`収集中：${sortRows.size}/${goal}件 ／ スクロール${scanStep}回（今回追加 ${sortRows.size-initial}件）。`;
-      if(i%3===0||sortRows.size>=goal){const oldScroll=sorted.scrollTop;drawSorted();sorted.scrollTop=oldScroll;}
-      else updateScanState();
-      if(noGrowth>=12||noMove>=9){scanNotice=`新しい投稿を取得できなくなったため停止しました（${sortRows.size}件）。X側で結果の続きが表示されない場合があります。`;break;}
+    // Begin at the actual top: a previously viewed high-liked post might have
+    // been removed from X's virtualized DOM before the old collector started.
+    scrollSearch(target,-Infinity);await delay(1000);captureLikes();
+    for(let i=0;i<240&&!scanStop&&sortRows.size<goal;i++){
+      if(!activeSearch()||urlSearch()!==search){scanNotice='検索条件が変わったため中断しました。';break;}
+      captureLikes();const before=sortRows.size,oldY=scrollPosition(target);
+      scrollSearch(target,Math.max(420,Math.round(window.innerHeight*.68)));
+      await delay(1800);captureLikes();scanStep=i+1;
+      let moved=Math.abs(scrollPosition(target)-oldY)>3;
+      // A nested scroller can change when X rerenders its timeline.
+      if(!moved){const candidate=findSearchScroller();if(candidate!==target){target=candidate;scrollSearch(target,Math.max(420,Math.round(window.innerHeight*.68)));await delay(900);captureLikes();moved=true;}}
+      noGrowth=sortRows.size===before?noGrowth+1:0;
+      noMove=moved?0:noMove+1;
+      scanNotice=`先頭から収集中：${sortRows.size}/${goal}件／移動${scanStep}回（追加 ${sortRows.size-initial}件）。`;
+      updateScanState();
+      if(noGrowth>=12||noMove>=7){
+        scanNotice=`Xの検索画面から新しい投稿を読み込めず、一時停止しました（${sortRows.size}件）。全件取得ではありません。手動収集も試せます。`;
+        break;
+      }
     }
-    if(scanStop)scanNotice=`手動停止：${sortRows.size}件を保持しています。`;
-    else if(sortRows.size>=goal)scanNotice=`設定件数 ${goal}件まで収集しました。必要なら上限を増やして「さらに収集」できます。`;
-    else if(!scanNotice.includes('停止'))scanNotice=`収集終了：${sortRows.size}件。Xが読み込ませた投稿の範囲内でのいいね順です。`;
-  }catch(err){scanNotice=`収集中にエラーが発生：${String(err?.message||err)}。取得済み ${sortRows.size}件は保持しました。`;console.warn('[XSF] scan error',err);}
-  finally{scanRunning=false;if(!sorted.hidden)drawSorted();}
+    if(scanStop)scanNotice=`停止しました。取得済み ${sortRows.size}件は保持しています。`;
+    else if(sortRows.size>=goal)scanNotice=`設定上限 ${goal}件を取得。未取得の投稿はまだある可能性があります。`;
+    else if(!scanNotice.includes('一時停止')&&!scanNotice.includes('中断'))scanNotice=`収集処理を終了（${sortRows.size}件）。検索結果全件の保証はありません。`;
+  }catch(err){scanNotice=`収集中にエラー：${String(err?.message||err)}。${sortRows.size}件を保持。`;console.warn('[XSF] scan error',err);}
+  finally{
+    scanRunning=false;scanBar.hidden=true;
+    if(!manualCapture){sorted.hidden=false;drawSorted();}
+  }
 }
 function drawSorted(){
   if(sorted.hidden)return;
@@ -211,11 +264,27 @@ function drawSorted(){
   const collect=E('button','primary',scanRunning?'■ 収集を停止':'⬇ さらに収集する');
   collect.onclick=()=>{if(scanRunning){scanStop=true;scanNotice='停止処理中…';updateScanState();}else void scanMore();};
   const refresh=E('button','','今の画面を追加');refresh.onclick=()=>{captureLikes();drawSorted();};
-  actions.append(max,collect,refresh,close);heading.append(name,actions);sorted.append(heading);
+  const manual=E('button','','🖐 X画面を手動で収集');manual.onclick=manualScan;
+  actions.append(max,collect,manual,refresh,close);heading.append(name,actions);sorted.append(heading);
   const state=E('div','scan-state');state.id='xsf-scan-state';sorted.append(state);updateScanState();
   const rows=[...sortRows.values()].sort((a,b)=>(b.likes??-1)-(a.likes??-1)||b.id.localeCompare(a.id));
   const unknown=rows.filter(r=>r.likes===null).length;
   sorted.append(E('div','result-count',`読み込み済みの投稿 ${rows.length}件 ／ いいね数不明 ${unknown}件。検索結果全体の順位ではありません。スクロールで新しく表示された投稿のみ追加できます。`));
+// X's documented min_faves operator is more useful than pretending
+// that this partial client-side list contains every popular post.
+const highRow=E('div','flex');
+const highMin=E('input');highMin.type='number';highMin.min='1';highMin.step='1';highMin.value='5000';
+highMin.setAttribute('aria-label','Xで再検索する最低いいね数');highMin.style.width='104px';
+const highBtn=E('button','','🔎 指定いいね以上をXで探す');
+highBtn.onclick=()=>{
+  const min=Math.floor(Number(highMin.value));
+  if(!Number.isFinite(min)||min<1||min>100000000)return alert('最低いいね数を1以上で入力してください。');
+  const base=urlSearch().replace(/(?:^|\s)min_faves:\d+(?=\s|$)/gi,' ').replace(/\s+/g,' ').trim();
+  navigate(`${base} min_faves:${min}`,'top');
+};
+highRow.append(E('span','muted','X側で最低いいね数を絞って再検索（全件・順位は保証されません）：'),highMin,highBtn);
+sorted.append(highRow);
+
   if(!rows.length)sorted.append(E('div','result-empty','検索結果をまだ取得できていません。「さらに収集する」で画面をスクロールして取得します。'));
   const list=E('div','result-feed');
   for(let i=0;i<rows.length;i++){
@@ -250,9 +319,9 @@ function drawSorted(){
   }
   sorted.append(list);sorted.scrollTop=previousScroll;
 }
-sortBtn.onclick=()=>{if(!activeSearch()){alert('Xの検索結果ページで使ってください。');return;}const open=sorted.hidden;closeAll();if(open){captureLikes();sorted.hidden=false;scanNotice=`現在読み込み済み ${sortRows.size}件。もっと取得するには「さらに収集する」を押してください。`;drawSorted();}};
-let scheduled=0;const observer=new MutationObserver(()=>{if(scheduled)return;scheduled=setTimeout(()=>{scheduled=0;if(!host.isConnected)(document.body||document.documentElement).append(host);if(filterOn)applyFilter();if(sortOn||!sorted.hidden)captureLikes();},350);});observer.observe(document.documentElement,{childList:true,subtree:true});
-timer=setInterval(()=>{if(!host.isConnected)(document.body||document.documentElement).append(host);if(location.href!==route){route=location.href;filterOn=false;filterQuery='';restore();filterBtn.textContent='本文一致のみ';sortRows.clear();sorted.hidden=true;}if(filterOn)applyFilter();if(!sorted.hidden)captureLikes();},1100);
-window.__xsfUserscriptCleanup=()=>{scanStop=true;observer.disconnect();clearInterval(timer);clearTimeout(scheduled);restore();host.remove();};
+sortBtn.onclick=()=>{if(!activeSearch()){alert('Xの検索結果ページで使ってください。');return;}const open=sorted.hidden;closeAll();if(open){captureLikes();sorted.hidden=false;scanNotice=`現在読み込み済み ${sortRows.size}件。先頭から追加収集するか、X画面を手動スクロールしてね。`;drawSorted();}};
+let scheduled=0;const observer=new MutationObserver(()=>{if(scheduled)return;scheduled=setTimeout(()=>{scheduled=0;if(!host.isConnected)(document.body||document.documentElement).append(host);if(filterOn)applyFilter();if(scanRunning||manualCapture||!sorted.hidden)captureLikes();},350);});observer.observe(document.documentElement,{childList:true,subtree:true});
+timer=setInterval(()=>{if(!host.isConnected)(document.body||document.documentElement).append(host);if(location.href!==route){route=location.href;filterOn=false;filterQuery='';scanStop=true;manualCapture=false;scanBar.hidden=true;restore();filterBtn.textContent='本文一致のみ';sortRows.clear();sorted.hidden=true;}if(filterOn)applyFilter();if(scanRunning||manualCapture||!sorted.hidden){captureLikes();if(manualCapture){scanNotice=`手動収集中：${sortRows.size}件。Xの投稿をスクロールし、終了時に「停止して結果を見る」を押してね。`;updateScanState();}}},1100);
+window.__xsfUserscriptCleanup=()=>{scanStop=true;manualCapture=false;observer.disconnect();clearInterval(timer);clearTimeout(scheduled);restore();host.remove();};
 load();currentFields=blank();
 })();
