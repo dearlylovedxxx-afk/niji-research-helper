@@ -1,0 +1,37 @@
+name: Release X Search Favorites v1.1.2
+on:
+  push:
+    paths:
+      - .github/workflows/xsf_v112_release_once.yml
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guarded patch
+        run: python .github/scripts/xsf_full_results_v112_once.py
+      - name: Syntax and regression tests
+        run: |
+          node --check X_Search_Favorites.user.js
+          git diff --check
+          node <<'JS'
+          const fs=require('fs'),assert=require('assert'),vm=require('vm');
+          const s=fs.readFileSync('X_Search_Favorites.user.js','utf8');
+          for(const snippet of ['// @version      1.1.2',"const VERSION='1.1.2'",'async function scanMore()','function drawSorted()','window.scrollBy(0,','noGrowth>=12||noMove>=9','scanStop=true','#sorted{inset:0!important;width:100vw!important','読み込み済みの投稿'])assert(s.includes(snippet),snippet);
+          assert(s.includes("const VERSION='1.1.2', KEY='xsf_userscript_v1'"));
+          assert(s.includes('scanLimit=150'));
+          assert(s.includes('sortRows.set(id,{id,url:'));
+          const block=s.slice(s.indexOf('function parseLike('),s.indexOf('function tweetLikes('));
+          const ctx={};vm.runInNewContext(block+';globalThis.testParse=parseLike;',ctx);
+          assert.equal(ctx.testParse('6,353'),6353);assert.equal(ctx.testParse('1.2万'),12000);assert.equal(ctx.testParse('4.5K'),4500);
+          console.log('PASS syntax, preserved storage, fullscreen, bounded collection, like parser');
+          JS
+      - name: Publish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add X_Search_Favorites.user.js
+          git commit -m "Show full-screen X like results and incrementally collect posts (v1.1.2)"
+          git push origin HEAD:main
