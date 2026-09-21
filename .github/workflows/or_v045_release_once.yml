@@ -1,0 +1,79 @@
+name: Release OR resumable chunks v0.4.5
+on:
+  push:
+    paths:
+      - .github/workflows/or_v045_release_once.yml
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply guarded chunk-resume patch
+        run: python .github/scripts/or_v045_resume_chunks_once.py
+      - name: Syntax and data compatibility
+        run: |
+          node --check Niji_OR_Results_Merger.user.js
+          git diff --check
+          node <<'JS'
+          const fs=require('fs'), assert=require('node:assert/strict'), vm=require('node:vm');
+          const src=fs.readFileSync('Niji_OR_Results_Merger.user.js','utf8');
+          const segment=(start,end)=>{
+            let a=src.indexOf(start), b=src.indexOf(end,a+start.length);
+            assert(a>=0 && b>a,`Missing function: ${start}`);
+            return src.slice(a,b);
+          };
+          assert(src.includes('// @version      0.4.5'));
+          assert(src.includes("const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';"));
+          assert(src.includes("const RUN_KEY = 'niji_or_merger_addon_run_v041';"));
+          assert(src.includes("const MIN_COMMENTS_KEY = 'niji_or_merger_addon_min_comments_v044';"));
+          assert(src.includes("@namespace    niji-or-results-merger-standalone"));
+          assert(src.includes('runJob.collectedIds.push(item.id);known.add(item.id);'));
+          assert(src.includes('if(runJob.pendingNextUrl) await pauseRunChunk();'));
+          assert(src.includes("runJob.stage='chunk-nav'"));
+          assert(src.includes("button(resumeText,()=>void resumeRun())"));
+          assert(!src.includes('if(runJob.list.length>MAX_RUN_VIDEOS) throw new Error'));
+
+          const urlContext={URL, location:{href:'https://comment2434.com/comment/?keyword=%E3%81%B7%E3%82%8F&least_count=10&page=15',origin:'https://comment2434.com'}, runJob:{seenPages:['https://comment2434.com/comment/?keyword=%E3%81%B7%E3%82%8F&least_count=10&page=15']},runWord:()=> 'ぷわ', nextPageControl:()=>({matches:()=>true,getAttribute:()=>'/comment/?keyword=%E3%81%B7%E3%82%8F&least_count=10&page=16'})};
+          vm.runInNewContext(segment('  function nextResultPageUrl() {','  async function beginDetailsAfterList() {'),urlContext);
+          assert.equal(urlContext.nextResultPageUrl(),'https://comment2434.com/comment/?keyword=%E3%81%B7%E3%82%8F&least_count=10&page=16');
+          urlContext.runJob.seenPages.push('https://comment2434.com/comment/?keyword=%E3%81%B7%E3%82%8F&least_count=10&page=16');
+          assert.throws(()=>urlContext.nextResultPageUrl(),/同じ検索ページ/);
+          urlContext.runJob.seenPages.pop();
+          urlContext.nextPageControl=()=>({matches:()=>true,getAttribute:()=>'/comment/?keyword=%E3%81%B7%E3%82%8F&least_count=1&page=16'});
+          assert.throws(()=>urlContext.nextResultPageUrl(),/最低コメント数/);
+
+          const pendingUrl='https://comment2434.com/comment/?keyword=x&least_count=10&page=16';
+          const paused={runJob:{stage:'chunk-paused',active:false,words:['x'],index:0,list:[{id:'a'}],pendingNextUrl:pendingUrl,error:''},runDriving:false,message:{textContent:''},saveRun:async()=>{},render:()=>{},driveRun:()=>{},MAX_RUN_VIDEOS:150};
+          vm.runInNewContext(segment('  async function resumeRun() {','  async function persistRunPartial() {'),paused);
+          (async()=>{
+            await paused.resumeRun();
+            assert.equal(paused.runJob.stage,'chunk-nav');
+            assert.equal(paused.runJob.active,true);
+            assert.equal(paused.runJob.pendingNextUrl,pendingUrl);
+            const old={runJob:{stage:'list',active:false,words:['a','b'],index:1,list:Array.from({length:160},(_,i)=>({id:String(i)})),seenPages:['https://comment2434.com/comment/?keyword=b&page=16'],error:'安全上限150動画を超えたため停止しました（未取得の結果があります）'},runDriving:false,message:{textContent:''},saveRun:async()=>{},render:()=>{},driveRun:()=>{},MAX_RUN_VIDEOS:150};
+            vm.runInNewContext(segment('  async function resumeRun() {','  async function persistRunPartial() {'),old);
+            await old.resumeRun();
+            assert.equal(old.runJob.stage,'legacy-limit-prepare');
+            assert.equal(old.runJob.collectedIds.length,160);
+            assert.equal(old.runJob.list.length,160);
+            let persisted=false;
+            const chunk={runJob:{stage:'detail-open',active:true,list:[{id:'a'},{id:'b'}],partial:[],pendingNextUrl:pendingUrl,collectedIds:['a','b'],pages:2},persistRunPartial:async()=>{persisted=true;},saveRun:async()=>{},render:()=>{},message:{textContent:''}};
+            vm.runInNewContext(segment('  async function pauseRunChunk() {','  function looksLikeAccessDenied() {'),chunk);
+            await chunk.pauseRunChunk();
+            assert(persisted);
+            assert.equal(chunk.runJob.stage,'chunk-paused');
+            assert.equal(chunk.runJob.active,false);
+            assert.equal(chunk.runJob.completedVideos,2);
+            assert.equal(chunk.runJob.pendingNextUrl,pendingUrl);
+            console.log('PASS v0.4.5: safe next page, min filter, duplicate rejection, chunk checkpoint, legacy 160-video resume, existing storage keys');
+          })().catch(e=>{console.error(e);process.exitCode=1});
+          JS
+      - name: Publish verified script
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Niji_OR_Results_Merger.user.js
+          git commit -m "Pause OR searches every 150 videos and resume without duplicate retrieval (v0.4.5)"
+          git push origin HEAD:main
