@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.36
+// @version      1.0.37
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.36';
+  const VERSION = '1.0.37';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -3717,6 +3717,8 @@
     dbLookupPending: new Set(),
     activeTags: new Set(),
     excludedTags: new Set(),
+    gameIncluded: new Map(), // normalized game -> display name (OR)
+    gameExcluded: new Map(), // exclude wins; loaded cards only
     includeText: '',
     excludeText: '',
     collaboratorFilter: '', // Full-history focus; local card filtering uses the Sets below.
@@ -6387,6 +6389,57 @@
     if (research.collaboratorFilter) toast(`🤝 ${research.collaboratorFilter} を含むコラボを表示。全期間履歴も検索します`);
   }
 
+  function researchGameKey(game = '') {
+    return normalizeResearchText(game).normalize('NFKC');
+  }
+  function cycleResearchGame(game = '') {
+    const name=String(game||'').trim();
+    const key=researchGameKey(name);
+    if(!key) return;
+    if(research.gameIncluded.has(key)) {
+      research.gameIncluded.delete(key);research.gameExcluded.set(key,name);
+    } else if(research.gameExcluded.has(key)) {
+      research.gameExcluded.delete(key);
+    } else {
+      research.gameIncluded.set(key,name);
+    }
+    applyResearchFilters();
+  }
+  function updateResearchGameSuggestions() {
+    const container=$('#npf-r-game-suggestions');
+    if(!container) return;
+    const games=new Map();
+    for(const e of currentResearchEntries()) {
+      const name=String(e.game||'').trim();
+      const key=researchGameKey(name);
+      if(!key) continue;
+      const v=games.get(key)||{name,count:0};v.count++;
+      if(name.length<v.name.length) v.name=name;
+      games.set(key,v);
+    }
+    const suggestions=[...games.values()].sort((a,b)=>b.count-a.count||a.name.localeCompare(b.name,'ja')).slice(0,12);
+    const selected=[...new Map([...research.gameIncluded,...research.gameExcluded]).entries()]
+      .filter(([key])=>!games.has(key)).map(([key,name])=>({name,count:0}));
+    const rows=[...suggestions,...selected];
+    const signature=JSON.stringify(rows.map(x=>[x.name,x.count,research.gameIncluded.has(researchGameKey(x.name)),research.gameExcluded.has(researchGameKey(x.name))]));
+    if(container.dataset.rendered===signature) return; // avoid YouTube's DOM observer redraw loop
+    container.dataset.rendered=signature;
+    container.replaceChildren();
+    for(const {name,count} of rows) {
+      const key=researchGameKey(name);
+      const included=research.gameIncluded.has(key),excluded=research.gameExcluded.has(key);
+      const b=document.createElement('button');b.type='button';
+      b.className='npf-r-collab-quick'+(included?' active':excluded?' excluded':'');
+      b.textContent=`${excluded?'− ':included?'✓ ':''}${name}${count?' ('+count+')':''}`;
+      b.title=`${name}：タップで絞り込み→除外→解除。候補は表示中の動画から取得。`;
+      b.addEventListener('click',()=>cycleResearchGame(name));container.append(b);
+    }
+    const note=$('#npf-r-game-hint');
+    if(note) note.textContent=games.size
+      ? `表示中の動画からゲーム${games.size}種類を検出。候補は最大12件、絞り込みはOR・除外は優先。`:
+        'ゲーム名の取得待ちです。動画を取得すると候補が表示されます。';
+  }
+
   // Preserve each YouTube card's original inline display when a filter is cleared.
   const researchCardOriginalDisplay = new WeakMap();
 
@@ -6398,6 +6451,9 @@
     for (const e of currentResearchEntries()) {
       const hay = normalizeResearchText(`${e.title} ${e.channel} ${e.game} ${(e.categories || []).join(' ')} ${(e.collaborators || []).join(' ')} ${(e.wikiInfo?.notes || []).join(' ')}`);
       const tagOk = researchCategoryPassesFilters(e.categories);
+      const game=researchGameKey(e.game);
+      const gameOk=![...research.gameExcluded.keys()].some(key=>game.includes(key))
+        && (!research.gameIncluded.size || [...research.gameIncluded.keys()].some(key=>game.includes(key)));
       const includeOk = !includes.length || includes.every(w => hay.includes(w));
       const excludeOk = !excludes.length || !excludes.some(w => hay.includes(w));
       const people = researchCollaboratorKeys(e);
@@ -6410,7 +6466,7 @@
         [...research.collaboratorIncluded.keys()].some(key => people.has(key)) ||
         (!!collaboratorKey && research.collaboratorIncluded.has(collaboratorKey) && historyMatchIds.has(e.id)) ||
         (groupIncluded && [...research.collaboratorGroupIncluded].some(group => groups.has(group)));
-      const show = tagOk && includeOk && excludeOk && !personExcluded && !groupExcluded && personIncluded;
+      const show = tagOk && gameOk && includeOk && excludeOk && !personExcluded && !groupExcluded && personIncluded;
       // Some mobile Macaque/YouTube pages do not apply GM.addStyle rules.
 // Preserve YouTube's original inline display instead of blindly resetting it.
 if (!show) {
@@ -6430,6 +6486,7 @@ if (!show) {
 e.el.classList.toggle('npf-r-hidden', !show);
     }
     updateResearchCollaboratorFilterUi();
+    updateResearchGameSuggestions();
     renderResearchCollaboratorHistory();
     updateResearchStatus();
   }
@@ -6945,6 +7002,25 @@ e.el.classList.toggle('npf-r-hidden', !show);
     }
     body.appendChild(tags);
 
+    // Local game filter: Holodex/Wiki metadata already acquired for these cards.
+    const gameLabel=document.createElement('div');gameLabel.className='npf-r-label';
+    gameLabel.textContent='ゲームタイトルで絞り込み（複数選択はOR）';body.append(gameLabel);
+    const gameHint=document.createElement('div');gameHint.id='npf-r-game-hint';
+    gameHint.className='npf-r-filter-hint';body.append(gameHint);
+    const gameRow=document.createElement('div');gameRow.className='npf-r-collab-row';
+    const gameInput=document.createElement('input');gameInput.id='npf-r-game-input';
+    gameInput.className='npf-r-input npf-r-collab-input';gameInput.type='text';
+    gameInput.placeholder='ゲーム名（例：VALORANT）';gameInput.autocomplete='off';
+    const addGame=()=>{const name=gameInput.value.trim();if(name)cycleResearchGame(name);gameInput.value='';};
+    gameInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addGame();}});
+    const gameApply=document.createElement('button');gameApply.type='button';
+    gameApply.className='npf-r-btn npf-r-collab-apply';gameApply.textContent='追加';
+    gameApply.addEventListener('click',addGame);gameRow.append(gameInput,gameApply);
+    body.append(gameRow);
+    const gameSuggestions=document.createElement('div');gameSuggestions.id='npf-r-game-suggestions';
+    gameSuggestions.className='npf-r-collab-suggestions';body.append(gameSuggestions);
+    updateResearchGameSuggestions();
+
     const include = document.createElement('input');
     include.id = 'npf-r-include'; include.className = 'npf-r-input'; include.type = 'text'; include.placeholder = '含むキーワード（例：VALO）';
     include.addEventListener('input', () => { research.includeText = include.value; applyResearchFilters(); });
@@ -6959,11 +7035,11 @@ e.el.classList.toggle('npf-r-hidden', !show);
     csv.addEventListener('click', () => void copyResearchCsv());
     const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'npf-r-btn'; reset.textContent = 'リセット';
     reset.addEventListener('click', () => {
-      research.activeTags.clear(); research.excludedTags.clear(); research.includeText = ''; research.excludeText = ''; research.collaboratorFilter = '';
+      research.activeTags.clear(); research.excludedTags.clear(); research.gameIncluded.clear(); research.gameExcluded.clear(); research.includeText = ''; research.excludeText = ''; research.collaboratorFilter = '';
       research.collaboratorIncluded.clear(); research.collaboratorExcluded.clear();
       research.collaboratorGroupIncluded.clear(); research.collaboratorGroupExcluded.clear();
       research.collaboratorChannel = ''; research.collabHistoryToken++; research.collabHistoryRows = []; research.collabHistoryYears = []; research.collabHistoryYearStats = {}; research.collabHistoryHolodexCount = 0; research.collabHistoryWikiCount = 0; research.collabHistoryResolveNote = ''; research.collabHistoryLoading = false;
-      include.value = ''; exclude.value = '';
+      include.value = ''; exclude.value = ''; const gameInputNow=$('#npf-r-game-input'); if(gameInputNow) gameInputNow.value='';
       const collabInputNow = $('#npf-r-collab-input'); if (collabInputNow) collabInputNow.value = '';
       $$('.npf-r-filter', panel).forEach(refreshResearchCategoryButton);
       updateResearchCollaboratorFilterUi();
