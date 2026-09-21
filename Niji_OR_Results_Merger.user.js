@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.3.15
-// @description  コメントOR試験版。既存v0.3.14をGitHub管理へ移行。本体DBは変更しません。
+// @version      0.4.0
+// @description  コメントOR試験版。複数ワードを1回入力すると検索・全ページ収集・OR統合を自動実行。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
 // @include      https://comment2434.com/*
@@ -25,7 +25,7 @@
   const boot=document.createElement('button');
   boot.id=bootId;
   boot.type='button';
-  boot.textContent='🔀 OR起動中 0.3.15';
+  boot.textContent='🔀 OR起動中 0.4.0';
   boot.style.cssText='position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:104px!important;min-height:44px!important;background:#4d35a4!important;color:white!important;border:2px solid #fff!important;border-radius:24px!important;padding:10px!important;pointer-events:auto!important;display:block!important;font:700 13px system-ui!important;';
   (document.body||document.documentElement).append(boot);
   let restoreBootEnabled=true;
@@ -42,13 +42,14 @@
     boot.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.3.15 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.0 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.3.15';
+  const VERSION = '0.4.0';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
+  const MULTI_KEY = 'niji_or_merger_addon_multi_v1';
   const AUTO_LIMIT = 100;
   const AUTO_NEXT_DELAY_MS = 3000;
   const MAX_PER_CAPTURE = 1500;
@@ -62,6 +63,7 @@
   let autoJob = null;
   let autoRunning = false;
   let autoStop = false;
+  let multiJob = null;
   let lastAutoStatus = '';
   let storageMode = (typeof GM !== 'undefined' && typeof GM.getValue === 'function' && typeof GM.setValue === 'function') ? 'modern' : 'local';
   async function storeGet(key, fallback) {
@@ -313,7 +315,7 @@
   `;
   root.append(style);
   const message = el('div', { class:'nor-muted' });
-  const labelInput = el('input', { class:'nor-input' }); labelInput.placeholder = '検索語を入力（例：ふわっち）'; labelInput.maxLength = 100;
+  const labelInput = el('input', { class:'nor-input' }); labelInput.placeholder = 'OR検索語（例：不破 ふわっち ぷわ）'; labelInput.maxLength = 500;
   const filterInput = el('input', { class:'nor-input' }); filterInput.placeholder = '統合結果内を絞り込み（タイトル・検索語）';
 
   function button(label, fn, cls='') {
@@ -392,6 +394,105 @@
     finally { busy=false; }
   }
   function saveAutoJob() {return storeSet(AUTO_KEY, autoJob);}
+  function saveMultiJob() {return storeSet(MULTI_KEY, multiJob);}
+  function parseOrWords(raw='') {
+    const out=[]; const seen=new Set();
+    for (const part of String(raw||'').split(/[\s,、，;；|｜]+/)) {
+      const w=clip(part,100);
+      if (!w || seen.has(w)) continue;
+      seen.add(w); out.push(w);
+    }
+    return out.slice(0,20);
+  }
+  function siteKeywordInput() {
+    const candidates=[...document.querySelectorAll('input[type="text"],input:not([type]),input[type="search"]')].filter(x=>!withinOwnUi(x));
+    const score=(input)=>{
+      const meta=`${input.name||''} ${input.id||''} ${input.placeholder||''} ${input.getAttribute('aria-label')||''}`.toLowerCase();
+      let pts=/keyword|key_word|search_word|comment|word/.test(meta)?20:0;
+      try {
+        if (input.id) {
+          const lab=document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+          if (/キーワード/.test(lab?.textContent||'')) pts+=50;
+        }
+      } catch {}
+      const wrap=input.closest('label,.form-group,.row,div');
+      if (/キーワード/.test(wrap?.textContent||'')) pts+=30;
+      return pts;
+    };
+    return candidates.map(x=>({x,pts:score(x)})).sort((a,b)=>b.pts-a.pts)[0]?.x || null;
+  }
+  async function submitSiteKeyword(word) {
+    const input=siteKeywordInput();
+    if (!input) {
+      if (multiJob) multiJob.stage='need-search-page';
+      await saveMultiJob();
+      location.href='https://comment2434.com/comment/';
+      return;
+    }
+    input.value=word;
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+    input.dispatchEvent(new Event('change',{bubbles:true}));
+    const form=input.form || input.closest('form');
+    if (!form) throw new Error('comment2434の検索フォームを見つけられません');
+    multiJob.stage='submitted';
+    multiJob.currentWord=word;
+    multiJob.submittedAt=Date.now();
+    await saveMultiJob();
+    const submit=[...form.querySelectorAll('button,input[type="submit"]')].find(b=>!b.disabled && /検索/.test(b.textContent||b.value||''));
+    if (form.requestSubmit) form.requestSubmit(submit || undefined);
+    else if (submit) submit.click();
+    else form.submit();
+  }
+  async function finishMultiWord(reason='') {
+    if (!multiJob?.active) return stopAuto(reason);
+    const doneWord=multiJob.words[multiJob.index] || multiJob.currentWord || '';
+    multiJob.completed=[...new Set([...(multiJob.completed||[]),doneWord].filter(Boolean))];
+    multiJob.index+=1;
+    autoJob=null;
+    await saveAutoJob();
+    if (multiJob.index>=multiJob.words.length) {
+      const words=[...multiJob.words];
+      multiJob=null;
+      await saveMultiJob();
+      lastAutoStatus=`✅ OR検索完了：${words.join(' / ')}`;
+      render(); message.textContent=lastAutoStatus;
+      return;
+    }
+    const nextWord=multiJob.words[multiJob.index];
+    multiJob.stage='next-word';
+    await saveMultiJob();
+    lastAutoStatus=`「${doneWord}」完了。次は「${nextWord}」を検索します…`;
+    render(); message.textContent=lastAutoStatus;
+    await wait(700);
+    await submitSiteKeyword(nextWord);
+  }
+  async function startMultiOr() {
+    if (busy || autoRunning || autoJob || multiJob?.active) return;
+    const words=parseOrWords(labelInput.value);
+    if (!words.length) {message.textContent='OR検索する語を入力してください。';labelInput.focus();return;}
+    multiJob={active:true,words,index:0,completed:[],stage:'start',startedAt:Date.now(),currentWord:words[0]};
+    await saveMultiJob();
+    lastAutoStatus=`OR検索開始：${words.join(' / ')}`;
+    render(); message.textContent=lastAutoStatus;
+    await submitSiteKeyword(words[0]);
+  }
+  async function cancelMultiOr() {
+    autoStop=true; autoJob=null; multiJob=null;
+    await Promise.all([saveAutoJob(),saveMultiJob()]);
+    lastAutoStatus='OR検索を停止しました。取得済みの結果は残っています。';
+    render(); message.textContent=lastAutoStatus;
+  }
+  async function resumeMultiOr() {
+    if (!multiJob?.active || autoRunning || autoJob?.active) return;
+    const word=multiJob.words?.[multiJob.index];
+    if (!word) return finishMultiWord();
+    const input=siteKeywordInput();
+    const currentValue=clip(input?.value||'',100);
+    if (!input || currentValue!==word) return submitSiteKeyword(word);
+    autoJob={active:true,label:word,pages:0,videos:0,previousFingerprint:'',lastClickAt:0,startedAt:Date.now()};
+    await saveAutoJob();
+    void autoCollect();
+  }
   async function stopAuto(reason) {
     autoStop = true;
     autoJob = null;
@@ -415,7 +516,10 @@
         await wait(450);
       }
       if (autoStop || !autoJob) return;
-      if (!current) return await stopAuto('ページが切り替わらない／検索結果を読めないため停止しました。取得済みデータは残っています。');
+      if (!current) {
+        if (multiJob?.active) return await finishMultiWord(`「${autoJob.label}」は検索結果0件または結果を読めませんでした。`);
+        return await stopAuto('ページが切り替わらない／検索結果を読めないため停止しました。取得済みデータは残っています。');
+      }
       const label = autoJob.label;
       const saved = await addCurrentPage(label,true);
       if (saved.kind==='empty') return await stopAuto('このページから動画IDを読めなかったため停止しました。診断を共有してください。');
@@ -426,7 +530,11 @@
       }
       if (autoJob.pages >= AUTO_LIMIT) return await stopAuto(`安全上限${AUTO_LIMIT}ページで停止しました。続きはもう一度開始できます。`);
       const next = nextPageControl();
-      if (!next) return await stopAuto(`最後のページまで収集しました：${label}／${countAutoPages(label)}ページ分。`);
+      if (!next) {
+        const msg=`最後のページまで収集しました：${label}／${countAutoPages(label)}ページ分。`;
+        if (multiJob?.active) return await finishMultiWord(msg);
+        return await stopAuto(msg);
+      }
       autoJob.previousFingerprint = current;
       autoJob.lastClickAt = Date.now();
       await saveAutoJob();
@@ -522,10 +630,13 @@
   function render() {
     const oldInput=labelInput.value, oldFilter=filterInput.value;
     body.replaceChildren();
-    body.append(el('div',{class:'nor-muted',text:'【コメントORの試験版】まず動画のコメント画面で「不破」を検索→検索語を不破にして全ページ保存。次に同じ動画で「ぷわ」を検索→検索語をぷわにして全ページ保存。下の同じ動画のコメントを開いて確認してください。'}));
+    body.append(el('div',{class:'nor-muted',text:'複数ワードをスペース・改行・カンマ・「、」で区切って入力し、「OR検索開始」を1回押すだけで、各ワードの検索→全ページ収集→統合まで自動で進みます。'}));
     body.append(el('div',{class:'nor-row'},labelInput));
-    body.append(el('div',{class:'nor-row'},button('＋ このページを保存',capture,'primary'),button('📚 全ページを順に保存',startAuto,'primary'),button('📄 診断をコピー',copyDiag)));
-    if(autoJob?.active) body.append(el('div',{class:'nor-note',text:`🔄 連続収集中：${autoJob.label} ／ ${autoJob.pages}ページ（延べ${autoJob.videos}本）。ページを移動しても継続します。`}),el('div',{class:'nor-row'},button('■ 収集を停止',cancelAuto)));
+    body.append(el('div',{class:'nor-row'},button('🔀 OR検索開始',startMultiOr,'primary'),button('📄 診断をコピー',copyDiag)));
+    if(multiJob?.active) {
+      const now=multiJob.words?.[multiJob.index]||multiJob.currentWord||'';
+      body.append(el('div',{class:'nor-note',text:`🔄 OR自動収集中：${multiJob.index+1}/${multiJob.words.length}「${now}」 ／ ${autoJob?.pages||0}ページ`}),el('div',{class:'nor-row'},button('■ OR検索を停止',cancelMultiOr)));
+    } else if(autoJob?.active) body.append(el('div',{class:'nor-note',text:`🔄 連続収集中：${autoJob.label} ／ ${autoJob.pages}ページ（延べ${autoJob.videos}本）。`}),el('div',{class:'nor-row'},button('■ 収集を停止',cancelAuto)));
     else if(lastAutoStatus) body.append(el('div',{class:'nor-muted',text:lastAutoStatus}));
     const videos=mergedVideos();
     const countComments=videos.reduce((n,v)=>n+v.comments.size,0);
@@ -559,7 +670,7 @@
       const nav=body.lastElementChild;nav.firstElementChild.disabled=resultPage===0;nav.lastElementChild.disabled=resultPage>=pages-1;
     }
     labelInput.value=oldInput;
-    body.append(el('div',{class:'nor-muted',text:'「全ページを順に保存」はページ送りを押すので、サイトへ通常のページ閲覧分のアクセスが発生します。最大100ページ・約3秒間隔。空ページや切替失敗なら停止。429ページでスクリプトが動かない場合は再開せず手動停止してください。画面に読み込まれたコメント本文だけを保存します。別の検索語はサイトで再検索してください。既存のNiji Research Helper DBは変更しません。'}));
+    body.append(el('div',{class:'nor-muted',text:'OR自動検索はcomment2434の通常の検索フォームと「次」ボタンを順に操作します。1語あたり最大100ページ・約3秒間隔。取得済みの統合データとNiji Research Helper本体DBは変更・削除しません。'}));
   }
   filterInput.addEventListener('input',()=>{
     const pos = filterInput.selectionStart;
@@ -589,6 +700,11 @@
     else if(pending?.active) {lastAutoStatus='前回の連続収集は期限切れのため自動再開しません。';await storeSet(AUTO_KEY,null);}
   } catch(e){console.warn('[Niji OR Merger] resume check',e);}
   try {
+    const pendingMulti=await storeGet(MULTI_KEY,null);
+    if(pendingMulti?.active && Array.isArray(pendingMulti.words) && pendingMulti.words.length && Date.now()-Number(pendingMulti.startedAt||0)<30*60*1000) multiJob=pendingMulti;
+    else if(pendingMulti?.active) {await storeSet(MULTI_KEY,null);}
+  } catch(e){console.warn('[Niji OR Merger] multi resume check',e);}
+  try {
     render();
   } catch(err) {
     console.error('[Niji OR Merger] 初期表示エラー', err);
@@ -598,7 +714,9 @@
     panel.hidden = false;
     trigger.style.setProperty('display','none','important');
   }
-  if(autoJob?.active) void autoCollect();
+  labelInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();void startMultiOr();}});
+  if(multiJob?.active) void resumeMultiOr();
+  else if(autoJob?.active) void autoCollect();
   hostRecoveryTimer=setInterval(() => {
     if (!host.isConnected && document.body) document.body.append(host);
   }, 2000);
