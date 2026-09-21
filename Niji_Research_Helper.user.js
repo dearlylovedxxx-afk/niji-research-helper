@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.33
+// @version      1.0.34
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.33';
+  const VERSION = '1.0.34';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -1282,6 +1282,43 @@
         overflow:visible!important;
         text-overflow:clip!important;
         white-space:normal!important;
+        overflow-wrap:anywhere!important;
+      }
+    }
+    /* The parent tile is a column, not a shared title/badge row. */
+    @media (min-width:701px) {
+      ytd-rich-item-renderer.npf-r-rich-item {
+        display:flex!important;
+        flex-direction:column!important;
+        align-items:stretch!important;
+        min-width:0!important;
+      }
+      ytd-rich-item-renderer.npf-r-rich-item > :is(ytd-rich-grid-media, yt-lockup-view-model) {
+        width:100%!important;
+        min-width:0!important;
+        max-width:100%!important;
+        flex:0 0 auto!important;
+      }
+      ytd-rich-item-renderer.npf-r-rich-item > .npf-research-meta {
+        display:flex!important;
+        flex-wrap:wrap!important;
+        align-self:stretch!important;
+        flex:0 0 auto!important;
+        width:100%!important;
+        min-width:0!important;
+        max-width:100%!important;
+        box-sizing:border-box!important;
+        clear:both!important;
+        margin:8px 0 0!important;
+        padding:8px 0 0!important;
+      }
+      ytd-rich-item-renderer.npf-r-rich-item :is(h3, #video-title, #video-title-link, .yt-lockup-metadata-view-model__title) {
+        -webkit-line-clamp:unset!important;
+        line-clamp:unset!important;
+        max-height:none!important;
+        white-space:normal!important;
+        overflow:visible!important;
+        text-overflow:clip!important;
         overflow-wrap:anywhere!important;
       }
     }
@@ -4752,12 +4789,16 @@
   }
 
   function researchMount(card, titleEl) {
-    // Desktop tiles: mount badges on the OUTER video media card, after the
-    // title/details block. Appending inside #meta/#details makes YouTube's
-    // horizontal layout put the full title and badges in competing columns.
+    // Rich-item is the whole tile: append badges after its native video block.
     if (!isMobileYoutubeUi() && window.matchMedia?.('(min-width:701px)').matches) {
-      const grid = card.matches?.('ytd-rich-grid-media, ytd-grid-video-renderer')
-        ? card : card.querySelector('ytd-rich-grid-media, ytd-grid-video-renderer');
+      const item = card.matches?.('ytd-rich-item-renderer')
+        ? card : card.closest?.('ytd-rich-item-renderer');
+      if (item && (!titleEl || item.contains(titleEl))) {
+        item.classList.add('npf-r-rich-item');
+        return item;
+      }
+      const grid = card.matches?.('ytd-grid-video-renderer')
+        ? card : card.querySelector('ytd-grid-video-renderer');
       if (grid && (!titleEl || grid.contains(titleEl))) return grid;
     }
     const preferred = card.querySelector('#meta, #metadata, #video-meta, .details, .media-item-info, .yt-lockup-metadata-view-model');
