@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.35
+// @version      1.0.36
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -51,7 +51,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.35';
+  const VERSION = '1.0.36';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -4183,7 +4183,7 @@
     return out;
   }
 
-  async function wikiParseUrlWithSource(pageUrl, renderedHtml = '') {
+  async function wikiParseUrlWithSource(pageUrl, renderedHtml = '', requireSource = false) {
     let entries = wikiParsePage(renderedHtml, pageUrl);
 
     const embeddedSource = wikiExtractSourceText(renderedHtml);
@@ -4193,7 +4193,7 @@
 
     // 年別HTMLから動画IDを十分に抽出できた場合は別のWikiソースURLを叩かない。
     // 2025年はHTML 256件に対しソース表示15件だった。照合そのものに追加通信は不要。
-    if (Object.keys(entries).length >= 20 && Object.values(entries).some(info => (info.collaborators || []).length)) return entries;
+    if (!requireSource && Object.keys(entries).length >= 20 && Object.values(entries).some(info => (info.collaborators || []).length)) return entries;
     const sourceCmds = wikiSourceCommandUrls(pageUrl);
     for (const sourceCmd of sourceCmds) {
       try {
@@ -4407,7 +4407,7 @@
     for (const url of urls) {
       try {
         const html = await wikiRequest(url);
-        const entries = await wikiParseUrlWithSource(url, html);
+        const entries = await wikiParseUrlWithSource(url, html, Number(year) === new Date().getFullYear());
         const count = Object.keys(entries).length;
         if (!count) { errors.push(`${url}: HTML解析0動画ID`); continue; }
         yearPageSuccess++;
@@ -4444,7 +4444,7 @@
       const seen = new Set([mainUrl, ...urls]);
       for (const url of discovered.filter(x => !seen.has(x)).slice(0, 2)) {
         try {
-          const entries = await wikiParseUrlWithSource(url, await wikiRequest(url));
+          const entries = await wikiParseUrlWithSource(url, await wikiRequest(url), Number(year) === new Date().getFullYear());
           const count = Object.keys(entries).length;
           if (!count) continue;
           yearPageSuccess++;
