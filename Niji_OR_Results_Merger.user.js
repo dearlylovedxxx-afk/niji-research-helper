@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.4.9
+// @version      0.4.10
 // @description  コメントOR試験版。動画タイトル・配信日時の補完、明示的な並び順、正しい動画IDのタイムスタンプと直接開けるコメント一覧。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
@@ -10,6 +10,12 @@
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_OR_Results_Merger.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_OR_Results_Merger.user.js
 // @grant        GM_xmlhttpRequest
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.xmlHttpRequest
+// @grant        GM.xmlhttpRequest
+// @connect      niji-research-backup.dearlylovedxxx.workers.dev
+// @require      https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @connect      www.youtube.com
 // @run-at       document-end
 // @noframes
@@ -26,7 +32,7 @@
   const boot=document.createElement('button');
   boot.id=bootId;
   boot.type='button';
-  boot.textContent='🔀 OR起動中 0.4.9';
+  boot.textContent='🔀 OR起動中 0.4.10';
   boot.style.cssText='position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:104px!important;min-height:44px!important;background:#4d35a4!important;color:white!important;border:2px solid #fff!important;border-radius:24px!important;padding:10px!important;pointer-events:auto!important;display:block!important;font:700 13px system-ui!important;';
   (document.body||document.documentElement).append(boot);
   let restoreBootEnabled=true;
@@ -43,12 +49,12 @@
     boot.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.4.9 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.10 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.4.9';
+  const VERSION = '0.4.10';
   const VIDEO_META_KEY = 'niji_or_merger_addon_video_metadata_v046';
   const RESULT_SORT_KEY = 'niji_or_merger_addon_result_sort_v046';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
@@ -105,64 +111,6 @@
     localStorage.setItem('nor_addon_' + key, JSON.stringify(value));
   }
 
-
-  // Cross-script bridge for the separately installed Niji Cloud Backup userscript.
-  // Transfer data in JSON strings in-page, without changing the existing store.
-  const CLOUD_OR_KEYS = [STORAGE_KEY, VIDEO_META_KEY, RESULT_SORT_KEY, AUTO_KEY,
-    MULTI_KEY, RUN_KEY, LAST_WORDS_KEY, MIN_COMMENTS_KEY];
-  document.addEventListener('ncb-or-request-v1', async event => {
-    let req;
-    try { req=JSON.parse(event.detail); } catch { return; }
-    if (!req || typeof req.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(req.id)) return;
-    const respond=(ok,data,error='')=>document.dispatchEvent(new CustomEvent('ncb-or-response-v1', {
-      detail:JSON.stringify({id:req.id,ok,data,error})
-    }));
-    try {
-      if (req.action === 'read') {
-        const values={};
-        for (const key of CLOUD_OR_KEYS) values[key]=await storeGet(key,null);
-        if (!Array.isArray(values[STORAGE_KEY])) throw Error('保存済みORリストを読み込めません');
-        respond(true,values);return;
-      }
-      if (req.action !== 'merge' || !req.payload || typeof req.payload !== 'object')
-        throw Error('不正なバックアップ操作です');
-      const incoming=req.payload;
-      if (!Array.isArray(incoming[STORAGE_KEY])) throw Error('ORバックアップ形式が違います');
-      const current=await storeGet(STORAGE_KEY,[]);
-      if (!Array.isArray(current)) throw Error('現在のOR保存形式が違います');
-      const seen=new Set(), merged=[];
-      for (const b of [...current,...incoming[STORAGE_KEY]]) {
-        if (!b || typeof b.label !== 'string' || !Array.isArray(b.rows)) continue;
-        const id=String(b.signature||b.id||'');
-        if (!id || seen.has(id)) continue;
-        seen.add(id);merged.push(b);
-      }
-      if (merged.length > MAX_BATCHES) throw Error(`OR保存件数の上限${MAX_BATCHES}件を超えるため、既存データを変更せず中止しました`);
-      const savedMeta=await storeGet(VIDEO_META_KEY,{});
-      const remoteMeta=incoming[VIDEO_META_KEY];
-      const meta={...(remoteMeta && !Array.isArray(remoteMeta) ? remoteMeta : {}),
-        ...(savedMeta && !Array.isArray(savedMeta) ? savedMeta : {})};
-      await storeSet(STORAGE_KEY,merged);
-      await storeSet(VIDEO_META_KEY,meta);
-      for (const key of [AUTO_KEY,MULTI_KEY,RUN_KEY]) {
-        const local=await storeGet(key,null),remote=incoming[key];
-        if (local) continue;
-        if (remote && typeof remote==='object') await storeSet(key,{...remote,active:false});
-      }
-      const localWords=await storeGet(LAST_WORDS_KEY,[]);
-      const remoteWords=incoming[LAST_WORDS_KEY];
-      if (Array.isArray(remoteWords)) await storeSet(LAST_WORDS_KEY,
-        [...new Set([...(Array.isArray(localWords)?localWords:[]),...remoteWords].filter(x=>typeof x==='string'))]);
-      const sort=await storeGet(RESULT_SORT_KEY,null);
-      if (!sort && ['comments','newest','oldest','title'].includes(incoming[RESULT_SORT_KEY]))
-        await storeSet(RESULT_SORT_KEY,incoming[RESULT_SORT_KEY]);
-      const min=await storeGet(MIN_COMMENTS_KEY,null);
-      if (min == null && Number.isSafeInteger(incoming[MIN_COMMENTS_KEY]))
-        await storeSet(MIN_COMMENTS_KEY,incoming[MIN_COMMENTS_KEY]);
-      batches=merged;videoMetadata=meta;
-      respond(true,`ORリスト${merged.length}件を統合しました。comment2434を再読み込みしてください。`);
-    } catch(e) { respond(false,null,String(e?.message||e)); }
-  });
 
   const el = (tag, attrs = {}, ...children) => {
     const node = document.createElement(tag);

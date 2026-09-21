@@ -1,10 +1,8 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.1.0
+// @version      0.1.1
 // @description  OR検索・X保存検索・Pixiv調査DBをアプリ別にpCloudへ保存・検証・安全に統合復元。Xの一時的ないいね順投稿は含めません。
-// @match        https://comment2434.com/*
-// @match        https://www.comment2434.com/*
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @match        https://www.pixiv.net/*
@@ -55,19 +53,54 @@ function xhr(method,path,body=null,token=settings.token){
   catch(e){reject(e);}
  });
 }
-function requestOr(action,payload){
- return new Promise((resolve,reject)=>{
-  const id=crypto.randomUUID();let timer;
-  const received=event=>{
-   let res;try{res=JSON.parse(event.detail);}catch{return;}
-   if(res.id!==id)return;
-   document.removeEventListener('ncb-or-response-v1',received);clearTimeout(timer);
-   res.ok?resolve(res.data):reject(Error(res.error||'ORバックアップの応答エラー'));
-  };
-  document.addEventListener('ncb-or-response-v1',received);
-  timer=setTimeout(()=>{document.removeEventListener('ncb-or-response-v1',received);reject(Error('OR検索v0.4.9以上をインストールし、comment2434を再読み込みしてください'))},20000);
-  document.dispatchEvent(new CustomEvent('ncb-or-request-v1',{detail:JSON.stringify({id,action,payload})}));
- });
+// @required inside OR's isolated userscript context; never use page-visible events.
+const OR_KEYS=['niji_or_merger_addon_batches_v1','niji_or_merger_addon_video_metadata_v046',
+ 'niji_or_merger_addon_result_sort_v046','niji_or_merger_addon_auto_v3',
+ 'niji_or_merger_addon_multi_v1','niji_or_merger_addon_run_v041',
+ 'niji_or_merger_addon_last_words_v041','niji_or_merger_addon_minimum_v1'];
+async function orGet(key,fallback){
+ try{if(typeof GM?.getValue==='function'){
+   const value=await GM.getValue(key,undefined);if(value!==undefined)return value;
+ }}catch(e){console.warn('[NCB OR GM read]',e);}
+ try{const raw=localStorage.getItem('nor_addon_'+key);return raw===null?fallback:JSON.parse(raw);}
+ catch{return fallback;}
+}
+async function orSet(key,value){
+ if(typeof GM?.setValue==='function'){await GM.setValue(key,value);return;}
+ localStorage.setItem('nor_addon_'+key,JSON.stringify(value));
+}
+async function requestOr(action,payload){
+ if(action==='read'){
+  const values={};for(const k of OR_KEYS)values[k]=await orGet(k,null);
+  if(!Array.isArray(values[OR_KEYS[0]]))throw Error('OR検索の保存済みリストを読み込めません');
+  return values;
+ }
+ if(action!=='merge'||!payload||typeof payload!=='object'||!Array.isArray(payload[OR_KEYS[0]]))throw Error('ORのバックアップ形式が違います');
+ const current=await orGet(OR_KEYS[0],[]);
+ if(!Array.isArray(current))throw Error('現在のOR保存形式が違います');
+ const seen=new Set(),merged=[];
+ for(const row of [...current,...payload[OR_KEYS[0]]]){
+  if(!row||typeof row.label!=='string'||!Array.isArray(row.rows))continue;
+  const key=String(row.signature||row.id||'');
+  if(!key||seen.has(key))continue;
+  seen.add(key);merged.push(row);
+ }
+ if(merged.length>250)throw Error('OR保存上限250件を超えるため、既存データを変更せず中止しました');
+ const oldMeta=await orGet(OR_KEYS[1],{}),newMeta=payload[OR_KEYS[1]];
+ const mergedMeta={...(newMeta&&!Array.isArray(newMeta)?newMeta:{}),...(oldMeta&&!Array.isArray(oldMeta)?oldMeta:{})};
+ await orSet(OR_KEYS[0],merged);
+ await orSet(OR_KEYS[1],mergedMeta);
+ for(const key of OR_KEYS.slice(3,6)){
+  const old=await orGet(key,null),incoming=payload[key];
+  if(!old&&incoming&&typeof incoming==='object')await orSet(key,{...incoming,active:false});
+ }
+ const oldWords=await orGet(OR_KEYS[6],[]),newWords=payload[OR_KEYS[6]];
+ if(Array.isArray(newWords))await orSet(OR_KEYS[6],[...new Set([...(Array.isArray(oldWords)?oldWords:[]),...newWords].filter(x=>typeof x==='string'))]);
+ const sort=await orGet(OR_KEYS[2],null);
+ if(!sort&&['comments','newest','oldest','title'].includes(payload[OR_KEYS[2]]))await orSet(OR_KEYS[2],payload[OR_KEYS[2]]);
+ const minimum=await orGet(OR_KEYS[7],null);
+ if(minimum===null&&Number.isSafeInteger(payload[OR_KEYS[7]]))await orSet(OR_KEYS[7],payload[OR_KEYS[7]]);
+ return `ORリスト${merged.length}件を統合しました。comment2434を再読み込みしてください。`;
 }
 async function existingDb(name,create=false){
  return new Promise((resolve,reject)=>{
