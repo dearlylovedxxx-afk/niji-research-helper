@@ -225,15 +225,30 @@ async function performBackup(force=false){
   const digest=await sha(bytes);
   const current=await getBackups();
   const existing=current.find(x=>x.device===device()&&x.origin===location.origin&&x.sha256===digest);
-  if(existing&&!force){settings.lastSha=digest;settings.lastSavedAt=Date.parse(existing.createdAt)||Date.now();await saveSettings();stateText('☁️ 保存済みの同一データを確認しました（変更なし）');return;}
+  if(existing){
+   try{
+    stateText('同じ内容のバックアップを読み取り検証中…');
+    await fetchBackup(existing);
+    settings.lastSha=digest;settings.lastSavedAt=Date.parse(existing.createdAt)||Date.now();await saveSettings();
+    stateText('✅ pCloudの同一データを読み取り検証しました（変更なし）');return;
+   }catch(e){stateText('既存ファイルの検証に失敗したため、新しいバックアップを作成します：'+String(e.message||e));}
+  }
   const id=crypto.randomUUID();
   for(let i=0;i<count;i++){
    const part=bytes.subarray(i*CHUNK,Math.min(bytes.length,(i+1)*CHUNK));
    stateText(`pCloudへ送信中：${i+1}/${count}（${(bytes.length/1048576).toFixed(1)}MB）`);
-   await xhr('POST','/parts',{id,index:i,count,device:device(),origin:location.origin,totalSha:digest,partSha:await sha(part),base64:b64(part)});
+   const partBody={id,index:i,count,device:device(),origin:location.origin,totalSha:digest,partSha:await sha(part),base64:b64(part)};
+   for(let attempt=0;attempt<3;attempt++){
+    try{await xhr('POST','/parts',partBody);break;}
+    catch(e){if(attempt===2||/HTTP (?:400|401|403|413|415|409)/.test(String(e.message||e)))throw e;}
+   }
   }
   stateText('アップロード完了。バックアップの登録を確認中…');
-  await xhr('POST','/commit',{id,count,device:device(),origin:location.origin,totalSha:digest});
+  try{await xhr('POST','/commit',{id,count,device:device(),origin:location.origin,totalSha:digest});}
+  catch(e){
+   const verify=await getBackups().catch(()=>[]);
+   if(!verify.some(b=>b.id===id))throw e;
+  }
   const listed=await getBackups(),item=listed.find(b=>b.id===id);
   if(!item)throw Error('Workerでバックアップが登録されたことを確認できませんでした');
   const downloaded=await fetchBackup(item);
