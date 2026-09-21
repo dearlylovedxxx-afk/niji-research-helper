@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.4.6
+// @version      0.4.7
 // @description  コメントOR試験版。動画タイトル・配信日時の補完、明示的な並び順、正しい動画IDのタイムスタンプと直接開けるコメント一覧。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
@@ -26,7 +26,7 @@
   const boot=document.createElement('button');
   boot.id=bootId;
   boot.type='button';
-  boot.textContent='🔀 OR起動中 0.4.6';
+  boot.textContent='🔀 OR起動中 0.4.7';
   boot.style.cssText='position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:104px!important;min-height:44px!important;background:#4d35a4!important;color:white!important;border:2px solid #fff!important;border-radius:24px!important;padding:10px!important;pointer-events:auto!important;display:block!important;font:700 13px system-ui!important;';
   (document.body||document.documentElement).append(boot);
   let restoreBootEnabled=true;
@@ -43,12 +43,12 @@
     boot.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.4.6 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.7 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.4.6';
+  const VERSION = '0.4.7';
   const VIDEO_META_KEY = 'niji_or_merger_addon_video_metadata_v046';
   const RESULT_SORT_KEY = 'niji_or_merger_addon_result_sort_v046';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
@@ -1056,7 +1056,22 @@
     wrap.append(summary,search,sortRow,results);viewer.append(wrap);
     let observer=null;
     if(typeof IntersectionObserver==='function') observer=new IntersectionObserver(entries=>{
-      for(const e of entries) if(e.isIntersecting){observer.unobserve(e.target);const v=e.target.__norVideo; if(v) queueVideoMetadata(v,()=>{if(viewer.contains(e.target))updateCard(e.target,v);});}
+      for(const e of entries) if(e.isIntersecting){
+        observer.unobserve(e.target);
+        const v=e.target.__norVideo;
+        if(!v) continue;
+        const missingBefore=!videoMetadata[v.id] && !metadataStopped;
+        queueVideoMetadata(v,()=>{
+          if(!viewer.contains(e.target)) return;
+          updateCard(e.target,v);
+          // A newly fetched date changes the sorting key. Do not only repaint
+          // its label while leaving the card in the old position.
+          if(missingBefore && (resultSort==='newest'||resultSort==='oldest')) {
+            const previousScroll=viewer.scrollTop;
+            redraw();viewer.scrollTop=previousScroll;
+          }
+        });
+      }
     },{root:viewer,rootMargin:'100px'});
     function updateCard(item,v){
       const info=videoInfo(v);
@@ -1080,7 +1095,9 @@
         }
         return b.comments.size-a.comments.size||a.id.localeCompare(b.id);
       });
-      summary.textContent=`コメントのある配信 ${selected.length}件 ／ ${lastRunWords.join('・')||'保存済み検索語'} ／ 並び順：${sortSelect.selectedOptions[0]?.textContent||'コメント数が多い順'}（未取得の日時は日付順で後ろ）`;
+      const dateLoading=(resultSort==='newest'||resultSort==='oldest') && selected.some(v=>
+        !videoMetadata[v.id] && !(videoInfo(v).startedAt||videoInfo(v).publishedAt));
+      summary.textContent=`コメントのある配信 ${selected.length}件 ／ ${lastRunWords.join('・')||'保存済み検索語'} ／ 並び順：${sortSelect.selectedOptions[0]?.textContent||'コメント数が多い順'}（日時未取得は後ろ${dateLoading?'・画面をスクロールして動画情報を追加取得中は暫定順':''}）`;
       if(!selected.length) results.append(el('div',{class:'nor-compact',text:'該当するコメントはまだ保存されていません。検索処理が停止した場合は戻ってエラーを確認してください。'}));
       for(const v of selected) {
         const item=el('div',{class:'nor-video-card'});item.__norVideo=v;
@@ -1113,6 +1130,14 @@
     queueVideoMetadata(video,()=>{if(viewer.contains(meta)){list.firstElementChild.textContent=videoInfo(video).title;meta.textContent=`${displayDate(videoInfo(video))} ／ ${video.comments.size}件 ／ 検索語: ${[...video.labels].join('・')}`;}});
     const original=el('a',{href:originalVideoUrl(video),target:'_blank',rel:'noopener noreferrer',text:'元サイトの動画ページを開く'});
     list.append(original);
+    // Visible identity makes a mismatched stored title or external navigation diagnosable.
+    const identity=el('div',{class:'nor-compact',text:`動画ID：${video.id} ／ YouTube： https://www.youtube.com/watch?v=${video.id}`});
+    const copyIdentity=button('🔗 この動画のURLをコピー',()=>{
+      const url=`https://www.youtube.com/watch?v=${video.id}`;
+      if(navigator.clipboard?.writeText) void navigator.clipboard.writeText(url).catch(()=>prompt('動画URL',url));
+      else prompt('動画URL',url);
+    });
+    identity.append(copyIdentity);list.append(identity);
     const comments=[...video.comments.values()].sort((a,b)=>a.sec-b.sec || a.text.localeCompare(b.text,'ja'));
     if(!comments.length) list.append(el('div',{class:'nor-compact',text:'コメント本文を取得できていません。'}));
     for(const c of comments) {
