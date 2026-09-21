@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.4.11
+// @version      0.4.12
 // @description  コメントOR試験版。動画タイトル・配信日時の補完、明示的な並び順、正しい動画IDのタイムスタンプと直接開けるコメント一覧。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
@@ -31,7 +31,7 @@
   const boot=document.createElement('button');
   boot.id=bootId;
   boot.type='button';
-  boot.textContent='🔀 OR起動中 0.4.11';
+  boot.textContent='🔀 OR起動中 0.4.12';
   boot.style.cssText='position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:104px!important;min-height:44px!important;background:#4d35a4!important;color:white!important;border:2px solid #fff!important;border-radius:24px!important;padding:10px!important;pointer-events:auto!important;display:block!important;font:700 13px system-ui!important;';
   (document.body||document.documentElement).append(boot);
   let restoreBootEnabled=true;
@@ -48,12 +48,12 @@
     boot.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.4.10 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.12 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.4.11';
+  const VERSION = '0.4.12';
   const VIDEO_META_KEY = 'niji_or_merger_addon_video_metadata_v046';
   const RESULT_SORT_KEY = 'niji_or_merger_addon_result_sort_v046';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
@@ -1569,6 +1569,51 @@ disconnect.onclick=async()=>{
  settings.enabled=false;settings.token='';settings.lastSha='';await saveSettings();stateText('自動保存を停止しました。保存済みバックアップは残っています。');update();
 };
 stateText(settings.enabled?`☁️ 自動保存は有効です。最終検証：${settings.lastSavedAt?new Date(settings.lastSavedAt).toLocaleString('ja-JP'):'まだありません'}`:'未接続：専用トークンを入力してください');update();
+// Keep a single launcher per site: expose backup inside each existing tool's panel.
+// Cloud credentials and data stay in this userscript; native buttons only open its panel.
+function integrateNativeBackup() {
+ try {
+  let slot=null, nativeReady=false;
+  if(app.id==='or') {
+   const root=document.getElementById('niji-or-root');
+   slot=root?.querySelector('.nor-body > details');
+   nativeReady=!!slot;
+  } else if(app.id==='x') {
+   const root=document.getElementById('xsf-userscript-root')?.shadowRoot;
+   nativeReady=!!root?.querySelector('#bar #launch');
+   slot=root?.querySelector('#panel .tabs');
+  } else if(app.id==='pixiv') {
+   const root=document.getElementById('pixiv-bookmark-sort-cross-page-v05')?.shadowRoot;
+   const counted=root?.querySelector('.counted');
+   if(counted?.parentNode) {
+    slot=counted.parentNode;
+    nativeReady=true;
+   }
+  }
+  if(slot && !slot.querySelector('[data-ncb-native-backup="'+app.id+'"]')) {
+   const button=document.createElement('button');
+   button.type='button';
+   button.dataset.ncbNativeBackup=app.id;
+   button.textContent='☁️ pCloudバックアップ';
+   if(app.id==='or')button.className='nor-button';
+   if(app.id==='pixiv') {
+    button.style.cssText='display:block!important;width:100%!important;margin:9px 0!important;min-height:44px!important;padding:10px!important;border-radius:9px!important;background:#156a89!important;color:#fff!important;border:0!important;font:700 14px system-ui!important;cursor:pointer!important';
+   } else if(app.id==='x') {
+    button.style.cssText='min-height:43px!important;padding:8px 10px!important;border-radius:9px!important;border:1px solid #9baeca!important;background:#e9f5fc!important;color:#173b54!important;font:700 12px system-ui!important;cursor:pointer!important';
+   }
+   button.addEventListener('click',()=>{panel.hidden=false;update();});
+   if(app.id==='pixiv') {
+    const counted=slot.querySelector('.counted');
+    if(counted)counted.after(button);
+    else slot.append(button);
+   } else slot.append(button);
+  }
+  if(nativeReady) launch.style.setProperty('display','none','important');
+  else launch.style.removeProperty('display');
+ } catch(e) { console.warn('[NCB] native menu attachment failed',e); }
+}
+integrateNativeBackup();
+setInterval(integrateNativeBackup,1200);
 // iOS background tabs may be suspended. Use manual save before migrating phones.
 setInterval(()=>{
  if(!settings.enabled||working||document.hidden||Date.now()<nextScan)return;
