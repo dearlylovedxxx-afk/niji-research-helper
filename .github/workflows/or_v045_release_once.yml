@@ -11,7 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Apply guarded chunk-resume patch
-        run: python .github/scripts/or_v045_resume_chunks_once.py
+        run: |
+          sed -i "s/boot.textContent='🔀 OR起動中 0.4.4';/boot.textContent='🔀 OR起動中 0.4.3';/" .github/scripts/or_v045_resume_chunks_once.py
+          python .github/scripts/or_v045_resume_chunks_once.py
       - name: Syntax and data compatibility
         run: |
           node --check Niji_OR_Results_Merger.user.js
