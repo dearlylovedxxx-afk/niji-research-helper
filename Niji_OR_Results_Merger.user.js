@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.4.1
+// @version      0.4.2
 // @description  コメントOR試験版。各動画のコメント本文・時刻を実際に収集する複数語OR検索。白背景の動画・コメント一覧。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
@@ -25,7 +25,7 @@
   const boot=document.createElement('button');
   boot.id=bootId;
   boot.type='button';
-  boot.textContent='🔀 OR起動中 0.4.1';
+  boot.textContent='🔀 OR起動中 0.4.2';
   boot.style.cssText='position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:104px!important;min-height:44px!important;background:#4d35a4!important;color:white!important;border:2px solid #fff!important;border-radius:24px!important;padding:10px!important;pointer-events:auto!important;display:block!important;font:700 13px system-ui!important;';
   (document.body||document.documentElement).append(boot);
   let restoreBootEnabled=true;
@@ -42,12 +42,12 @@
     boot.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.4.1 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.2 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.4.1';
+  const VERSION = '0.4.2';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
   const MULTI_KEY = 'niji_or_merger_addon_multi_v1';
   const RUN_KEY = 'niji_or_merger_addon_run_v041';
@@ -181,14 +181,24 @@
     }
     return best;
   }
+  function usableVideoTitle(text, id='') {
+    const value=clip(text,240);
+    if (!value || value===id || /^動画 [\w-]{11}$/.test(value) || /^\d+\s*(?:コメント|件|回)$/.test(value)) return '';
+    if (/^(?:動画詳細|コメント|他視点|再生|検索|検索結果|チャンネル|YouTube)$/i.test(value)) return '';
+    if (/^(?:\d{1,3}:)?\d{1,3}:\d{2}$/.test(value)) return '';
+    return value;
+  }
   function titleFromLink(a, card, id) {
-    const picks = [
-      a.getAttribute('title'), a.getAttribute('aria-label'),
-      card.querySelector('h2,h3,h4,[class*="title"],[class*="Title"]')?.textContent,
-      a.querySelector('img[alt]')?.getAttribute('alt'), a.textContent,
+    const headings=[...card.querySelectorAll('h1,h2,h3,h4,[class*="title"],[class*="Title"]')];
+    const others=[...card.querySelectorAll('img[alt],p,a[title]')].slice(0,30);
+    const picks=[
+      a.getAttribute('title'),a.getAttribute('aria-label'),
+      ...headings.map(x=>x.textContent),
+      ...others.map(x=>x.tagName==='IMG'?x.getAttribute('alt'):x.getAttribute('title')||x.textContent),
       card.querySelector('img[alt]')?.getAttribute('alt'),
+      a.textContent,
     ];
-    return picks.map(s => clip(s, 240)).find(s => s && s !== id && !/^(\d{1,3}:)?\d{1,3}:\d{2}$/.test(s) && !/^他視点|^再生$/.test(s)) || `動画 ${id}`;
+    return picks.map(t=>usableVideoTitle(t,id)).find(Boolean) || `動画 ${id}`;
   }
   function extractComments(root, id) {
     const out = [], found = new Set();
@@ -272,7 +282,7 @@
         e = { id: v.id, title: v.title, channel: v.channel || '', url: v.sourceUrl, labels: new Set(), comments: new Map() };
         byId.set(v.id, e);
       }
-      if ((!e.title || e.title.startsWith('動画 ')) && !v.title.startsWith('動画 ')) e.title = v.title;
+      if ((!e.title || e.title.startsWith('動画 ') || /^\d+\s*コメント$/.test(e.title)) && usableVideoTitle(v.title,v.id)) e.title = v.title;
       if (!e.channel && v.channel) e.channel = v.channel;
       e.labels.add(b.label);
       for (const c of (v.comments || [])) {
@@ -704,6 +714,15 @@
     await saveRun();
     await goRun(new URL('/comment/',location.origin).href);
   }
+  function detailedVideoTitle(fallback, id) {
+    const picks=[
+      ...[...document.querySelectorAll('main h1,main h2,main [class*="video-title"],main [class*="videoTitle"]')].slice(0,10).map(n=>n.textContent),
+      document.querySelector('meta[property="og:title"]')?.content,
+      document.title.replace(/\s*[-|｜]\s*にじさんじコメント検索.*$/,'').trim(),
+    ];
+    const title=picks.map(t=>usableVideoTitle(t,id)).find(t=>t && !/^(?:にじさんじコメント検索|コメント検索|キーワード検索|検索結果)/.test(t));
+    return title||fallback;
+  }
   function normalizedDetailUrl(v) {
     // Use the actual video's path, but keep the current origin and browser session.
     const u=new URL(v.sourceUrl||`/comment/video/${v.id}/`,location.href);
@@ -761,7 +780,7 @@
         const comments=extractComments(main,v.id);
         if(!comments.length && !/(?:コメント|検索結果|該当).{0,25}(?:0件|ありません|なし|見つかりません)/.test(main.textContent||'')) throw new Error(`動画 ${v.id} のコメント本文を読み取れません。0件として保存せず停止しました`);
         const map=new Map(comments.map(c=>[`${c.sec}|${c.text}`,c]));
-        runJob.partial.push({id:v.id,title:v.title,sourceUrl:v.sourceUrl,channel:v.channel||'',comments:[...map.values()]});
+        runJob.partial.push({id:v.id,title:detailedVideoTitle(v.title,v.id),sourceUrl:v.sourceUrl,channel:v.channel||'',comments:[...map.values()]});
         runJob.detailIndex++;
         runJob.stage='detail-open';
         await saveRun();
