@@ -1,0 +1,44 @@
+name: Merge OR POV launchers once
+on:
+  push:
+    paths:
+      - .github/workflows/merge_or_pov_buttons_once.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Safely patch both userscripts
+        run: python3 .github/scripts/merge_or_pov_buttons_once.py
+      - name: Validate JavaScript syntax and update boundaries
+        run: |
+          node --check Niji_OR_Results_Merger.user.js
+          node --check Niji_Cloud_Backup.user.js
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+          o=Path('Niji_OR_Results_Merger.user.js').read_text()
+          c=Path('Niji_Cloud_Backup.user.js').read_text()
+          assert o.count("trigger.textContent='🔎 検索';") == 1
+          assert o.count("povEntry.addEventListener('click'") == 1
+          assert o.count("orEntry.addEventListener('click'") == 1
+          assert "html #npf-fab.npf-comment-fab{display:none!important}" in o
+          assert "mergedStyle.remove();" in o
+          assert "document.getElementById('niji-or-pov-combined-style')?.remove()" in o
+          assert o.count("launch.style.setProperty('display','none','important');") >= 2
+          assert c.count("launch.style.setProperty('display','none','important');") >= 2
+          assert "@version      0.4.13" in o and "@version      0.1.5" in c
+          print('CHECK_OK: unified menu, POV fallback, flash prevention, unchanged backup APIs')
+          PY
+      - name: Commit validated update
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_OR_Results_Merger.user.js Niji_Cloud_Backup.user.js
+          git commit -m 'Unify comment search launchers and prevent cloud button flash'
+          git push origin HEAD:main
