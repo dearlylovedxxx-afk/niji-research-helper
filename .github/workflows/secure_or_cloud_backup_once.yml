@@ -1,0 +1,38 @@
+name: Validate secure OR cloud backup
+on:
+  push:
+    paths:
+      - '.github/workflows/secure_or_cloud_backup_once.yml'
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Secure OR backend in its userscript storage namespace
+        run: python3 .github/scripts/secure_or_cloud_backup_once.py
+      - name: Validate JavaScript and backup invariants
+        run: |
+          node --check Niji_Cloud_Backup.user.js
+          node --check Niji_OR_Results_Merger.user.js
+          node --check cloud-backup/multi_app_gateway_extension.js
+          python3 - <<'PY'
+          from pathlib import Path
+          c=Path('Niji_Cloud_Backup.user.js').read_text()
+          o=Path('Niji_OR_Results_Merger.user.js').read_text()
+          assert 'ncb-or-request-v1' not in c+o
+          assert '@match        https://comment2434.com' not in c
+          assert '@require      https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js' in o
+          assert '// @version      0.4.10' in o and '// @version      0.1.1' in c
+          assert 'sortRows' not in c and 'exportedAt:' not in c
+          assert all(x in c for x in ('OR_KEYS','GM.getValue','pixiv-bookmark-sort-cross-page-v02','pixiv-bookmark-sort-extras-v01'))
+          print('Secure storage isolation and syntax checks passed')
+          PY
+      - name: Publish revised OR and companion
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_OR_Results_Merger.user.js Niji_Cloud_Backup.user.js
+          git commit -m 'Use private OR userscript storage for cloud backup v0.4.10'
+          git push
