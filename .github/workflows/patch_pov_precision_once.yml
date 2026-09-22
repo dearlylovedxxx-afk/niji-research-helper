@@ -1,0 +1,26 @@
+name: Patch POV precision once
+on:
+  push:
+    paths:
+      - '.github/workflows/patch_pov_precision_once.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch helper
+        run: python .github/scripts/patch_pov_precision_once.py
+      - name: Check JavaScript syntax
+        run: node --check Niji_Research_Helper.user.js
+      - name: Test POV filtering
+        run: node .github/scripts/test_pov_precision_once.js
+      - name: Check diff and commit
+        run: |
+          git diff --check
+          git add Niji_Research_Helper.user.js
+          git diff --cached --stat
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Filter supplemental POVs by verified livestreams and participant channels v1.0.42'
+          git push origin HEAD:main
