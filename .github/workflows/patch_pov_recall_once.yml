@@ -25,3 +25,4 @@ jobs:
           git diff --cached --quiet && exit 1
           git commit -m 'Resolve participant handles and recover missing POV leads v1.0.43'
           git push origin HEAD:main
+# retrigger after fixing test VM URL context
