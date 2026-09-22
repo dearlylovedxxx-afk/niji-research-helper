@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.46
+// @version      1.0.47
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.46';
+  const VERSION = '1.0.47';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2844,7 +2844,7 @@
     const run=document.createElement('button');run.type='button';run.className='npf-primary';run.textContent='追加候補を探す';
     run.style.cssText='min-height:44px;margin-top:9px;';
     const help=document.createElement('p');help.style.cssText='font-size:11px;line-height:1.5;color:#b9c7dd;';
-    help.textContent='概要欄の参加者名・コーチ／監督名・企画名を自動抽出し、選手の他視点だけでなくコーチの配信・振り返りも探します。時間が重ならない関連配信は同期対象にしません。YouTube APIキーは初回だけ入力し、この端末に保存します（pCloud対象外）。';
+    help.textContent='概要欄の参加者・コーチ／監督・企画名を自動抽出し、元配信と同時刻の選手・コーチ配信を探します。時間の重ならない動画はこの他視点一覧に表示しません。YouTube APIキーは初回だけ入力し、この端末に保存します（pCloud対象外）。';
     controls.append(help,searchLink,ytKey,forgetKey,run,notice,results);
     section.append(start,controls);area.after(section);
     start.addEventListener('click',()=>{controls.hidden=!controls.hidden;start.textContent=controls.hidden?'🔎 未発見の視点を追加検索':'🔎 追加検索を閉じる';});
@@ -2909,20 +2909,10 @@
       const isCoach=clue?.role==='coach'||trustedCoachIds.has(channelId(v));
       const coachNamed=isCoach&&!!clue?.person&&povNameMatches(channelName(v),clue.person);
       const coachLinked=trustedCoachIds.has(channelId(v));
-      if(!match||match.overlap<180){
-        const event=clue?.event||'';
-        const srcGame=researchGameFromText(source.title||'',source.topic_id||'');
-        const candGame=researchGameFromText(v.title||'',v.topic_id||'');
-        const sameGame=!!(srcGame&&candGame&&normalizeResearchText(srcGame)===normalizeResearchText(candGame));
-        const near=!!(startOf(source)&&Math.abs(+cs-+startOf(source))<=36*3600000);
-        // Coach recaps need not overlap live, but must have an explicitly
-        // identified coach AND event/game evidence near the original stream.
-        if(isCoach&&(coachNamed||coachLinked)&&near&&(sameGame||(event&&povEventMatches(v,event)))){
-          seen.set(id,{video:v,match:null,reason:'🎓 コーチの関連配信（時間重複なし・要確認）',direct:false,coach:true});
-          return;
-        }
-        return reject();
-      }
+      // This panel is for simultaneous POVs. Searching for a coach's archives
+      // is useful, but a NON-overlapping archive must not appear in its results.
+      // Preserve overlapping coach streams (including the YasTube Fuwa match).
+      if(!match||match.overlap<180)return reject();
       const srcGame=researchGameFromText(source.title||'',source.topic_id||'');
       const candGame=researchGameFromText(v.title||'',v.topic_id||'');
       if(srcGame&&candGame&&normalizeResearchText(srcGame)!==normalizeResearchText(candGame))return reject();
