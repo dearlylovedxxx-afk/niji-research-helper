@@ -12,7 +12,7 @@ assert(!s.includes('if(q)await ytSearch('),'global unanchored keyword auto-searc
 const start=s.indexOf('  function povYoutubeVideo(item) {');
 const end=s.indexOf('  function attachPovSupplement(',start);
 assert(start>0&&end>start);
-const ctx={povYoutubeDuration(x){const m=String(x).match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);return m?Number(m[1]||0)*3600+Number(m[2]||0)*60+Number(m[3]||0):0;}};
+const ctx={URL,povYoutubeDuration(x){const m=String(x).match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);return m?Number(m[1]||0)*3600+Number(m[2]||0)*60+Number(m[3]||0):0;}};
 vm.createContext(ctx);vm.runInContext(s.slice(start,end)+'\nthis.convert=povYoutubeVideo;',ctx);
 const good=ctx.convert({id:'AAAAAAAAAAA',snippet:{title:'配信',channelId:'UC123'},contentDetails:{duration:'PT2H0M0S'},liveStreamingDetails:{actualStartTime:'2026-09-01T00:00:00Z',actualEndTime:'2026-09-01T02:00:00Z'}});
 const clip=ctx.convert({id:'BBBBBBBBBBB',snippet:{title:'切り抜き'},contentDetails:{duration:'PT1M0S'}});
