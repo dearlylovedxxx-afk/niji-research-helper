@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.45
+// @version      1.0.46
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.45';
+  const VERSION = '1.0.46';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2662,6 +2662,10 @@
     const excluded=/^(?:参加者|メンバー|出演者|ゲスト|配信|配信者|概要|リンク|動画|チャンネル|視点|コラボ|タグ|主催|敬称略|なし|未定|にじさんじ|vtuber|youtube|twitch|ストリートファイター6|スト6)$/i;
     function addName(value) {
       let name=String(value||'').replace(/https?:\/\/\S+|www\.\S+/gi,'').replace(/\[[^\]]*\]\([^)]*\)/g,'').replace(/[「」『』【】*#]/g,'').replace(/^[-・●★☆\s]+|[\s:：、,;；]+$/g,'').replace(/\s*\((?:敬称略|にじさんじ|vtuber|youtube)[^)]*\)\s*$/i,'').trim();
+      // Team rosters often say 'ツルギくん、せつなさん、YASコーチ'.
+      // A coach is searched separately and honorifics are not part of a channel name.
+      if(/(?:コーチ|coach|監督|指導者|講師)\s*$/i.test(name))return;
+      name=name.replace(/(?:くん|ちゃん|さん|様)\s*$/,'').trim();
       if(name.length<2||name.length>38||excluded.test(name)||/^(?:https?|www|UC[A-Za-z0-9_-]{22}|@)/i.test(name)||/[<>]/.test(name))return;
       if(normalize(name)===normalize(sourceName))return;
       names.add(name);
@@ -2682,7 +2686,7 @@
     for(const raw of lines.slice(0,240)) {
       const line=raw.trim();
       if(!line){following=0;continue;}
-      const labeled=line.match(/^(?:[【\[（(]?)\s*(?:参加者|参加メンバー|出演者|出演|ゲスト|コラボ相手|一緒に遊ぶ人|メンバー|with|w\/)(?:[】\]）)]?)\s*[：:\-－]?[\s]*(.*)$/i);
+      const labeled=line.match(/^(?:[【\[（(]?)\s*(?:参加者|参加メンバー|出演者|出演|ゲスト|コラボ相手|一緒に遊ぶ人|チーム(?:メンバー)?|メンバー|with|w\/)(?:[】\]）)]?)\s*[：:\-－]?[\s]*(.*)$/i);
       if(labeled){following=6;if(labeled[1])addNames(labeled[1]);continue;}
       if(following>0){
         if(/^(?:#|https?:|www\.|(?:配信|ゲーム|お知らせ|注意|リンク|タグ|ハッシュタグ)[：:]|[-=]{3,})/i.test(line)){following=0;continue;}
@@ -2723,10 +2727,39 @@
           &&normalize(name)!==own&&!/^UC[A-Za-z0-9_-]{22}$/.test(name))names.add(name);
       }
     }
-    let following=0;
+    // Coaches may be inline with a team roster rather than under a coach heading:
+    // チーム\nレオス、ツルギくん、せつなさん、YASコーチ
+    function addRosterCoaches(raw) {
+      let found=false;
+      const text=String(raw||'').replace(/(?:https?:\/\/|www\.)\S+/gi,'');
+      for(const part of text.split(/[、,，／/|｜&＆]+/)){
+        const token=part.replace(/^[-*・●★☆\d.)．\s]+/,'')
+          .replace(/^(?:チーム(?:メンバー)?|参加者|メンバー|出演者|ゲスト)\s*[:：]?\s*/,'').trim();
+        const match=token.match(/^(.{2,38}?)\s*(?:コーチ|coaches?|監督|指導者|講師)\s*(?:[（(][^）)]*[）)])?\s*$/i);
+        if(!match)continue;
+        add(match[1]);found=true;
+      }
+      // Keep the original roster line to retain adjacent coach channel links.
+      if(found)lines.push(String(raw||'').trim());
+      return found;
+    }
+    let following=0,rosterFollowing=0;
     for(const raw of text.split(/\r?\n/).slice(0,240)){
       const line=raw.trim();
-      if(!line){following=0;continue;}
+      if(!line){following=0;rosterFollowing=0;continue;}
+      const rosterLabel=line.match(/^(?:[【\[（(]\s*)?(?:チーム(?:メンバー)?|参加者|参加メンバー|メンバー|出演者|ゲスト)(?:[】\]）)])?\s*(?:[:：\-－]\s*|\s+)(.*)$/i);
+      const rosterHeading=/^(?:[【\[（(]\s*)?(?:チーム(?:メンバー)?|参加者|参加メンバー|メンバー|出演者|ゲスト)(?:[】\]）)])?\s*[:：]?$/i.test(line);
+      if(rosterLabel||rosterHeading){
+        following=0;rosterFollowing=4;
+        if(rosterLabel?.[1])addRosterCoaches(rosterLabel[1]);
+        continue;
+      }
+      if(rosterFollowing>0){
+        if(/^(?:[【\[（(]?\s*(?:配信|ゲーム|お知らせ|注意事項|概要|ハッシュタグ|タグ|スポンサー|主催|コーチ|監督)|#{2,}|[-=]{3,})/i.test(line))rosterFollowing=0;
+        else {addRosterCoaches(line);rosterFollowing--;}
+      }
+      // Standalone role-suffixed names are explicit too; ordinary prose is not.
+      if(/^[^、,，／/|｜&＆\s:：]{2,38}\s*(?:コーチ|coaches?|監督|指導者|講師)\s*$/i.test(line))addRosterCoaches(line);
       const label=line.match(/^(?:[【\[（(]\s*)?(?:コーチ(?:陣)?|coaches?|監督|指導者|講師)(?:[】\]）)])?\s*(?:[:：\-－]\s*|\s+)(.*)$/i);
       const wrapped=line.match(/^[【\[（(]\s*(?:コーチ(?:陣)?|coaches?|監督|指導者|講師)\s*[】\]）)]\s*(.*)$/i);
       const heading=/^(?:[【\[（(]\s*)?(?:コーチ(?:陣)?|coaches?|監督|指導者|講師)(?:[】\]）)])?\s*[:：]?$/i.test(line);
@@ -2993,7 +3026,11 @@
         for(const person of coach.names.slice(0,2)){
           if(searches>=8)break;
           const q=[person,event||source.topic_id||''].filter(Boolean).join(' ');
+          const before=seen.size;
           await boundedSearch({q},'概要欄のコーチ名から自動検索',{person,event,role:'coach'});
+          // A coach's archive may omit the event name entirely.
+          if(seen.size===before&&event&&searches<8)
+            await boundedSearch({q:person},'コーチ名で再検索',{person,event,role:'coach'});
         }
         // A name+event query can find unregistered participants; a fallback
         // name-only query covers titles that omit the event name altogether.
