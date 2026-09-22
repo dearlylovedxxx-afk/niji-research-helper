@@ -1,0 +1,27 @@
+name: Patch POV recall once
+on:
+  push:
+    paths:
+      - '.github/workflows/patch_pov_recall_once.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply guarded patch
+        run: python .github/scripts/patch_pov_recall_once.py
+      - name: Validate syntax and behavior
+        run: |
+          node --check Niji_Research_Helper.user.js
+          node .github/scripts/test_pov_recall_once.js
+          git diff --check
+      - name: Commit only the helper
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git diff --cached --quiet && exit 1
+          git commit -m 'Resolve participant handles and recover missing POV leads v1.0.43'
+          git push origin HEAD:main
