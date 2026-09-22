@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.40
+// @version      1.0.41
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.40';
+  const VERSION = '1.0.41';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -1106,7 +1106,8 @@
     #npf-toast.show { display:block; }
     #npf-yt-panel {
       display:none; position:fixed !important; right:16px !important; bottom:82px !important; left:auto !important; top:auto !important; margin:0 !important; z-index:2147483646 !important;
-      width:min(340px,calc(100vw - 24px)); box-sizing:border-box;
+      width:min(540px,calc(100vw - 24px)); min-width:min(320px,calc(100vw - 24px));
+      max-width:calc(100vw - 24px) !important; box-sizing:border-box;
       border:1px solid #353b47; border-radius:16px; background:rgba(20,20,23,.97); color:#f1f1f1;
       box-shadow:0 14px 42px rgba(0,0,0,.38); overflow:auto; max-height:calc(100vh - 110px);
       font-family:Roboto,Arial,"Noto Sans JP",sans-serif;
@@ -1120,7 +1121,12 @@
       display:flex; align-items:center; justify-content:space-between; gap:8px;
       padding:10px 12px; border-bottom:1px solid #34343a; background:#202024;
     }
-    .npf-yt-head-title { font-size:13px; font-weight:800; }
+    .npf-yt-head-title { font-size:13px; font-weight:800; flex:1; min-width:0; }
+    #npf-yt-resize { appearance:none; border:1px solid #50576c; border-radius:8px;
+      background:#303547; color:#f2f2ff; padding:5px 9px; min-width:70px; height:33px;
+      font:700 11px/1.2 system-ui; cursor:ew-resize; touch-action:none; user-select:none;
+      flex:none; }
+    #npf-yt-resize:hover { background:#454c68; }
     .npf-yt-close {
       appearance:none; border:0; background:transparent; color:#aaa; cursor:pointer;
       width:28px; height:28px; border-radius:999px; font-size:16px;
@@ -1867,6 +1873,70 @@
     document.documentElement.style.overflow = '';
   }
 
+  // Desktop YouTube panel: resize from a clearly labelled header grip. Dragging
+  // left expands the right-anchored panel; tapping cycles accessible presets.
+  // This UI-only preference is local to the YouTube origin; DB/schema unchanged.
+  function installYoutubePanelResize(panel, head, closeBtn) {
+    if (isMobileYoutubeUi() || head.querySelector('#npf-yt-resize')) return;
+    const key = 'npf_yt_panel_width_v1';
+    const presets = [440, 620, 820, 1000];
+    function applyWidth(raw, remember = false) {
+      const max = Math.max(220, Math.min(1000, window.innerWidth - 32));
+      const min = Math.min(320, max);
+      const requested = Number(raw);
+      const width = Math.round(Math.max(min, Math.min(max,
+        Number.isFinite(requested) && requested > 0 ? requested : 540)));
+      panel.style.setProperty('width', width + 'px', 'important');
+      if (remember) {
+        try { localStorage.setItem(key, String(width)); } catch (e) {
+          console.debug('[NRH][panel width] save unavailable', e);
+        }
+      }
+      return width;
+    }
+    let saved = 540;
+    try { saved = Number(localStorage.getItem(key)) || 540; } catch {}
+    applyWidth(saved);
+    const grip = document.createElement('button');
+    grip.id = 'npf-yt-resize'; grip.type = 'button';
+    grip.textContent = '↔ 幅調整';
+    grip.title = '左右にドラッグして幅変更／クリックで幅を切替';
+    grip.setAttribute('aria-label', grip.title);
+    head.insertBefore(grip, closeBtn);
+    let drag = null, lastDragAt = 0;
+    grip.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      drag = { x:e.clientX, width:panel.getBoundingClientRect().width, moved:false };
+      try { grip.setPointerCapture(e.pointerId); } catch {}
+    });
+    grip.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const delta = drag.x - e.clientX;
+      if (Math.abs(delta) > 4) drag.moved = true;
+      if (!drag.moved) return;
+      e.preventDefault();
+      applyWidth(drag.width + delta);
+    });
+    const finish = () => {
+      if (!drag) return;
+      if (drag.moved) {
+        lastDragAt = Date.now();
+        applyWidth(panel.getBoundingClientRect().width, true);
+      }
+      drag = null;
+    };
+    grip.addEventListener('pointerup', finish);
+    grip.addEventListener('pointercancel', finish);
+    grip.addEventListener('click', () => {
+      if (Date.now() - lastDragAt < 450) return;
+      const current = panel.getBoundingClientRect().width;
+      applyWidth(presets.find(size => size > current + 24) || presets[0], true);
+    });
+    window.addEventListener('resize', () => {
+      if (panel.isConnected) applyWidth(panel.getBoundingClientRect().width);
+    }, { passive:true });
+  }
+
   // ---------- comment2434: URL + timestamp POV launcher ----------
   // 保存済み同期位置を利用する。新しいキーやDBは作成しない。
   function openCommentPovHome() {
@@ -2596,9 +2666,11 @@
       povTimeVerified:!!(start&&end&&Number.isFinite(Date.parse(start))&&Number.isFinite(Date.parse(end)))};
   }
 
-  function attachPovSupplement(source,baseline,syncOffset) {
-    const area=$('#npf-result-area',state.sheet);
+  function attachPovSupplement(source,baseline,syncOffset,youtubeMode=false) {
+    const area=youtubeMode?$('#npf-yt-results'):$('#npf-result-area',state.sheet);
     if(!area)return;
+    // Search may be run repeatedly without reloading a YouTube watch page.
+    area.parentElement?.querySelector('#npf-pov-supplement')?.remove();
     const section=document.createElement('section');
     section.id='npf-pov-supplement';
     section.style.cssText='border:1px solid #55617b;border-radius:12px;padding:12px;margin:15px 0;background:#151b25;color:#edf2f7;';
@@ -2650,7 +2722,9 @@
           add.addEventListener('click',()=>{
             if(manualMatches.some(m=>m.v.id===v.id))return;
             match.related=true;match.reasons=[...new Set([...match.reasons,'手動確認した候補'])];
-            manualMatches.push(match);renderMatches(source,[...baseline,...manualMatches],syncOffset);
+            manualMatches.push(match);
+            if(youtubeMode)renderYoutubeMatches(source,[...baseline,...manualMatches],syncOffset);
+            else renderMatches(source,[...baseline,...manualMatches],syncOffset);
             add.textContent='✅ この画面の一覧に追加済み';add.disabled=true;
           });card.append(add);
         }
@@ -3198,6 +3272,8 @@
     const sec = youtubeCurrentSeconds();
     await saveYoutubeSync(id, sec);
 
+    // Never display the previous video's supplement while a new POV search runs.
+    document.querySelector('#npf-yt-panel #npf-pov-supplement')?.remove();
     const results = $('#npf-yt-results');
     if (results) {
       results.replaceChildren();
@@ -3212,6 +3288,7 @@
       const candidates = await fetchCandidates(source);
       const matches = buildMatches(source, candidates, sec);
       renderYoutubeMatches(source, matches, sec);
+      attachPovSupplement(source, matches, sec, true);
       if (isMobileYoutubeUi()) {
         const panel = $('#npf-yt-panel');
         if (panel && results) {
@@ -3598,6 +3675,7 @@
       styleMobileYoutubePanel(panel);
     } else {
       (document.body || document.documentElement).appendChild(panel);
+      installYoutubePanelResize(panel, head, closeBtn);
     }
     syncYoutubePanelVisibility();
 
