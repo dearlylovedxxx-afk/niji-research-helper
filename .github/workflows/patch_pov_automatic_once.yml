@@ -1,0 +1,27 @@
+name: Patch automatic POV discovery once
+on:
+  push:
+    paths:
+      - '.github/workflows/patch_pov_automatic_once.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply guarded patch
+        run: python .github/scripts/patch_pov_automatic_once.py
+      - name: Check syntax and discovery behavior
+        run: |
+          node --check Niji_Research_Helper.user.js
+          node .github/scripts/test_pov_automatic_once.js
+          git diff --check
+      - name: Commit only helper script
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git diff --cached --quiet && exit 1
+          git commit -m 'Automatic participant and event POV discovery v1.0.44'
+          git push origin HEAD:main
