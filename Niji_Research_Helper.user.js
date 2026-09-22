@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.44
+// @version      1.0.45
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.44';
+  const VERSION = '1.0.45';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2703,6 +2703,44 @@
     return {names:[...names].slice(0,10),events:[...events].slice(0,5)};
   }
 
+
+  // Only explicitly labelled coaches: a generic mention of a streamer is not
+  // proof that they coached this event. Preserve URLs to resolve their channels.
+  function povCoachClues(source) {
+    const text=String(source?.description||'').slice(0,18000);
+    const names=new Set(),handles=new Set(),lines=[];
+    const normalize=s=>String(s||'').normalize('NFKC').toLowerCase().replace(/[\s\u3000・_-]/g,'');
+    const own=normalize(channelName(source));
+    function add(raw) {
+      for(const found of String(raw||'').matchAll(/@([A-Za-z0-9._-]{2,30})/g))handles.add(found[1]);
+      const text=String(raw||'').replace(/(?:https?:\/\/|www\.)\S+/gi,'').replace(/\[[^\]]*\]\([^)]*\)/g,'');
+      for(const part of text.split(/[、,，／/|｜&＆]+/)){
+        const handle=part.match(/@([A-Za-z0-9._-]{2,30})/);
+        if(handle)handles.add(handle[1]);
+        const name=part.replace(/@[A-Za-z0-9._-]+/g,'').replace(/[（(](?:コーチ|coach|監督|講師)[）)]/gi,'')
+          .replace(/^[\s\-・●★☆]+|[\s:：;；]+$/g,'').replace(/(?:さん|様)$/,'').trim();
+        if(name.length>=2&&name.length<=38&&!/^(?:コーチ|coach|監督|講師|先生|参加者|リンク|なし|未定)$/i.test(name)
+          &&normalize(name)!==own&&!/^UC[A-Za-z0-9_-]{22}$/.test(name))names.add(name);
+      }
+    }
+    let following=0;
+    for(const raw of text.split(/\r?\n/).slice(0,240)){
+      const line=raw.trim();
+      if(!line){following=0;continue;}
+      const label=line.match(/^(?:[【\[（(]\s*)?(?:コーチ(?:陣)?|coaches?|監督|指導者|講師)(?:[】\]）)])?\s*(?:[:：\-－]\s*|\s+)(.*)$/i);
+      const wrapped=line.match(/^[【\[（(]\s*(?:コーチ(?:陣)?|coaches?|監督|指導者|講師)\s*[】\]）)]\s*(.*)$/i);
+      const heading=/^(?:[【\[（(]\s*)?(?:コーチ(?:陣)?|coaches?|監督|指導者|講師)(?:[】\]）)])?\s*[:：]?$/i.test(line);
+      if(label||wrapped||heading){following=4;lines.push(line);if(label?.[1]||wrapped?.[1])add(label?.[1]||wrapped?.[1]);continue;}
+      if(!following)continue;
+      if(/^(?:[【\[（(]?\s*(?:参加者|メンバー|出演者|ゲスト|配信|お知らせ|注意事項|概要|ハッシュタグ|タグ|スポンサー|主催)|#{2,}|[-=]{3,})/i.test(line)){
+        following=0;continue;
+      }
+      lines.push(line);add(line.replace(/^[-*・●★☆]\s*/,'').replace(/^\d+[.)．]\s*/,''));
+      following--;
+    }
+    return {names:[...names].slice(0,6),handles:[...handles].slice(0,6),description:lines.join('\n')};
+  }
+
   function povNameMatches(channel,person) {
     const clean=s=>String(s||'').normalize('NFKC').toLowerCase()
       .replace(/\((?:official|公式|にじさんじ)[^)]*\)|【[^】]*】|\[[^\]]*\]/gi,'')
@@ -2773,13 +2811,13 @@
     const run=document.createElement('button');run.type='button';run.className='npf-primary';run.textContent='追加候補を探す';
     run.style.cssText='min-height:44px;margin-top:9px;';
     const help=document.createElement('p');help.style.cssText='font-size:11px;line-height:1.5;color:#b9c7dd;';
-    help.textContent='概要欄の参加者名・@ハンドル・企画名を自動抽出し、YouTubeから同時期のライブアーカイブを追加検索します。関連の根拠が弱いものは「要確認」と表示。YouTube APIキーは初回入力後、この端末のスクリプト設定に保存します（pCloudバックアップ対象外）。';
+    help.textContent='概要欄の参加者名・コーチ／監督名・企画名を自動抽出し、選手の他視点だけでなくコーチの配信・振り返りも探します。時間が重ならない関連配信は同期対象にしません。YouTube APIキーは初回だけ入力し、この端末に保存します（pCloud対象外）。';
     controls.append(help,searchLink,ytKey,forgetKey,run,notice,results);
     section.append(start,controls);area.after(section);
     start.addEventListener('click',()=>{controls.hidden=!controls.hidden;start.textContent=controls.hidden?'🔎 未発見の視点を追加検索':'🔎 追加検索を閉じる';});
     // Include *all* first-pass Holodex video IDs, not just displayed/matched ones.
     const known=new Set([source.id,...baseline.map(m=>m.v.id),...holodexVideos.map(v=>v.id)]),seen=new Map();
-    let trustedChannelIds=new Set(),rejected=0,duplicateCount=0,checked=0,unresolved=0;
+    let trustedChannelIds=new Set(),trustedCoachIds=new Set(),rejected=0,duplicateCount=0,checked=0,unresolved=0;
     const reviewLinks=new Map();
     let manualMatches=[];
     function display() {
@@ -2791,7 +2829,7 @@
         const v=row.video,match=row.match;
         const card=document.createElement('article');card.style.cssText='border-top:1px solid #46516b;padding:10px 0;font-size:12px;';
         const title=document.createElement('strong');title.textContent=v.title||'動画 '+v.id;title.style.cssText='display:block;overflow-wrap:anywhere;';
-        const info=document.createElement('div');info.textContent=channelName(v)+' ／ '+row.reason+(match?' ／ 同時刻の重なり '+fmtDuration(match.overlap):' ／ 配信日時を確認できません');
+        const info=document.createElement('div');info.textContent=channelName(v)+' ／ '+row.reason+(match?' ／ 同時刻の重なり '+fmtDuration(match.overlap):row.coach?' ／ 同時刻ではないため同期対象外':' ／ 配信日時を確認できません');
         info.style.cssText='margin:5px 0;color:#b9c7dd;';
         const open=document.createElement('a');open.href=youtubeUrl(v.id,match?correctedCandidateOffset(source,match):0);
         open.target='_blank';open.rel='noopener noreferrer';open.textContent=match?'↗ 重なり時刻から開く':'↗ 動画を確認する';
@@ -2835,7 +2873,23 @@
         return reject();
       }
       const match=buildMatches(source,[v],syncOffset)[0]||null;
-      if(!match||match.overlap<180)return reject();
+      const isCoach=clue?.role==='coach'||trustedCoachIds.has(channelId(v));
+      const coachNamed=isCoach&&!!clue?.person&&povNameMatches(channelName(v),clue.person);
+      const coachLinked=trustedCoachIds.has(channelId(v));
+      if(!match||match.overlap<180){
+        const event=clue?.event||'';
+        const srcGame=researchGameFromText(source.title||'',source.topic_id||'');
+        const candGame=researchGameFromText(v.title||'',v.topic_id||'');
+        const sameGame=!!(srcGame&&candGame&&normalizeResearchText(srcGame)===normalizeResearchText(candGame));
+        const near=!!(startOf(source)&&Math.abs(+cs-+startOf(source))<=36*3600000);
+        // Coach recaps need not overlap live, but must have an explicitly
+        // identified coach AND event/game evidence near the original stream.
+        if(isCoach&&(coachNamed||coachLinked)&&near&&(sameGame||(event&&povEventMatches(v,event)))){
+          seen.set(id,{video:v,match:null,reason:'🎓 コーチの関連配信（時間重複なし・要確認）',direct:false,coach:true});
+          return;
+        }
+        return reject();
+      }
       const srcGame=researchGameFromText(source.title||'',source.topic_id||'');
       const candGame=researchGameFromText(v.title||'',v.topic_id||'');
       if(srcGame&&candGame&&normalizeResearchText(srcGame)!==normalizeResearchText(candGame))return reject();
@@ -2848,9 +2902,9 @@
       // Event-only matches require both a distinctive event AND compatible game
       // (or a source-channel mention). A generic game title is never enough.
       const eventLead=eventMatched&&(sourceNamed||!!(srcGame&&candGame&&normalizeResearchText(srcGame)===normalizeResearchText(candGame)));
-      if(!direct&&!trusted&&!named&&!eventLead)return reject();
-      const evidence=direct?'概要欄の直接リンク':trusted?'概要欄の参加者チャンネル':named?'概要欄の参加者名とチャンネル名一致':'企画名＋同ゲーム・同時間帯';
-      seen.set(id,{video:v,match,reason:evidence+'（他視点か要確認）',direct});
+      if(!direct&&!trusted&&!named&&!eventLead&&!coachNamed&&!coachLinked)return reject();
+      const evidence=isCoach&&(coachNamed||coachLinked)?'🎓 コーチの配信':direct?'概要欄の直接リンク':trusted?'概要欄の参加者チャンネル':named?'概要欄の参加者名とチャンネル名一致':'企画名＋同ゲーム・同時間帯';
+      seen.set(id,{video:v,match,reason:evidence+'（関連は要確認）',direct,coach:isCoach});
     }
 
     async function youtubeApi(path,key){
@@ -2893,7 +2947,11 @@
         const enriched={...detailed,description:freshDescription||detailed.description||''};
         const clues=povDescriptionClues(enriched);
         const auto=povAutomaticClues(enriched);
-        const ids=new Set(clues.channelIds),handles=new Set(clues.handles);
+        const coach=povCoachClues(enriched);
+        const coachLinks=povDescriptionClues({...enriched,description:coach.description,mentions:[]});
+        const ids=new Set([...clues.channelIds,...coachLinks.channelIds]);
+        const handles=new Set([...clues.handles,...coach.handles,...coachLinks.handles]);
+        trustedCoachIds=new Set(coachLinks.channelIds);
         const ss=startOf(source),se=endOf(source);
         if(!ss||!se||!Number.isFinite(+ss)||!Number.isFinite(+se))throw Error('元動画の配信日時を確認できません');
         const from=new Date(+ss-30*86400000).toISOString(),to=new Date(+se+3*86400000).toISOString();
@@ -2901,11 +2959,11 @@
           try{
             const data=await youtubeApi('channels?'+new URLSearchParams({part:'id',forHandle:'@'+handle}),key);
             const id=data.items?.[0]?.id;
-            if(/^UC[A-Za-z0-9_-]{22}$/.test(id))ids.add(id);else unresolved++;
+            if(/^UC[A-Za-z0-9_-]{22}$/.test(id)){ids.add(id);if(coach.handles.includes(handle)||coachLinks.handles.includes(handle))trustedCoachIds.add(id);}else unresolved++;
           }catch(e){unresolved++;console.warn('[NPF POV handle lookup]',String(e?.message||e));}
         }
         ids.delete(channelId(source));trustedChannelIds=new Set([...ids].slice(0,8));
-        notice.textContent='参加者名：'+(auto.names.join('、')||'未記載')+' ／ 企画名：'+(auto.events.join('、')||'未記載')+'。関連アーカイブを照合中…';
+        notice.textContent='参加者：'+(auto.names.join('、')||'未記載')+' ／ コーチ：'+(coach.names.join('、')||'未記載')+' ／ 企画名：'+(auto.events.join('、')||'未記載')+'。関連アーカイブを照合中…';
         for(const id of clues.videoIds){
           try{remember(await apiGet('/videos/'+encodeURIComponent(id)),'概要欄の動画URL',true);}
           catch(e){console.debug('[NPF POV direct link not on Holodex]',id);}
@@ -2916,30 +2974,37 @@
         for(const ch of trustedChannelIds){
           try{
             const p=new URLSearchParams({channel_id:ch,type:'stream',status:'past',include:'live_info,mentions',from:new Date(+ss-86400000).toISOString(),to:new Date(+se+86400000).toISOString(),limit:'50'});
-            for(const v of await apiGet('/videos?'+p))remember(v,'概要欄の参加者チャンネル');
+            for(const v of await apiGet('/videos?'+p))remember(v,'概要欄のチャンネル',false,{role:trustedCoachIds.has(ch)?'coach':'participant',event:auto.events[0]||''});
           }catch(e){console.warn('[NPF POV Holodex channel]',ch,String(e?.message||e));}
         }
         let searches=0,searchFailures=0;
         async function boundedSearch(params,reason,clue){
-          if(searches>=6)return;
+          if(searches>=8)return;
           searches++;
           try{await ytSearch({publishedAfter:from,publishedBefore:to,...params},key,reason,clue);}
           catch(e){searchFailures++;console.warn('[NPF POV YouTube search]',reason,String(e?.message||e));
             if(/quota|403|429|exceeded|limit/i.test(String(e?.message||e)))throw e;}
         }
-        for(const ch of [...trustedChannelIds].slice(0,3))
-          await boundedSearch({channelId:ch},'参加者のチャンネル','');
         const event=auto.events[0]||'';
+        for(const ch of [...trustedChannelIds].slice(0,3))
+          await boundedSearch({channelId:ch},trustedCoachIds.has(ch)?'コーチのチャンネル':'参加者のチャンネル',{role:trustedCoachIds.has(ch)?'coach':'participant',event});
+        // Reserve up to two named searches for explicitly labelled coaches,
+        // including streamers absent from Holodex or without channel links.
+        for(const person of coach.names.slice(0,2)){
+          if(searches>=8)break;
+          const q=[person,event||source.topic_id||''].filter(Boolean).join(' ');
+          await boundedSearch({q},'概要欄のコーチ名から自動検索',{person,event,role:'coach'});
+        }
         // A name+event query can find unregistered participants; a fallback
         // name-only query covers titles that omit the event name altogether.
         for(const person of auto.names.slice(0,3)){
-          if(searches>=6)break;
+          if(searches>=8)break;
           const before=seen.size;
           await boundedSearch({q:[person,event].filter(Boolean).join(' ')},'概要欄の参加者名から自動検索',{person,event});
-          if(seen.size===before&&event&&searches<6)
+          if(seen.size===before&&event&&searches<8)
             await boundedSearch({q:person},'参加者名で再検索',{person});
         }
-        if(event&&searches<6){
+        if(event&&searches<8){
           const game=String(source.topic_id||'').slice(0,45);
           await boundedSearch({q:[event,game].filter(Boolean).join(' ')},'企画名から自動検索',{event});
         }
@@ -2947,7 +3012,7 @@
         searchLink.href='https://www.youtube.com/results?search_query='+encodeURIComponent(linkQuery.slice(0,120));
         searchLink.textContent='↗ YouTubeの検索結果を開く（'+linkQuery.slice(0,55)+'）';
         notice.textContent='自動検索完了：追加候補 '+seen.size+'件 ／ 要確認の直接リンク '+reviewLinks.size+'件。'+
-          '概要欄の参加者 '+auto.names.length+'人、企画名 '+auto.events.length+'件、参加者チャンネル '+trustedChannelIds.size+'件。'+
+          '概要欄の参加者 '+auto.names.length+'人、コーチ '+coach.names.length+'人、企画名 '+auto.events.length+'件、関連チャンネル '+trustedChannelIds.size+'件。'+
           'YouTube検索 '+searches+'回、既存・重複 '+duplicateCount+'件、条件外 '+rejected+'件。'+
           (unresolved?' 未解決ハンドル '+unresolved+'件。':'')+
           (searchFailures?' 一部の検索に失敗 '+searchFailures+'件。':'')+
