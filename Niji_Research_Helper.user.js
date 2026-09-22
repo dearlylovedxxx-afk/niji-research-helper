@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.41
+// @version      1.0.42
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.41';
+  const VERSION = '1.0.42';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_FAVS = 'npf_favorites';
@@ -2638,7 +2638,8 @@
       try {
         const url=new URL(/^https?:\/\//i.test(raw)?raw:'https://'+raw);
         if(!['youtube.com','www.youtube.com','m.youtube.com','youtu.be'].includes(url.hostname.toLowerCase()))continue;
-        const id=parseVideoIdFromUrl(url.href);
+        // A /shorts/ URL is a clip, not a live archive.
+        const id=/^\/(?:shorts|clip)\//i.test(url.pathname)?null:parseVideoIdFromUrl(url.href);
         if(id&&id!==source.id)videoIds.add(id);
         const channel=url.pathname.match(/^\/channel\/(UC[A-Za-z0-9_-]{22})(?:\/|$)/);
         if(channel&&channel[1]!==sourceChannel)channelIds.add(channel[1]);
@@ -2656,17 +2657,20 @@
 
   function povYoutubeVideo(item) {
     const live=item?.liveStreamingDetails||{},snippet=item?.snippet||{};
-    const start=live.actualStartTime||'';
+    // Published date and file duration alone must never turn a Short/clip into a stream.
+    const start=live.actualStartTime||'',end=live.actualEndTime||'';
     const dur=povYoutubeDuration(item?.contentDetails?.duration);
-    const end=live.actualEndTime||(start&&dur?new Date(Date.parse(start)+dur*1000).toISOString():'');
+    const actualDuration=Date.parse(end)-Date.parse(start);
+    const verified=!!(start&&end&&Number.isFinite(actualDuration)&&actualDuration>=600000&&dur>=600);
     return {id:item?.id,title:snippet.title||'',description:snippet.description||'',
+      type:verified?'stream':'video',
       channel_id:snippet.channelId||'',channel:{id:snippet.channelId||'',name:snippet.channelTitle||''},
       start_actual:start,end_actual:end,duration:dur,
       available_at:start||snippet.publishedAt||'',topic_id:'',
-      povTimeVerified:!!(start&&end&&Number.isFinite(Date.parse(start))&&Number.isFinite(Date.parse(end)))};
+      povTimeVerified:verified};
   }
 
-  function attachPovSupplement(source,baseline,syncOffset,youtubeMode=false) {
+  function attachPovSupplement(source,baseline,syncOffset,youtubeMode=false,holodexVideos=[]) {
     const area=youtubeMode?$('#npf-yt-results'):$('#npf-result-area',state.sheet);
     if(!area)return;
     // Search may be run repeatedly without reloading a YouTube watch page.
@@ -2680,7 +2684,7 @@
     const controls=document.createElement('div');controls.hidden=true;
     const notice=document.createElement('p');notice.style.cssText='font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;';
     const query=document.createElement('input');query.className='npf-input';query.maxLength=120;
-    query.placeholder='YouTubeで探す語（イベント名・ゲーム名など）';query.value=String(source.topic_id||'').slice(0,100);
+    query.placeholder='YouTubeで手動検索する語（イベント名・参加者名など）';query.value=String(source.topic_id||'').slice(0,100);
     const ytKey=document.createElement('input');ytKey.className='npf-input';ytKey.type='password';
     ytKey.placeholder='YouTube Data APIキー（任意・この検索中のみ）';ytKey.autocomplete='off';
     const searchLink=document.createElement('a');searchLink.target='_blank';searchLink.rel='noopener noreferrer';
@@ -2695,16 +2699,18 @@
     const run=document.createElement('button');run.type='button';run.className='npf-primary';run.textContent='追加候補を探す';
     run.style.cssText='min-height:44px;margin-top:9px;';
     const help=document.createElement('p');help.style.cssText='font-size:11px;line-height:1.5;color:#b9c7dd;';
-    help.textContent='概要欄の動画URL・参加者チャンネルをHolodexで照合。任意のYouTube APIキーを入力すると、未発見のチャンネルとキーワードをYouTubeでも検索します。検索はタップ時のみ・件数制限あり。キーは保存・バックアップしません。Twitchは対象外です。';
+    help.textContent='概要欄の動画URL・参加者チャンネルをHolodexで照合。任意のYouTube APIキーがあれば、参加者チャンネルの完了済み配信も照合します。無関係なShortsを避けるため、YouTube全体のキーワード自動検索は行いません（上の手動検索リンクを利用）。日時・配信の長さを確認できた候補のみ表示します。キーは保存しません。Twitchは対象外です。';
     controls.append(help,query,searchLink,ytKey,run,notice,results);
     section.append(start,controls);area.after(section);
     start.addEventListener('click',()=>{controls.hidden=!controls.hidden;start.textContent=controls.hidden?'🔎 未発見の視点を追加検索':'🔎 追加検索を閉じる';});
-    const known=new Set([source.id,...baseline.map(m=>m.v.id)]),seen=new Map();
+    // Include *all* first-pass Holodex video IDs, not just displayed/matched ones.
+    const known=new Set([source.id,...baseline.map(m=>m.v.id),...holodexVideos.map(v=>v.id)]),seen=new Map();
+    let trustedChannelIds=new Set(),rejected=0;
     let manualMatches=[];
     function display() {
       results.replaceChildren();
       const items=[...seen.values()].sort((a,b)=>Number(b.direct)-Number(a.direct)||Number(b.match?.related)-Number(a.match?.related));
-      if(!items.length)results.textContent='追加候補はまだありません。検索語を変えてYouTube検索も試せます。';
+      if(!items.length)results.textContent='日時・配信の長さ・参加者との関係を確認できた未発見の配信はありません。上のYouTube手動検索も利用できます。';
       for(const row of items) {
         if(!section.isConnected)break;
         const v=row.video,match=row.match;
@@ -2732,12 +2738,29 @@
       }
     }
     function remember(v,reason,direct=false) {
-      if(!v?.id||! /^[A-Za-z0-9_-]{11}$/.test(v.id)||known.has(v.id))return;
+      const id=v?.id;
+      if(!id||! /^[A-Za-z0-9_-]{11}$/.test(id)||known.has(id)||seen.has(id))return;
+      const reject=()=>{rejected++;};
+      // Holodex must explicitly mark this as a stream; YouTube must expose
+      // real start/end timestamps and at least ten minutes of actual live video.
+      if(Object.hasOwn(v,'povTimeVerified')) {
+        if(!v.povTimeVerified)return reject();
+      }else if(String(v.type||'').toLowerCase()!=='stream')return reject();
+      if(/(?:#?shorts?\b|切り抜き|クリップ|ダイジェスト|\bclip\b|#dance)/i.test(String(v.title||'')))return reject();
+      const cs=startOf(v),ce=endOf(v);
+      if(!cs||!ce||!Number.isFinite(+cs)||!Number.isFinite(+ce)||(+ce-+cs)<600000)return reject();
       const match=buildMatches(source,[v],syncOffset)[0]||null;
-      const prior=seen.get(v.id);
-      if(prior&&!direct)return;
-      seen.set(v.id,{video:v,match,reason,direct});
+      if(!match||match.overlap<180)return reject();
+      const srcGame=researchGameFromText(source.title||'',source.topic_id||'');
+      const candGame=researchGameFromText(v.title||'',v.topic_id||'');
+      if(srcGame&&candGame&&normalizeResearchText(srcGame)!==normalizeResearchText(candGame))return reject();
+      // Broad keyword/game matches are not evidence of the same co-stream.
+      // Non-direct hits must come from an explicitly linked/mentioned channel
+      // AND have a game or participant relation to the source stream.
+      if(!direct&&(!trustedChannelIds.has(channelId(v))||!(match.related||match.sameGame)))return reject();
+      seen.set(id,{video:v,match,reason,direct});
     }
+
     async function youtubeApi(path,key){
       const res=await gmRequest({method:'GET',url:'https://www.googleapis.com/youtube/v3/'+path+(path.includes('?')?'&':'?')+'key='+encodeURIComponent(key),
         headers:{Accept:'application/json'},timeout:22000,responseType:'text'});
@@ -2746,8 +2769,9 @@
       return data;
     }
     async function ytDetails(ids,key,reason,direct=false){
-      for(let i=0;i<ids.length;i+=50){
-        const data=await youtubeApi('videos?'+new URLSearchParams({part:'snippet,contentDetails,liveStreamingDetails',id:ids.slice(i,i+50).join(',')}),key);
+      const unchecked=[...new Set(ids)].filter(id=>id&&!known.has(id)&&!seen.has(id));
+      for(let i=0;i<unchecked.length;i+=50){
+        const data=await youtubeApi('videos?'+new URLSearchParams({part:'snippet,contentDetails,liveStreamingDetails',id:unchecked.slice(i,i+50).join(',')}),key);
         for(const item of data.items||[])remember(povYoutubeVideo(item),reason,direct);
       }
     }
@@ -2768,6 +2792,7 @@
           const detailed=await apiGet('/videos?'+new URLSearchParams({id:source.id,include:'description,mentions',limit:'1'})).catch(()=>[]);
           if(Array.isArray(detailed)&&detailed[0])clues=povDescriptionClues({...source,...detailed[0]});
         }
+        trustedChannelIds=new Set(clues.channelIds);
         const missing=[];
         for(const id of clues.videoIds){
           try{const v=await apiGet('/videos/'+encodeURIComponent(id));remember(v,'概要欄の動画URL',true);}
@@ -2785,11 +2810,11 @@
           if(missing.length)await ytDetails(missing,key,'概要欄の動画URL（YouTube照合）',true);
           // Upload date is not proof of co-stream: videos.list confirms live times.
           for(const ch of clues.channelIds.slice(0,4))await ytSearch({channelId:ch,publishedAfter:from,publishedBefore:to},key,'参加者チャンネルの同時刻候補');
-          const q=query.value.trim().slice(0,110);
-          if(q)await ytSearch({q,publishedAfter:from,publishedBefore:to},key,'キーワード検索・参加者未確認');
-        }else for(const id of missing)remember({id,title:'Holodex未登録の概要欄リンク',channel:{name:'投稿者未取得'}},'概要欄の動画URL・日時未確認',true);
-        notice.textContent='追加候補：'+seen.size+'件。動画を開いて本人の視点か確認してね。'+
-          (key?' YouTube側も照合しました。':' YouTubeの全体検索は上のリンクから可能です（自動照合には任意のAPIキーが必要）。')+
+          // Global keyword search is deliberately a *manual link* only: it
+          // retrieves unrelated SF6 Shorts, clips and streams of other groups.
+        }
+        notice.textContent='条件を満たした未発見の配信：'+seen.size+'件（対象外・重複を除く）。動画を開いて本人の視点か確認してね。'+
+          (key?' 参加者チャンネルをYouTube側でも照合しました。':' YouTubeの全体検索は上のリンクから手動で利用できます。')+
           (clues.handles.length?' 概要欄のハンドル：'+clues.handles.join('、'):'');
         display();
       }catch(e){notice.textContent='⚠️ 追加検索を途中で停止：'+String(e?.message||e)+'。取得済み候補は表示します。';display();}
@@ -2870,7 +2895,7 @@
       const candidates = await fetchCandidates(source);
       const matches = buildMatches(source, candidates, syncOffset);
       renderMatches(source, matches, syncOffset);
-      attachPovSupplement(source, matches, syncOffset);
+      attachPovSupplement(source, matches, syncOffset, false, candidates);
     } catch (err) {
       console.error('[NPF]', err);
       $('.npf-body', state.sheet).innerHTML = `
@@ -3288,7 +3313,7 @@
       const candidates = await fetchCandidates(source);
       const matches = buildMatches(source, candidates, sec);
       renderYoutubeMatches(source, matches, sec);
-      attachPovSupplement(source, matches, sec, true);
+      attachPovSupplement(source, matches, sec, true, candidates);
       if (isMobileYoutubeUi()) {
         const panel = $('#npf-yt-panel');
         if (panel && results) {
