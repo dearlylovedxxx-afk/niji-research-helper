@@ -1,0 +1,27 @@
+name: Patch roster coach extraction once
+on:
+  push:
+    paths:
+      - '.github/workflows/patch_pov_roster_coaches_once.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch only the userscript
+        run: python .github/scripts/patch_pov_roster_coaches_once.py
+      - name: Syntax and roster regression tests
+        run: |
+          node --check Niji_Research_Helper.user.js
+          node .github/scripts/test_pov_roster_coaches_once.js
+          git diff --check
+      - name: Commit only the userscript
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Niji_Research_Helper.user.js
+          git diff --cached --quiet && exit 1
+          git commit -m 'Recognize team-roster coach names v1.0.46'
+          git push origin HEAD:main
