@@ -4,34 +4,30 @@ assert(s.includes('// @version      1.0.47'));
 assert(s.includes("const VERSION = '1.0.47'"));
 assert(s.includes("const NRH_DB_NAME = 'NijiResearchHelperDB'"));
 assert(s.includes("const CLOUD_STORES = ['videos','channels','wiki','pairs']"));
-assert(s.includes('if(isCoach&&!direct&&!coachEvidence?.teamRelated)return reject();'),'same-coach overlap MUST require same-team evidence');
-assert(s.includes('coachEvidence.sameEvent||coachEvidence.sourceLinked'),'non-overlap recap MUST require specific-event or source-video link');
-assert(!s.includes('near&&(sameGame||(event&&povEventMatches(v,event)))'),'old same-game-only coach filter removed');
-const autoStart=s.indexOf('  function povAutomaticClues(source) {');
-const coachStart=s.indexOf('  function povCoachClues(source) {');
-const nameStart=s.indexOf('  function povNameMatches(channel,person) {');
-const evidenceStart=s.indexOf('  function povCoachTeamEvidence(source,video,rosterNames,events) {');
-const durStart=s.indexOf('  function povYoutubeDuration(s) {');
-assert(autoStart>0&&coachStart>autoStart&&nameStart>coachStart&&evidenceStart>nameStart&&durStart>evidenceStart);
+assert(s.includes('if(!match||match.overlap<180)return reject();'),'non-overlapping archive is excluded');
+assert(!s.includes("🎓 コーチの関連配信（時間重複なし・要確認）"),'no unrelated coach row');
+assert(!s.includes('if(isCoach&&!direct&&!coachEvidence?.teamRelated)'),'do not wrongly reject overlapping Fuwa coach stream');
+const fnStart=s.indexOf('    function remember(v,reason,direct=false,clue=null) {',s.indexOf('  function attachPovSupplement('));
+const fnEnd=s.indexOf('\n    async function youtubeApi(',fnStart);
+assert(fnStart>0&&fnEnd>fnStart);
 const ctx={
- channelName(v){return v.channel?.name||'';},
- detectedEvents(){return [];},
- povEventMatches(v,event){const norm=x=>String(x||'').normalize('NFKC').toLowerCase().replace(/[#\s\u3000]/g,'');return norm(v.title+' '+(v.description||'')).includes(norm(event));},
+ known:new Set(['SOURCE00000']),seen:new Map(),rejected:0,duplicateCount:0,checked:0,
+ reviewLinks:new Map(),trustedCoachIds:new Set(['UCYAS']),trustedChannelIds:new Set(['UCYAS']),
+ source:{id:'SOURCE00000',title:'スト6 #V最協第二幕',topic_id:'Street_Fighter'},syncOffset:null,
+ startOf:v=>new Date(v.start_actual),endOf:v=>new Date(v.end_actual),
+ buildMatches:(source,vs)=>vs[0].overlap>=180?[{v:vs[0],overlap:vs[0].overlap,related:false}]:[],
+ channelId:v=>v.channel?.id||'',channelName:v=>v.channel?.name||'',
+ povNameMatches:(a,b)=>a==='YasTube'&&b==='YAS',
+ researchGameFromText:()=>'',normalizeResearchText:x=>x,povEventMatches:()=>false
 };
 vm.createContext(ctx);
-vm.runInContext(s.slice(autoStart,nameStart)+s.slice(evidenceStart,durStart)+'\nthis.auto=povAutomaticClues;this.coach=povCoachClues;this.evidence=povCoachTeamEvidence;',ctx);
-const source={id:'abcdefghijk',title:'#V最協第二幕 | ストリートファイター6 顔合わせその2',channel:{name:'レオス・ヴィンセント'},description:'参ります\n\nチーム\nレオス、ツルギくん、せつなさん、YASコーチ\n\n▼お借りした素敵なイラスト'};
-const auto=ctx.auto(source),coach=ctx.coach(source);
-assert(auto.names.includes('レオス')&&auto.names.includes('ツルギ')&&auto.names.includes('せつな'),'roster names from user screenshot');
-assert(coach.names.includes('YAS'),'YAS coach from screenshot');
-assert(auto.events.includes('#V最協第二幕'),'specific event hashtag detected');
-const roster=ctx.auto({...source,mentions:[]}).names;
-const ev=title=>ctx.evidence(source,{title,description:''},roster,auto.events);
-assert.strictEqual(ev('V最 スクリムコーチング！【スト６】【リュウ】').teamRelated,false,'same coach and game but no same team');
-assert.strictEqual(ev('V最 ふわっちコーチング！【スト６】【リュウ】').teamRelated,false,'other-team coach stream must be rejected');
-assert.strictEqual(ev('【V最協第二幕】別チームコーチング 【スト６】').teamRelated,false,'same event alone is insufficient');
-assert.strictEqual(ev('【V最協第二幕】レオスコーチング 【スト６】').teamRelated,true,'same team identified');
-assert.strictEqual(ev('【V最協第二幕】レオスコーチング 【スト６】').sameEvent,true,'specific event identified');
-assert.strictEqual(ev('レオスコーチング 【スト６】').sameEvent,false,'non-overlap recap without event remains excluded');
-assert.strictEqual(ctx.evidence(source,{title:'コーチング',description:'元動画 https://www.youtube.com/watch?v=abcdefghijk'},roster,[]).sourceLinked,true,'specific source video link is strong evidence');
-console.log('PASS: roster YAS fixture; exclude both unrelated YasTube streams; require same team/event, preserve source-link evidence and schema');
+vm.runInContext(s.slice(fnStart,fnEnd)+'\nthis.remember=remember;',ctx);
+const base={id:'ABCDEFGHIJK',title:'V最 スクリム コーチング！ 【スト6】【リュウ】',
+ channel:{id:'UCYAS',name:'YasTube'},type:'stream',povTimeVerified:true,
+ start_actual:'2026-09-01T00:00:00Z',end_actual:'2026-09-01T02:00:00Z'};
+ctx.remember({...base,overlap:0},'コーチ名から検索',false,{role:'coach',person:'YAS',event:'#V最協第二幕'});
+assert.strictEqual(ctx.seen.size,0,'nonoverlap coach must not be displayed');
+ctx.remember({...base,id:'LMNOPQRSTUV',title:'V最 ふわっちコーチング！ 【スト6】【リュウ】',overlap:12480},'コーチ名から検索',false,{role:'coach',person:'YAS',event:'#V最協第二幕'});
+assert.strictEqual(ctx.seen.size,1,'overlapping Fuwa coach stream must remain a candidate');
+assert(ctx.seen.has('LMNOPQRSTUV'));
+console.log('PASS: nonoverlap coach hidden; overlapping Fuwa coach stays; NRH DB/cloud schema unchanged');
