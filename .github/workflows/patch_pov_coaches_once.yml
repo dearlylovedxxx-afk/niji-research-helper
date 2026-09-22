@@ -11,7 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Apply targeted coach discovery change
-        run: python .github/scripts/patch_pov_coaches_once.py
+        run: |
+          python .github/scripts/patch_pov_coaches_once.py
+          python .github/scripts/fix_pov_coaches_once.py
       - name: Validate script and coach regression fixtures
         run: |
           node --check Niji_Research_Helper.user.js
