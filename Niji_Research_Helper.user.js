@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.49
+// @version      1.0.50
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,12 +52,15 @@
       })()
     : null;
 
-  const VERSION = '1.0.49';
+  const VERSION = '1.0.50';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
   const KEY_FAVS = 'npf_favorites';
-  const KEY_FAVS_SHADOW = 'npf_favorites_shadow_v1'; // local safety copy; never replaces cloud generations
+  const KEY_FAVS_SHADOW = 'npf_favorites_shadow_v1'; // legacy/local safety copy
+  const KEY_FAVS_REV = 'npf_favorites_revision_v1';
+  const KEY_FAVS_RECORD = 'npf_favorites_record_v2'; // versioned GM safety record
+  const LS_FAVS_RECORD = 'npf_favorites_record_v2'; // comment2434-origin safety record
   const KEY_LIVER_FAVS = 'npf_liver_favorites_v1'; // 検索フォーム専用・既存のチャンネルお気に入りとは別
   const KEY_SETTINGS = 'npf_settings';
   const KEY_SYNC = 'npf_sync_points';
@@ -417,6 +420,8 @@
     apiKey: '',
     favorites: [],
     favoriteStorageReadable: true,
+    favoriteRevision: 0,
+    favoriteStorageStatus: '',
     liverFavorites: [],
     settings: { ...DEFAULT_SETTINGS },
     sheet: null,
@@ -441,56 +446,153 @@
   async function gmSet(key, value) {
     try {
       await GM.setValue(key, value);
-      // Keep an independent local safety copy of channel favorites. This is
-      // intentionally separate from pCloud and from the main GM key.
-      if (key === KEY_FAVS && Array.isArray(value)) {
-        await GM.setValue(KEY_FAVS_SHADOW, value);
-      }
-      if ([KEY_FAVS, KEY_LIVER_FAVS, KEY_SETTINGS, KEY_SYNC, KEY_CAL].includes(key)) cloudMarkChanged();
+      if ([KEY_LIVER_FAVS, KEY_SETTINGS, KEY_SYNC, KEY_CAL].includes(key)) cloudMarkChanged();
     } catch (e) {
       console.warn('[NPF] GM.setValue failed', e);
       throw e;
     }
   }
 
+  function favoriteRecordItems(value) {
+    return Array.isArray(value) ? value.filter(x => x && (x.id || x.name)).map(x => ({
+      id:String(x.id || ''), name:String(x.name || '')
+    })) : [];
+  }
+
+  function favoriteHash(items) {
+    return JSON.stringify(favoriteRecordItems(items)
+      .map(x => [x.id, x.name])
+      .sort((a,b) => (a[0]+'\u0000'+a[1]).localeCompare(b[0]+'\u0000'+b[1])));
+  }
+
+  function favoriteLocalRecordRead() {
+    if (!/(^|\.)comment2434\.com$/i.test(location.hostname)) return null;
+    try {
+      const raw=localStorage.getItem(LS_FAVS_RECORD);
+      if (!raw) return null;
+      const rec=JSON.parse(raw);
+      return rec && Number.isFinite(Number(rec.rev)) && Array.isArray(rec.items) ? rec : null;
+    } catch (e) {
+      console.warn('[NPF] favorite localStorage read failed', e);
+      return null;
+    }
+  }
+
+  function favoriteLocalRecordWrite(record) {
+    if (!/(^|\.)comment2434\.com$/i.test(location.hostname)) return false;
+    try {
+      localStorage.setItem(LS_FAVS_RECORD, JSON.stringify(record));
+      return true;
+    } catch (e) {
+      console.warn('[NPF] favorite localStorage write failed', e);
+      return false;
+    }
+  }
+
+  async function persistFavorites(items, {markCloud=true}={}) {
+    if (!state.favoriteStorageReadable) throw new Error('お気に入り保存領域を安全に読み込めていません');
+    const clean=favoriteRecordItems(items);
+    const previousRev=Math.max(Number(state.favoriteRevision||0), Number(await GM.getValue(KEY_FAVS_REV,0)||0));
+    const rev=Math.max(Date.now(), previousRev+1);
+    const record={rev,items:clean,hash:favoriteHash(clean),savedAt:new Date().toISOString()};
+
+    // Safety records first. If the main write fails, the next boot can recover
+    // the intended newest state from the versioned record.
+    await GM.setValue(KEY_FAVS_RECORD, record);
+    await GM.setValue(KEY_FAVS_SHADOW, clean); // keep backward-compatible copy
+    favoriteLocalRecordWrite(record);
+    await GM.setValue(KEY_FAVS, clean);
+    await GM.setValue(KEY_FAVS_REV, rev);
+
+    // Read-after-write verification: never claim "saved" without checking GM.
+    const [verifyMain,verifyRecord,verifyRev]=await Promise.all([
+      GM.getValue(KEY_FAVS, null), GM.getValue(KEY_FAVS_RECORD, null), GM.getValue(KEY_FAVS_REV, 0)
+    ]);
+    if (!Array.isArray(verifyMain) || favoriteHash(verifyMain)!==record.hash ||
+        !verifyRecord || Number(verifyRecord.rev)!==rev || verifyRecord.hash!==record.hash ||
+        Number(verifyRev)!==rev) {
+      state.favoriteStorageReadable=false;
+      state.favoriteStorageStatus='⚠️ 保存照合に失敗。変更を停止中';
+      throw new Error('お気に入りの保存後照合に失敗しました');
+    }
+
+    state.favorites=clean;
+    state.favoriteRevision=rev;
+    const localOk=/(^|\.)comment2434\.com$/i.test(location.hostname)
+      ? favoriteLocalRecordRead()?.rev===rev : true;
+    state.favoriteStorageStatus=`💾 ${clean.length}件保存済み${localOk?'':'（端末予備のみ未確認）'}`;
+
+    // A favorite changed on comment2434 cannot upload the YouTube IndexedDB
+    // there, so always flag the next YouTube visit to create a fresh pCloud generation.
+    if (markCloud) {
+      await GM.setValue(CLOUD_PENDING_KEY, true).catch(()=>{});
+      if (nrhDbEnabled()) cloudMarkChanged();
+    }
+    return clean;
+  }
+
   async function loadFavoritesSafely() {
-    const sentinel = '__NPF_FAVS_MISSING__';
-    let lastError = null;
-    for (const wait of [0, 120, 420, 900]) {
-      if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+    const sentinel='__NPF_FAVS_MISSING__';
+    let lastError=null;
+    for (const wait of [0,120,420,900]) {
+      if (wait) await new Promise(resolve=>setTimeout(resolve,wait));
       try {
-        const raw = await GM.getValue(KEY_FAVS, sentinel);
-        const shadow = await GM.getValue(KEY_FAVS_SHADOW, []);
-        if (raw === sentinel) {
-          // A pre-v1.0.49 install has no shadow yet. Only recover from a
-          // non-empty shadow; otherwise this is a legitimate empty state.
-          if (Array.isArray(shadow) && shadow.length) {
-            await GM.setValue(KEY_FAVS, shadow);
-            return { ok:true, value:shadow, recovered:true };
-          }
-          return { ok:true, value:[], missing:true };
+        const [raw,revRaw,recordRaw,shadow]=await Promise.all([
+          GM.getValue(KEY_FAVS,sentinel),
+          GM.getValue(KEY_FAVS_REV,0),
+          GM.getValue(KEY_FAVS_RECORD,null),
+          GM.getValue(KEY_FAVS_SHADOW,[])
+        ]);
+        const candidates=[];
+        if (Array.isArray(raw)) candidates.push({source:'GM本体',rev:Number(revRaw||0),items:favoriteRecordItems(raw)});
+        if (recordRaw && Number.isFinite(Number(recordRaw.rev)) && Array.isArray(recordRaw.items))
+          candidates.push({source:'GM世代予備',rev:Number(recordRaw.rev),items:favoriteRecordItems(recordRaw.items)});
+        if (Array.isArray(shadow))
+          candidates.push({source:'GM旧予備',rev:0,items:favoriteRecordItems(shadow)});
+        const local=favoriteLocalRecordRead();
+        if (local) candidates.push({source:'端末予備',rev:Number(local.rev),items:favoriteRecordItems(local.items)});
+
+        if (raw===sentinel && !candidates.some(x=>x.items.length))
+          return {ok:true,value:[],rev:0,status:'💾 0件保存済み',missing:true};
+
+        if (!candidates.length) throw new Error('有効なお気に入り保存データがありません');
+
+        // Highest revision wins. Legacy rev=0 ties prefer the copy with more
+        // items so a transient empty legacy read cannot erase known favorites.
+        candidates.sort((a,b)=>b.rev-a.rev || b.items.length-a.items.length);
+        const best=candidates[0];
+        const hash=favoriteHash(best.items);
+        const sameTop=candidates.filter(x=>x.rev===best.rev);
+        const conflicting=sameTop.some(x=>favoriteHash(x.items)!==hash);
+        if (conflicting) {
+          // At an equal revision, never silently choose an empty conflicting copy.
+          sameTop.sort((a,b)=>b.items.length-a.items.length);
+          best.items=sameTop[0].items;
         }
-        if (!Array.isArray(raw)) throw new Error('お気に入り保存値の形式が配列ではありません');
-        // If the main key is unexpectedly empty while a non-empty safety copy
-        // exists, prefer the safety copy and repair the main key.
-        if (!raw.length && Array.isArray(shadow) && shadow.length) {
-          await GM.setValue(KEY_FAVS, shadow);
-          return { ok:true, value:shadow, recovered:true };
-        }
-        // Seed/update shadow only after a successful read.
-        await GM.setValue(KEY_FAVS_SHADOW, raw);
-        return { ok:true, value:raw };
+
+        const finalRev=Math.max(best.rev,1);
+        const repaired={rev:finalRev,items:best.items,hash:favoriteHash(best.items),savedAt:new Date().toISOString()};
+        await GM.setValue(KEY_FAVS,best.items);
+        await GM.setValue(KEY_FAVS_REV,finalRev);
+        await GM.setValue(KEY_FAVS_RECORD,repaired);
+        await GM.setValue(KEY_FAVS_SHADOW,best.items);
+        favoriteLocalRecordWrite(repaired);
+
+        return {
+          ok:true,value:best.items,rev:finalRev,recovered:best.source!=='GM本体'||conflicting,
+          status:`💾 ${best.items.length}件保存済み${best.source==='GM本体'&&!conflicting?'':'（自動復旧）'}`
+        };
       } catch (e) {
-        lastError = e;
-        console.warn('[NPF] favorite storage read retry failed', e);
+        lastError=e;
+        console.warn('[NPF] favorite storage read retry failed',e);
       }
     }
-    return { ok:false, value:[], error:lastError };
+    return {ok:false,value:[],rev:0,status:'⚠️ お気に入り保存領域を読み込めません',error:lastError};
   }
 
   function assertFavoriteStorageReadable() {
     if (state.favoriteStorageReadable) return true;
-    toast('⚠️ お気に入り保存領域の読み込みに失敗中です。上書き防止のため変更を停止しています。ページを再読み込みしてください', 5000);
+    toast('⚠️ お気に入り保存領域の読み込みに失敗中です。上書き防止のため変更を停止しています。ページを再読み込みしてください',5000);
     return false;
   }
 
@@ -572,7 +674,8 @@
       exportedAt:new Date().toISOString(), sourceOrigin:location.origin,
       device:cloudDevice(), stores,
       // The Holodex API key and cloud token are deliberately NEVER uploaded.
-      preferences: { favorites:state.favorites, liverFavorites:state.liverFavorites,
+      preferences: { favorites:state.favorites, favoriteRevision:state.favoriteRevision,
+        liverFavorites:state.liverFavorites,
         settings:state.settings, syncPoints:state.syncPoints, calibration:state.calibration } };
   }
 
@@ -750,9 +853,9 @@
         }
         return out;
       };
-      state.favorites = mergeFavs(state.favorites, pref.favorites, x => x?.id || x?.name);
+      const mergedFavorites = mergeFavs(state.favorites, pref.favorites, x => x?.id || x?.name);
       state.liverFavorites = mergeFavs(state.liverFavorites, pref.liverFavorites, x => x?.value || x?.name);
-      await GM.setValue(KEY_FAVS, state.favorites);
+      await persistFavorites(mergedFavorites,{markCloud:false});
       await GM.setValue(KEY_LIVER_FAVS, state.liverFavorites);
       // Add missing sync data; never overwrite edits made on this browser.
       state.syncPoints = { ...(pref.syncPoints || {}), ...(state.syncPoints || {}) };
@@ -2148,7 +2251,7 @@
         if (!assertFavoriteStorageReadable()) return;
         const id = btn.dataset.id;
         state.favorites = state.favorites.filter(f => f.id !== id);
-        await gmSet(KEY_FAVS, state.favorites);
+        await persistFavorites(state.favorites);
         injectChannelFavorites(true);
         openSettings();
       });
@@ -2274,7 +2377,7 @@
       }
     }
 
-    await gmSet(KEY_FAVS, state.favorites);
+    await persistFavorites(state.favorites);
     injectChannelFavorites(true);
     toast(added ? `${added}チャンネルをお気に入りに追加しました` : '選択中のチャンネルは登録済みです');
   }
@@ -2330,6 +2433,7 @@
         <div class="npf-channel-favs-title">★ お気に入りチャンネル</div>
         <button type="button" class="npf-channel-fav-add">☆ 選択中を登録</button>
       </div>
+      <div class="npf-channel-save-status">${escapeHtml(state.favoriteStorageStatus || (state.favoriteStorageReadable ? `💾 ${state.favorites.length}件保存済み` : '⚠️ 保存状態を確認できません'))}</div>
       <div class="npf-channel-favs-list">
         ${favoriteRows.length
           ? favoriteRows.map(({ fav, option }) => `
@@ -2381,6 +2485,7 @@
     GM.addStyle?.(`
       .npf-channel-chip.unavailable{opacity:.55;filter:saturate(.55);cursor:not-allowed}
       .npf-channel-favs-note{font-size:11px;line-height:1.45;color:#aeb8ca;margin-top:7px}
+      .npf-channel-save-status{font-size:11px;line-height:1.4;color:#9fb5d8;margin:2px 0 8px}
     `);
   } catch {}
 
@@ -2670,7 +2775,7 @@
       state.favorites.push({ id, name });
       toast(`${name} をお気に入りに追加しました`);
     }
-    await gmSet(KEY_FAVS, state.favorites);
+    await persistFavorites(state.favorites);
     if (!isYoutubeHost()) injectChannelFavorites(true);
 
     if (button) button.textContent = state.favorites.some(f => f.id === id) ? '★ お気に入り' : '☆ お気に入り';
@@ -7769,8 +7874,10 @@ e.el.classList.toggle('npf-r-hidden', !show);
   state.apiKey = await gmGet(KEY_API, '');
   const favoriteLoad = await loadFavoritesSafely();
   state.favoriteStorageReadable = favoriteLoad.ok;
+  state.favoriteRevision = Number(favoriteLoad.rev||0);
+  state.favoriteStorageStatus = favoriteLoad.status || '';
   state.favorites = favoriteLoad.value;
-  if (favoriteLoad.recovered) console.info('[Niji Research Helper] channel favorites recovered from local safety copy');
+  if (favoriteLoad.recovered) console.info('[Niji Research Helper] channel favorites recovered from redundant storage');
   state.liverFavorites = await gmGet(KEY_LIVER_FAVS, []);
   state.settings = { ...DEFAULT_SETTINGS, ...(await gmGet(KEY_SETTINGS, DEFAULT_SETTINGS)) };
   research.autoChannelKeys = new Set(Array.isArray(state.settings.autoResearchChannels)
