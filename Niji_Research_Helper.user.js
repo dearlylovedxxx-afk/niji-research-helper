@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.54
+// @version      1.0.55
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.54';
+  const VERSION = '1.0.55';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2640,7 +2640,7 @@
     let box = document.querySelector('.npf-channel-favs');
     if (box && !force && box.dataset.forSelect === (select.id || select.name || 'channel')) {
       // 選択状態だけ更新
-      $('.npf-channel-chip', box).forEach(btn => {
+      $$('.npf-channel-chip', box).forEach(btn => {
         const fav = state.favorites.find(f => String(f.id) === btn.dataset.favId);
         const opt = findOptionForFavorite(select, fav);
         btn.classList.toggle('selected', !!opt?.selected);
@@ -2730,46 +2730,88 @@
 
   // ---------- comment2434: ライバー名検索のお気に入り（チャンネルとは別保存） ----------
   function findLiverSelect() {
-    let best = null;
-    let bestScore = -999;
-    for (const sel of $$('select')) {
-      // ヘルパー自身の設定欄やチャンネル名セレクトを拾わない。
-      if (sel.closest('#npf-root, #npf-yt-panel, #niji-or-root')) continue;
-      const idName = `${sel.id || ''} ${sel.name || ''} ${sel.getAttribute('aria-label') || ''}`;
-      let score = /liver|ライバー|talent/i.test(idName) ? 12 : 0;
-      if (/channel|チャンネル|exclude|対象外/i.test(idName)) score -= 30;
-      if (sel.id) {
-        const lab = document.querySelector(`label[for="${CSS.escape(sel.id)}"]`);
-        if (lab && /ライバー名/.test(lab.textContent || '')) score += 12;
-      }
-      if (/ライバー名/.test(sel.closest('label')?.textContent || '')) score += 12;
-      const previous = sel.previousElementSibling;
-      if (previous && /ライバー名/.test((previous.textContent || '').slice(0, 100))) score += 9;
-      // ラベルが独立しているサイトの検索フォームにも対応する。
-      for (let p = sel.parentElement, depth = 0; p && depth < 2; p = p.parentElement, depth++) {
-        const context = (p.textContent || '').trim().slice(0, 180);
-        if (/ライバー名/.test(context)) score += depth === 0 ? 8 : 3;
-        if (/対象外チャンネル名/.test(context) && !/ライバー名/.test(context)) score -= 8;
-      }
-      if (score > bestScore) { bestScore = score; best = sel; }
-    }
-    if (bestScore >= 8) return best;
+    const selects=$$('select').filter(sel => !sel.closest('#npf-root, #npf-yt-panel, #niji-or-root'));
+    if (!selects.length) return null;
 
-    // Fallback for comment2434 layouts where the visible "ライバー名:" label and
-    // select are separated by wrappers (Select2/mobile layout).
-    for (const label of $('label,div,span,p')) {
+    const optionTexts = sel => [...(sel?.options || [])].map(o => String(o.textContent || '').trim());
+    const selectedText = sel => String(sel?.selectedOptions?.[0]?.textContent || '').trim();
+
+    // comment2434 mobile/desktop共通の最優先ルート:
+    // 「検索種別」→「ライバー名」→「チャンネル名」のDOM順を利用する。
+    const modeSelect=selects.find(sel => {
+      const texts=optionTexts(sel);
+      return texts.some(t=>/キーワード検索/.test(t)) && texts.some(t=>/ライバー名検索/.test(t));
+    });
+    const channelSelect=findChannelSelect();
+
+    if (modeSelect && /ライバー名検索/.test(selectedText(modeSelect))) {
+      const modeIndex=selects.indexOf(modeSelect);
+      const channelIndex=channelSelect ? selects.indexOf(channelSelect) : -1;
+      const stop=channelIndex>modeIndex ? channelIndex : selects.length;
+      const between=selects.slice(modeIndex+1,stop).filter(sel => {
+        if (sel===channelSelect) return false;
+        const texts=optionTexts(sel);
+        if (texts.some(t=>/キーワード検索|ライバー名検索/.test(t))) return false;
+        const idName=`${sel.id||''} ${sel.name||''} ${sel.getAttribute('aria-label')||''}`;
+        if (/channel|チャンネル|exclude|対象外/i.test(idName)) return false;
+        return true;
+      });
+      if (between.length) {
+        between.sort((a,b) => {
+          const score = sel => {
+            const idName=`${sel.id||''} ${sel.name||''} ${sel.getAttribute('aria-label')||''}`;
+            const texts=optionTexts(sel);
+            let n=/liver|ライバー|talent/i.test(idName)?30:0;
+            if (texts.length>=20) n+=8; else if (texts.length>=5) n+=4;
+            const st=selectedText(sel);
+            if (st && !/検索$|検索モード|チャンネル/.test(st)) n+=6;
+            if (texts.some(t=>/[ぁ-んァ-ヶ一-龠々ー]/.test(t) && t.length>=2)) n+=4;
+            return n;
+          };
+          return score(b)-score(a);
+        });
+        return between[0];
+      }
+    }
+
+    // Secondary heuristic for alternate layouts.
+    let best=null, bestScore=-999;
+    for (const sel of selects) {
+      if (sel===modeSelect || sel===channelSelect) continue;
+      const idName=`${sel.id || ''} ${sel.name || ''} ${sel.getAttribute('aria-label') || ''}`;
+      let score=/liver|ライバー|talent/i.test(idName)?12:0;
+      if (/channel|チャンネル|exclude|対象外/i.test(idName)) score-=30;
+      if (sel.id) {
+        const lab=document.querySelector(`label[for="${CSS.escape(sel.id)}"]`);
+        if (lab && /ライバー名/.test(lab.textContent||'')) score+=16;
+      }
+      if (/ライバー名/.test(sel.closest('label')?.textContent||'')) score+=14;
+      const previous=sel.previousElementSibling;
+      if (previous && /ライバー名/.test((previous.textContent||'').slice(0,100))) score+=10;
+      for (let p=sel.parentElement,depth=0;p&&depth<3;p=p.parentElement,depth++) {
+        const context=(p.textContent||'').trim().slice(0,220);
+        if (/ライバー名/.test(context)) score+=depth===0?9:depth===1?5:2;
+        if (/対象外チャンネル名/.test(context) && !/ライバー名/.test(context)) score-=12;
+      }
+      if ([...sel.options].length>=10) score+=3;
+      if (score>bestScore) { bestScore=score; best=sel; }
+    }
+    if (bestScore>=8) return best;
+
+    // Last resort: exact visible label -> nearby non-channel select.
+    for (const label of $$('label,div,span,p')) {
       const text=String(label.textContent||'').trim();
       if (!/^ライバー名[:：]?$/.test(text)) continue;
-      const scope=label.parentElement || label;
-      const candidates=[
-        ...scope.querySelectorAll?.('select') || [],
-        ...scope.parentElement?.querySelectorAll?.('select') || []
-      ];
-      const found=candidates.find(sel => {
-        const context=(sel.id+' '+sel.name+' '+(sel.getAttribute('aria-label')||'')).toLowerCase();
-        return !/channel|exclude/.test(context);
-      });
-      if (found) return found;
+      const parent=label.parentElement;
+      if (parent) {
+        const same=$$('select',parent).find(sel=>sel!==modeSelect && sel!==channelSelect);
+        if (same) return same;
+        let sib=parent.nextElementSibling;
+        for (let step=0;sib&&step<5;step++,sib=sib.nextElementSibling) {
+          const cand=sib.matches?.('select') ? sib : sib.querySelector?.('select');
+          if (cand && cand!==modeSelect && cand!==channelSelect) return cand;
+        }
+      }
     }
     return null;
   }
@@ -2809,7 +2851,7 @@
     const target = channelFavoriteMountTarget(select); // Select2等の表示用要素より前へ設置
     if (!target?.parentNode) return;
     let box = document.querySelector('.npf-liver-favs');
-    if (box && !force && box.nextElementSibling === target && box._npfLiverSelect === select) {
+    if (box && !force && box.previousElementSibling === target && box._npfLiverSelect === select) {
       $$('.npf-liver-chip', box).forEach(btn => {
         const fav = state.liverFavorites.find(f => normalizedName(f.name) === btn.dataset.liverName);
         btn.classList.toggle('selected', !!findOptionForLiver(select, fav)?.selected);
@@ -2838,7 +2880,7 @@
           </span>`).join('')
           : '<span class="npf-channel-favs-empty">ライバーを選んで「選択中を登録」すると、ここからすぐ選べます。</span>'}
       </div>`;
-    target.insertAdjacentElement('beforebegin', box);
+    target.insertAdjacentElement('afterend', box);
     $('.npf-liver-fav-add', box)?.addEventListener('click', () => {
       void addSelectedLiverFavorite(select).catch(err => toast(`登録失敗: ${err?.message || err}`,5000));
     });
@@ -2854,7 +2896,7 @@
       notifySelectChanged(select);
       setTimeout(() => injectLiverFavorites(true), 40);
     }));
-    $('.npf-liver-remove', box).forEach(btn => btn.addEventListener('click', async () => {
+    $$('.npf-liver-remove', box).forEach(btn => btn.addEventListener('click', async () => {
       if (!assertFavoriteStorageReadable()) return;
       const name = btn.dataset.liverName;
       const next=state.liverFavorites.filter(f => normalizedName(f.name) !== name);
