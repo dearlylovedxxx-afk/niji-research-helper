@@ -2,13 +2,8 @@
 // Paste this code ABOVE `export default` in the existing Worker, then insert
 // `if (url.pathname.startsWith('/v1/app-backups/')) return handleAppBackup(request, env);`
 // immediately after `const url = new URL(request.url);` inside handle().
-// Existing /v1/backups and niji_backups stay untouched. The new `niji` app-backup route reuses NIJI_CLIENT_TOKEN.
+// Existing /v1/backups, niji_backups and NIJI_CLIENT_TOKEN are untouched.
 const APP_BACKUP_TYPES = Object.freeze({
-  // Niji Research Helper favorites use the EXISTING NIJI_CLIENT_TOKEN.
-  // They are intentionally stored separately from the large /v1/backups DB snapshots.
-  niji: { name:'Niji Research Helper Favorites', secret:'NIJI_CLIENT_TOKEN',
-    origins:['https://comment2434.com','https://www.comment2434.com',
-      'https://www.youtube.com','https://m.youtube.com','https://youtube.com'] },
   or: { name:'Niji OR Results Merger', secret:'NRH_OR_BACKUP_TOKEN', origins:['https://comment2434.com','https://www.comment2434.com'] },
   x: { name:'X Search Favorites', secret:'NRH_X_BACKUP_TOKEN', origins:['https://x.com','https://twitter.com'] },
   pixiv: { name:'Pixiv Bookmark Sort', secret:'NRH_PIXIV_BACKUP_TOKEN', origins:['https://www.pixiv.net'] },
@@ -79,7 +74,7 @@ async function appBackupPrune(env, app, device, origin) {
 }
 async function handleAppBackup(request, env) {
   const url=new URL(request.url);
-  const m=url.pathname.match(/^\/v1\/app-backups\/(niji|or|x|pixiv)(?:\/(.*))?$/);
+  const m=url.pathname.match(/^\/v1\/app-backups\/(or|x|pixiv)(?:\/(.*))?$/);
   const type=m && APP_BACKUP_TYPES[m[1]];
   const suppliedOrigin=request.headers.get('origin')||'';
   const corsOrigin=type && type.origins.includes(suppliedOrigin)?suppliedOrigin:'';
