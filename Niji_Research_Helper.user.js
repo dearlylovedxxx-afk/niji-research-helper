@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.53
+// @version      1.0.54
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.53';
+  const VERSION = '1.0.54';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -430,6 +430,7 @@
     favoriteCloudBusy: false,
     favoriteCloudToken: '',
     favoriteCloudBackupId: '',
+    favoriteBundleVersion: 0,
     liverFavorites: [],
     settings: { ...DEFAULT_SETTINGS },
     sheet: null,
@@ -465,6 +466,24 @@
     return Array.isArray(value) ? value.filter(x => x && (x.id || x.name)).map(x => ({
       id:String(x.id || ''), name:String(x.name || '')
     })) : [];
+  }
+
+  function liverFavoriteRecordItems(value) {
+    const out=[], seen=new Set();
+    for (const x of Array.isArray(value) ? value : []) {
+      const name=String(x?.name || '').trim();
+      const val=String(x?.value || '');
+      const key=normalizedName(name) || val;
+      if (!key || seen.has(key)) continue;
+      seen.add(key); out.push({value:val,name});
+    }
+    return out;
+  }
+
+  function liverFavoriteHash(items) {
+    return JSON.stringify(liverFavoriteRecordItems(items)
+      .map(x => [x.value,x.name])
+      .sort((a,b)=>(a[0]+'\u0000'+a[1]).localeCompare(b[0]+'\u0000'+b[1])));
   }
 
   function favoriteHash(items) {
@@ -593,11 +612,13 @@
     }
     return {
       favorites:favoriteRecordItems(data.preferences.favorites),
-      revision:Math.max(0,Number(data.preferences.favoriteRevision||0))
+      liverFavorites:liverFavoriteRecordItems(data.preferences.liverFavorites),
+      revision:Math.max(0,Number(data.preferences.favoriteRevision||0)),
+      bundleVersion:Math.max(1,Number(data.preferences.favoriteBundleVersion||1))
     };
   }
 
-  function favoriteCloudPayload(items,revision) {
+  function favoriteCloudPayload(items,liverItems,revision) {
     const stores={};
     for (const name of CLOUD_STORES) stores[name]=[];
     return {
@@ -605,14 +626,16 @@
       exportedAt:new Date().toISOString(),sourceOrigin:FAV_CLOUD_ORIGIN,
       device:FAV_CLOUD_DEVICE,stores,
       preferences:{
+        favoriteBundleVersion:2,
         favorites:favoriteRecordItems(items),favoriteRevision:revision,
-        liverFavorites:[],settings:{},syncPoints:{},calibration:{}
+        liverFavorites:liverFavoriteRecordItems(liverItems),liverFavoriteRevision:revision,
+        settings:{},syncPoints:{},calibration:{}
       }
     };
   }
 
-  async function favoriteCloudUpload(items,revision,token=state.favoriteCloudToken) {
-    const payload=favoriteCloudPayload(items,revision);
+  async function favoriteCloudUpload(items,liverItems,revision,token=state.favoriteCloudToken) {
+    const payload=favoriteCloudPayload(items,liverItems,revision);
     const text=JSON.stringify(payload);
     const bytes=new TextEncoder().encode(text);
     const sha=await favoriteCloudSha(bytes);
@@ -634,22 +657,71 @@
     const item=body.backup?.id ? list.find(x=>x.id===body.backup.id) : list[0];
     if (!item) throw new Error('pCloudで保存済みお気に入り世代を確認できませんでした');
     const downloaded=await favoriteCloudFetch(item,token);
-    if (downloaded.revision!==revision || favoriteHash(downloaded.favorites)!==favoriteHash(items))
+    if (downloaded.revision!==revision ||
+        favoriteHash(downloaded.favorites)!==favoriteHash(items) ||
+        liverFavoriteHash(downloaded.liverFavorites)!==liverFavoriteHash(liverItems))
       throw new Error('pCloud保存後の読み取り照合に失敗しました');
     return {item,data:downloaded};
   }
 
   async function favoriteCloudApplyRemote(item,data,note='読込済み') {
     const clean=favoriteRecordItems(data?.favorites);
+    const cleanLivers=liverFavoriteRecordItems(data?.liverFavorites);
     const rev=Math.max(1,Number(data?.revision||0));
     await writeFavoriteLocalCache(clean,rev);
+    await GM.setValue(KEY_LIVER_FAVS,cleanLivers); // local cache only
+    state.liverFavorites=cleanLivers;
     state.favoriteCloudBackupId=String(item?.id||'');
+    state.favoriteBundleVersion=Math.max(1,Number(data?.bundleVersion||1));
     state.favoriteCloudReady=true;
     state.favoriteStorageReadable=true;
-    state.favoriteStorageStatus='☁️ pCloud '+clean.length+'件 '+note;
-    if (!isYoutubeHost()) injectChannelFavorites(true);
+    state.favoriteStorageStatus='☁️ pCloud チャンネル'+clean.length+'件・ライバー'+cleanLivers.length+'件 '+note;
+    if (!isYoutubeHost()) { injectChannelFavorites(true); injectLiverFavorites(true); }
     else { try { updateYoutubePanel(); } catch {} }
     return clean;
+  }
+
+
+  async function favoriteCloudFetchRawBackup(item,token=state.favoriteCloudToken) {
+    if (!item?.id || !item?.sha256) return null;
+    const res=await gmRequest({
+      method:'GET',url:CLOUD_URL+'/v1/backups/'+encodeURIComponent(item.id),
+      headers:{authorization:'Bearer '+token},responseType:'arraybuffer',timeout:45000
+    });
+    if (res.status!==200) return null;
+    const raw=res.response instanceof ArrayBuffer ? new Uint8Array(res.response)
+      : ArrayBuffer.isView(res.response) ? new Uint8Array(res.response.buffer,res.response.byteOffset,res.response.byteLength)
+        : new TextEncoder().encode(res.responseText||String(res.response||''));
+    if (raw.byteLength!==Number(item.size||0) || await favoriteCloudSha(raw)!==item.sha256) return null;
+    try {
+      const data=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw));
+      return data?.app==='Niji Research Helper' && data?.dbVersion===NRH_DB_VERSION ? data : null;
+    } catch { return null; }
+  }
+
+  async function recoverLiverFavoritesFromExistingPCloud(token) {
+    // First prefer any still-present local cache from the old implementation.
+    const local=liverFavoriteRecordItems(state.liverFavorites);
+    if (local.length) return {items:local,source:'旧ローカル保存'};
+
+    // Then inspect a few newest ordinary research backups. They already contained liverFavorites.
+    const res=await gmRequest({
+      method:'GET',url:CLOUD_URL+'/v1/backups',
+      headers:{authorization:'Bearer '+token,accept:'application/json'},responseType:'text',timeout:45000
+    });
+    let body={};
+    try { body=JSON.parse(res.responseText||res.response||'{}'); } catch {}
+    if (res.status<200 || res.status>=300 || !body.ok) return {items:[],source:''};
+    const rows=(Array.isArray(body.backups)?body.backups:[])
+      .filter(x=>x.device!==FAV_CLOUD_DEVICE)
+      .sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0))
+      .slice(0,6);
+    for (const row of rows) {
+      const data=await favoriteCloudFetchRawBackup(row,token).catch(()=>null);
+      const found=liverFavoriteRecordItems(data?.preferences?.liverFavorites);
+      if (found.length) return {items:found,source:'既存pCloudバックアップ'};
+    }
+    return {items:[],source:''};
   }
 
   async function favoriteCloudInitialize() {
@@ -672,7 +744,7 @@
         state.favoriteCloudReady=true;
         state.favoriteCloudBackupId='';
         if (state.favorites.length) {
-          await persistFavorites(state.favorites,{initialSeed:true});
+          await persistFavorites(state.favorites,{liverItems:state.liverFavorites,initialSeed:true});
         } else {
           state.favoriteStorageStatus='☁️ pCloudお気に入り 0件（初回保存待ち）';
           if (!isYoutubeHost()) injectChannelFavorites(true);
@@ -680,7 +752,20 @@
         return;
       }
       const data=await favoriteCloudFetch(latest,token);
-      await favoriteCloudApplyRemote(latest,data,'から読込済み');
+      if (data.bundleVersion>=2) {
+        await favoriteCloudApplyRemote(latest,data,'から読込済み');
+      } else {
+        // v1.0.53 dedicated favorite backup carried channel favorites only.
+        // Recover old liver favorites once, then immediately migrate to bundle v2.
+        const recovered=await recoverLiverFavoritesFromExistingPCloud(token);
+        const livers=recovered.items;
+        state.favoriteCloudReady=true;
+        state.favoriteCloudBackupId=String(latest.id||'');
+        state.favoriteBundleVersion=1;
+        await favoriteCloudApplyRemote(latest,{...data,liverFavorites:livers},'旧形式から移行中');
+        const migrated=await persistFavorites(data.favorites,{liverItems:livers,initialSeed:false});
+        if (recovered.source) toast('☁️ お気に入りライバーを'+recovered.source+'から回収してpCloudへ移行しました',5000);
+      }
     } catch (e) {
       state.favoriteCloudReady=false;
       state.favoriteStorageStatus='⚠️ pCloud読込失敗：'+String(e?.message||e).slice(0,110)+'（ローカルキャッシュは変更しません）';
@@ -689,7 +774,7 @@
     }
   }
 
-  async function persistFavorites(items,{initialSeed=false}={}) {
+  async function persistFavorites(items,{liverItems=state.liverFavorites,initialSeed=false}={}) {
     if (state.favoriteCloudBusy) throw new Error('pCloudお気に入り同期中です');
     if (!state.favoriteCloudToken) throw new Error('pCloud未接続のためお気に入りを変更できません');
     if (!state.favoriteCloudReady && !initialSeed) throw new Error('pCloudのお気に入り読込が完了していません');
@@ -716,8 +801,9 @@
         }
       }
       const clean=favoriteRecordItems(items);
+      const cleanLivers=liverFavoriteRecordItems(liverItems);
       const revision=Math.max(Date.now(),Number(state.favoriteRevision||0)+1);
-      const saved=await favoriteCloudUpload(clean,revision,token);
+      const saved=await favoriteCloudUpload(clean,cleanLivers,revision,token);
       await favoriteCloudApplyRemote(saved.item,saved.data,'保存・再読込確認済み');
       return state.favorites;
     } catch (e) {
@@ -727,6 +813,10 @@
       state.favoriteCloudBusy=false;
       if (!isYoutubeHost()) injectChannelFavorites(true);
     }
+  }
+
+  async function persistLiverFavorites(liverItems) {
+    return persistFavorites(state.favorites,{liverItems});
   }
 
   function assertFavoriteStorageReadable() {
@@ -813,8 +903,9 @@
       exportedAt:new Date().toISOString(), sourceOrigin:location.origin,
       device:cloudDevice(), stores,
       // The Holodex API key and cloud token are deliberately NEVER uploaded.
-      preferences: { favorites:state.favorites, favoriteRevision:state.favoriteRevision,
-        liverFavorites:state.liverFavorites,
+      preferences: { favoriteBundleVersion:2,
+        favorites:state.favorites, favoriteRevision:state.favoriteRevision,
+        liverFavorites:state.liverFavorites, liverFavoriteRevision:state.favoriteRevision,
         settings:state.settings, syncPoints:state.syncPoints, calibration:state.calibration } };
   }
 
@@ -996,9 +1087,8 @@
         return out;
       };
       const mergedFavorites = mergeFavs(state.favorites, pref.favorites, x => x?.id || x?.name);
-      state.liverFavorites = mergeFavs(state.liverFavorites, pref.liverFavorites, x => x?.value || x?.name);
-      await persistFavorites(mergedFavorites,{markCloud:false});
-      await GM.setValue(KEY_LIVER_FAVS, state.liverFavorites);
+      const mergedLiverFavorites = mergeFavs(state.liverFavorites, pref.liverFavorites, x => x?.value || x?.name);
+      await persistFavorites(mergedFavorites,{liverItems:mergedLiverFavorites});
       // Add missing sync data; never overwrite edits made on this browser.
       state.syncPoints = { ...(pref.syncPoints || {}), ...(state.syncPoints || {}) };
       state.calibration = { ...(pref.calibration || {}), ...(state.calibration || {}) };
@@ -2663,7 +2753,25 @@
       }
       if (score > bestScore) { bestScore = score; best = sel; }
     }
-    return bestScore >= 8 ? best : null;
+    if (bestScore >= 8) return best;
+
+    // Fallback for comment2434 layouts where the visible "ライバー名:" label and
+    // select are separated by wrappers (Select2/mobile layout).
+    for (const label of $('label,div,span,p')) {
+      const text=String(label.textContent||'').trim();
+      if (!/^ライバー名[:：]?$/.test(text)) continue;
+      const scope=label.parentElement || label;
+      const candidates=[
+        ...scope.querySelectorAll?.('select') || [],
+        ...scope.parentElement?.querySelectorAll?.('select') || []
+      ];
+      const found=candidates.find(sel => {
+        const context=(sel.id+' '+sel.name+' '+(sel.getAttribute('aria-label')||'')).toLowerCase();
+        return !/channel|exclude/.test(context);
+      });
+      if (found) return found;
+    }
+    return null;
   }
 
   function findOptionForLiver(select, favorite) {
@@ -2679,18 +2787,20 @@
   }
 
   async function addSelectedLiverFavorite(select) {
+    if (!assertFavoriteStorageReadable()) return;
     const chosen = [...(select?.selectedOptions || [])].filter(opt => String(opt.value || '') !== '');
     if (!chosen.length) { toast('先に「ライバー名」で登録したい人を選んでください'); return; }
     let added = 0;
+    const next=liverFavoriteRecordItems(state.liverFavorites);
     for (const opt of chosen) {
       const name = String(opt.textContent || '').trim();
-      if (!name || state.liverFavorites.some(f => normalizedName(f.name) === normalizedName(name))) continue;
-      state.liverFavorites.push({ value:String(opt.value), name });
+      if (!name || next.some(f => normalizedName(f.name) === normalizedName(name))) continue;
+      next.push({ value:String(opt.value), name });
       added++;
     }
-    if (added) await gmSet(KEY_LIVER_FAVS, state.liverFavorites);
+    if (added) await persistLiverFavorites(next);
     injectLiverFavorites(true);
-    toast(added ? `${added}人をお気に入りライバーに追加しました` : '選択中のライバーは登録済みです');
+    toast(added ? `${added}人をお気に入りライバーに追加してpCloudへ保存しました` : '選択中のライバーは登録済みです');
   }
 
   function injectLiverFavorites(force = false) {
@@ -2715,7 +2825,9 @@
       <div class="npf-channel-favs-head">
         <div class="npf-channel-favs-title">★ お気に入りライバー</div>
         <button type="button" class="npf-channel-fav-add npf-liver-fav-add">☆ 選択中を登録</button>
+        <button type="button" class="npf-liver-fav-refresh">☁️ 再読込</button>
       </div>
+      <div class="npf-channel-save-status">${escapeHtml(state.favoriteStorageStatus || '☁️ pCloud状態確認中')}</div>
       <div class="npf-channel-favs-list">
         ${valid.length ? valid.map(({fav, option}) => `
           <span class="npf-liver-fav-item">
@@ -2728,7 +2840,10 @@
       </div>`;
     target.insertAdjacentElement('beforebegin', box);
     $('.npf-liver-fav-add', box)?.addEventListener('click', () => {
-      void addSelectedLiverFavorite(select).catch(err => toast(`登録失敗: ${err?.message || err}`));
+      void addSelectedLiverFavorite(select).catch(err => toast(`登録失敗: ${err?.message || err}`,5000));
+    });
+    $('.npf-liver-fav-refresh', box)?.addEventListener('click', () => {
+      void favoriteCloudInitialize().catch(err => toast(`pCloud再読込失敗: ${err?.message || err}`,5000));
     });
     $$('.npf-liver-chip', box).forEach(btn => btn.addEventListener('click', () => {
       const fav = state.liverFavorites.find(f => normalizedName(f.name) === btn.dataset.liverName);
@@ -2739,12 +2854,12 @@
       notifySelectChanged(select);
       setTimeout(() => injectLiverFavorites(true), 40);
     }));
-    $$('.npf-liver-remove', box).forEach(btn => btn.addEventListener('click', async () => {
+    $('.npf-liver-remove', box).forEach(btn => btn.addEventListener('click', async () => {
+      if (!assertFavoriteStorageReadable()) return;
       const name = btn.dataset.liverName;
-      const previous = state.liverFavorites;
-      state.liverFavorites = previous.filter(f => normalizedName(f.name) !== name);
-      try { await gmSet(KEY_LIVER_FAVS, state.liverFavorites); }
-      catch (err) { state.liverFavorites = previous; toast(`削除失敗: ${err?.message || err}`); }
+      const next=state.liverFavorites.filter(f => normalizedName(f.name) !== name);
+      try { await persistLiverFavorites(next); }
+      catch (err) { toast(`削除失敗: ${err?.message || err}`,5000); }
       injectLiverFavorites(true);
     }));
     if (select.dataset.npfLiverFavoriteBound !== '1') {
