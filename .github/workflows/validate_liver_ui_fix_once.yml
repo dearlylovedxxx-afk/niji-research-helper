@@ -1,0 +1,19 @@
+name: Validate liver UI fix once
+on:
+  push:
+    paths:
+      - '.github/workflows/validate_liver_ui_fix_once.yml'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate
+        run: |
+          node --check Niji_Research_Helper.user.js
+          grep -q "// @version      1.0.55" Niji_Research_Helper.user.js
+          grep -q "const modeSelect=selects.find" Niji_Research_Helper.user.js
+          grep -q "box.previousElementSibling === target" Niji_Research_Helper.user.js
+          git diff --check
