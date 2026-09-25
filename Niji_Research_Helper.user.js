@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.50
+// @version      1.0.51
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.50';
+  const VERSION = '1.0.51';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -520,7 +520,7 @@
     state.favoriteRevision=rev;
     const localOk=/(^|\.)comment2434\.com$/i.test(location.hostname)
       ? favoriteLocalRecordRead()?.rev===rev : true;
-    state.favoriteStorageStatus=`💾 ${clean.length}件保存済み${localOk?'':'（端末予備のみ未確認）'}`;
+    state.favoriteStorageStatus=`💾 ${clean.length}件保存済み${/(^|\.)comment2434\.com$/i.test(location.hostname) ? (localOk?'（3重保存）':'（GM2重保存／端末予備未確認）') : '（GM2重保存）'}`;
 
     // A favorite changed on comment2434 cannot upload the YouTube IndexedDB
     // there, so always flag the next YouTube visit to create a fresh pCloud generation.
@@ -580,7 +580,7 @@
 
         return {
           ok:true,value:best.items,rev:finalRev,recovered:best.source!=='GM本体'||conflicting,
-          status:`💾 ${best.items.length}件保存済み${best.source==='GM本体'&&!conflicting?'':'（自動復旧）'}`
+          status:`💾 ${best.items.length}件保存済み${/(^|\.)comment2434\.com$/i.test(location.hostname)?'（3重保存）':'（GM2重保存）'}${best.source==='GM本体'&&!conflicting?'':'・自動復旧'}`
         };
       } catch (e) {
         lastError=e;
@@ -2250,8 +2250,8 @@
       btn.addEventListener('click', async () => {
         if (!assertFavoriteStorageReadable()) return;
         const id = btn.dataset.id;
-        state.favorites = state.favorites.filter(f => f.id !== id);
-        await persistFavorites(state.favorites);
+        const nextFavorites = state.favorites.filter(f => f.id !== id);
+        await persistFavorites(nextFavorites);
         injectChannelFavorites(true);
         openSettings();
       });
@@ -2363,21 +2363,22 @@
     }
 
     let added = 0;
+    const nextFavorites = state.favorites.map(f => ({...f}));
     for (const option of selected) {
       const fav = favoriteFromOption(option);
       if (!fav?.name) continue;
 
-      const exists = state.favorites.some(f =>
+      const exists = nextFavorites.some(f =>
         (fav.id && f.id === fav.id) ||
         normalizedName(f.name || '') === normalizedName(fav.name)
       );
       if (!exists) {
-        state.favorites.push(fav);
+        nextFavorites.push(fav);
         added++;
       }
     }
 
-    await persistFavorites(state.favorites);
+    await persistFavorites(nextFavorites);
     injectChannelFavorites(true);
     toast(added ? `${added}チャンネルをお気に入りに追加しました` : '選択中のチャンネルは登録済みです');
   }
@@ -2407,11 +2408,13 @@
     let box = document.querySelector('.npf-channel-favs');
     if (box && !force && box.dataset.forSelect === (select.id || select.name || 'channel')) {
       // 選択状態だけ更新
-      $$('.npf-channel-chip', box).forEach(btn => {
+      $('.npf-channel-chip', box).forEach(btn => {
         const fav = state.favorites.find(f => String(f.id) === btn.dataset.favId);
         const opt = findOptionForFavorite(select, fav);
         btn.classList.toggle('selected', !!opt?.selected);
       });
+      const saveStatus=$('.npf-channel-save-status',box);
+      if(saveStatus) saveStatus.textContent=state.favoriteStorageStatus || `💾 ${state.favorites.length}件保存済み`;
       return;
     }
 
@@ -2454,7 +2457,7 @@
     target.insertAdjacentElement('beforebegin', box);
 
     $('.npf-channel-fav-add', box)?.addEventListener('click', () => {
-      void addSelectedChannelsToFavorites(select);
+      void addSelectedChannelsToFavorites(select).catch(err => toast(`お気に入り保存失敗: ${err?.message || err}`,5000));
     });
 
     $$('.npf-channel-chip', box).forEach(btn => {
@@ -2768,14 +2771,11 @@
     if (!id) return;
 
     const exists = state.favorites.some(f => f.id === id);
-    if (exists) {
-      state.favorites = state.favorites.filter(f => f.id !== id);
-      toast(`${name} をお気に入りから外しました`);
-    } else {
-      state.favorites.push({ id, name });
-      toast(`${name} をお気に入りに追加しました`);
-    }
-    await persistFavorites(state.favorites);
+    const nextFavorites = exists
+      ? state.favorites.filter(f => f.id !== id)
+      : [...state.favorites, { id, name }];
+    await persistFavorites(nextFavorites);
+    toast(exists ? `${name} をお気に入りから外して保存しました` : `${name} をお気に入りに追加して保存しました`);
     if (!isYoutubeHost()) injectChannelFavorites(true);
 
     if (button) button.textContent = state.favorites.some(f => f.id === id) ? '★ お気に入り' : '☆ お気に入り';
