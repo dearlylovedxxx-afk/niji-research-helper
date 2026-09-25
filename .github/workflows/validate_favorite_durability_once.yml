@@ -1,0 +1,21 @@
+name: Validate favorite durability once
+on:
+  push:
+    paths:
+      - '.github/workflows/validate_favorite_durability_once.yml'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate userscript
+        run: |
+          node --check Niji_Research_Helper.user.js
+          grep -q "// @version      1.0.51" Niji_Research_Helper.user.js
+          grep -q "npf_favorites_record_v2" Niji_Research_Helper.user.js
+          grep -q "3重保存" Niji_Research_Helper.user.js
+          grep -q "persistFavorites(nextFavorites)" Niji_Research_Helper.user.js
+          grep -q "CLOUD_PENDING_KEY, true" Niji_Research_Helper.user.js
+          git diff --check
