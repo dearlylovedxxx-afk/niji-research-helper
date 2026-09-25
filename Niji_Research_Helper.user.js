@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.48
+// @version      1.0.49
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,11 +52,12 @@
       })()
     : null;
 
-  const VERSION = '1.0.48';
+  const VERSION = '1.0.49';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
   const KEY_FAVS = 'npf_favorites';
+  const KEY_FAVS_SHADOW = 'npf_favorites_shadow_v1'; // local safety copy; never replaces cloud generations
   const KEY_LIVER_FAVS = 'npf_liver_favorites_v1'; // 検索フォーム専用・既存のチャンネルお気に入りとは別
   const KEY_SETTINGS = 'npf_settings';
   const KEY_SYNC = 'npf_sync_points';
@@ -415,6 +416,7 @@
   const state = {
     apiKey: '',
     favorites: [],
+    favoriteStorageReadable: true,
     liverFavorites: [],
     settings: { ...DEFAULT_SETTINGS },
     sheet: null,
@@ -439,10 +441,57 @@
   async function gmSet(key, value) {
     try {
       await GM.setValue(key, value);
+      // Keep an independent local safety copy of channel favorites. This is
+      // intentionally separate from pCloud and from the main GM key.
+      if (key === KEY_FAVS && Array.isArray(value)) {
+        await GM.setValue(KEY_FAVS_SHADOW, value);
+      }
       if ([KEY_FAVS, KEY_LIVER_FAVS, KEY_SETTINGS, KEY_SYNC, KEY_CAL].includes(key)) cloudMarkChanged();
     } catch (e) {
       console.warn('[NPF] GM.setValue failed', e);
+      throw e;
     }
+  }
+
+  async function loadFavoritesSafely() {
+    const sentinel = '__NPF_FAVS_MISSING__';
+    let lastError = null;
+    for (const wait of [0, 120, 420, 900]) {
+      if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+      try {
+        const raw = await GM.getValue(KEY_FAVS, sentinel);
+        const shadow = await GM.getValue(KEY_FAVS_SHADOW, []);
+        if (raw === sentinel) {
+          // A pre-v1.0.49 install has no shadow yet. Only recover from a
+          // non-empty shadow; otherwise this is a legitimate empty state.
+          if (Array.isArray(shadow) && shadow.length) {
+            await GM.setValue(KEY_FAVS, shadow);
+            return { ok:true, value:shadow, recovered:true };
+          }
+          return { ok:true, value:[], missing:true };
+        }
+        if (!Array.isArray(raw)) throw new Error('お気に入り保存値の形式が配列ではありません');
+        // If the main key is unexpectedly empty while a non-empty safety copy
+        // exists, prefer the safety copy and repair the main key.
+        if (!raw.length && Array.isArray(shadow) && shadow.length) {
+          await GM.setValue(KEY_FAVS, shadow);
+          return { ok:true, value:shadow, recovered:true };
+        }
+        // Seed/update shadow only after a successful read.
+        await GM.setValue(KEY_FAVS_SHADOW, raw);
+        return { ok:true, value:raw };
+      } catch (e) {
+        lastError = e;
+        console.warn('[NPF] favorite storage read retry failed', e);
+      }
+    }
+    return { ok:false, value:[], error:lastError };
+  }
+
+  function assertFavoriteStorageReadable() {
+    if (state.favoriteStorageReadable) return true;
+    toast('⚠️ お気に入り保存領域の読み込みに失敗中です。上書き防止のため変更を停止しています。ページを再読み込みしてください', 5000);
+    return false;
   }
 
   function gmRequest(details) {
@@ -2096,6 +2145,7 @@
 
     $$('.npf-remove-fav', state.sheet).forEach(btn => {
       btn.addEventListener('click', async () => {
+        if (!assertFavoriteStorageReadable()) return;
         const id = btn.dataset.id;
         state.favorites = state.favorites.filter(f => f.id !== id);
         await gmSet(KEY_FAVS, state.favorites);
@@ -2202,7 +2252,7 @@
   }
 
   async function addSelectedChannelsToFavorites(select) {
-    if (!select) return;
+    if (!select || !assertFavoriteStorageReadable()) return;
     const selected = [...select.selectedOptions].filter(o => o.value !== '');
     if (!selected.length) {
       toast('先に「チャンネル名」で登録したいチャンネルを選んでください');
@@ -2291,7 +2341,7 @@
                 title="${option ? 'このチャンネルを選択' : '保存済み。現在のチャンネル候補にはまだ読み込まれていません'}"
               >${escapeHtml(fav.name || option?.textContent || fav.id || '')}${option ? '' : '（候補未読込）'}</button>
             `).join('')
-          : `<span class="npf-channel-favs-empty">保存済みのお気に入りチャンネルは0件です。</span>`
+          : `<span class="npf-channel-favs-empty">${state.favoriteStorageReadable ? '保存済みのお気に入りチャンネルは0件です。' : '⚠️ お気に入り保存領域を読み込めません。上書き防止中です。'}</span>`
         }
       </div>
       ${unresolvedCount ? `<div class="npf-channel-favs-note">${unresolvedCount}件は保存済みですが、現在のチャンネル候補に未読込です。候補が読み込まれると自動で有効になります。</div>` : ''}
@@ -2607,6 +2657,7 @@
   }
 
   async function toggleFavorite(video, button = null) {
+    if (!assertFavoriteStorageReadable()) return;
     const id = channelId(video);
     const name = channelName(video);
     if (!id) return;
@@ -7716,7 +7767,10 @@ e.el.classList.toggle('npf-r-hidden', !show);
   if (mobileYoutubeBoot) startYoutubeHelper();
 
   state.apiKey = await gmGet(KEY_API, '');
-  state.favorites = await gmGet(KEY_FAVS, []);
+  const favoriteLoad = await loadFavoritesSafely();
+  state.favoriteStorageReadable = favoriteLoad.ok;
+  state.favorites = favoriteLoad.value;
+  if (favoriteLoad.recovered) console.info('[Niji Research Helper] channel favorites recovered from local safety copy');
   state.liverFavorites = await gmGet(KEY_LIVER_FAVS, []);
   state.settings = { ...DEFAULT_SETTINGS, ...(await gmGet(KEY_SETTINGS, DEFAULT_SETTINGS)) };
   research.autoChannelKeys = new Set(Array.isArray(state.settings.autoResearchChannels)
