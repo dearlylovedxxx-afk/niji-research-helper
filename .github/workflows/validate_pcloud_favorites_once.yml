@@ -1,0 +1,21 @@
+name: Validate pCloud favorites once
+on:
+  push:
+    paths:
+      - '.github/workflows/validate_pcloud_favorites_once.yml'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate scripts
+        run: |
+          node --check Niji_Research_Helper.user.js
+          node --check cloud-backup/multi_app_gateway_extension.js
+          grep -q "// @version      1.0.52" Niji_Research_Helper.user.js
+          grep -q "/v1/app-backups/niji" Niji_Research_Helper.user.js
+          grep -q "niji: { name:'Niji Research Helper Favorites'" cloud-backup/multi_app_gateway_extension.js
+          grep -q "niji|or|x|pixiv" cloud-backup/multi_app_gateway_extension.js
+          git diff --check
