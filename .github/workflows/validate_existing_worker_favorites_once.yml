@@ -1,0 +1,21 @@
+name: Validate existing-worker favorites once
+on:
+  push:
+    paths:
+      - '.github/workflows/validate_existing_worker_favorites_once.yml'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate
+        run: |
+          node --check Niji_Research_Helper.user.js
+          node --check cloud-backup/multi_app_gateway_extension.js
+          grep -q "// @version      1.0.53" Niji_Research_Helper.user.js
+          grep -q "nrh-favorites-global" Niji_Research_Helper.user.js
+          ! grep -q "/v1/app-backups/niji" Niji_Research_Helper.user.js
+          ! grep -q "niji: { name:'Niji Research Helper Favorites'" cloud-backup/multi_app_gateway_extension.js
+          git diff --check
