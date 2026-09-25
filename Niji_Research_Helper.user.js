@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.52
+// @version      1.0.53
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.52';
+  const VERSION = '1.0.53';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -61,11 +61,10 @@
   const KEY_FAVS_REV = 'npf_favorites_revision_v1';
   const KEY_FAVS_RECORD = 'npf_favorites_record_v2'; // versioned GM safety record
   const LS_FAVS_RECORD = 'npf_favorites_record_v2'; // local cache only; pCloud is authoritative
-  const FAV_CLOUD_PATH = '/v1/app-backups/niji';
-  const FAV_CLOUD_APP = 'Niji Research Helper Favorites';
-  const FAV_CLOUD_FORMAT = 1;
-  const FAV_CLOUD_CHUNK = 3 * 1024 * 1024;
-  const FAV_CLOUD_MAX_PARTS = 4;
+  // Favorites reuse the EXISTING /v1/backups gateway unchanged.
+  // A dedicated logical device keeps favorite generations separate from research DB backups.
+  const FAV_CLOUD_DEVICE = 'nrh-favorites-global';
+  const FAV_CLOUD_ORIGIN = 'https://www.youtube.com';
   const KEY_LIVER_FAVS = 'npf_liver_favorites_v1'; // 検索フォーム専用・既存のチャンネルお気に入りとは別
   const KEY_SETTINGS = 'npf_settings';
   const KEY_SYNC = 'npf_sync_points';
@@ -554,71 +553,93 @@
       .map(b=>b.toString(16).padStart(2,'0')).join('');
   }
 
-  function favoriteCloudB64(bytes) {
-    let out='';
-    for (let i=0;i<bytes.length;i+=32768) out+=String.fromCharCode(...bytes.subarray(i,i+32768));
-    return btoa(out);
-  }
-
-  function favoriteCloudFromB64(value) {
-    const raw=atob(String(value||''));
-    return Uint8Array.from(raw,c=>c.charCodeAt(0));
-  }
-
-  async function favoriteCloudRequest(method, path='', body=null, token=state.favoriteCloudToken) {
+  async function favoriteCloudList(token=state.favoriteCloudToken) {
     if (!token) throw new Error('pCloudバックアップ専用トークンが未設定です');
     const res=await gmRequest({
-      method, url:CLOUD_URL+FAV_CLOUD_PATH+path,
-      headers:{authorization:'Bearer '+token,'x-source-origin':location.origin,accept:'application/json',
-        ...(body===null?{}:{'content-type':'application/json'})},
-      ...(body===null?{}:{data:JSON.stringify(body)}), responseType:'text', timeout:45000
+      method:'GET',
+      url:CLOUD_URL+'/v1/backups?device='+encodeURIComponent(FAV_CLOUD_DEVICE),
+      headers:{authorization:'Bearer '+token,accept:'application/json'},
+      responseType:'text',timeout:45000
     });
-    let data;
-    try { data=JSON.parse(res.responseText||res.response||'{}'); }
+    let body;
+    try { body=JSON.parse(res.responseText||res.response||'{}'); }
     catch { throw new Error('pCloud中継Workerの応答を読み取れません'); }
-    if (res.status<200 || res.status>=300 || !data.ok) {
-      const detail=String(data.error||'通信失敗');
-      if (res.status===404 && detail==='app_not_found')
-        throw new Error('Worker更新が必要です（nijiお気に入り同期口が未導入）');
-      throw new Error('pCloud同期 HTTP '+res.status+'：'+detail);
-    }
-    return data;
-  }
-
-  async function favoriteCloudList(token=state.favoriteCloudToken) {
-    const data=await favoriteCloudRequest('GET','',null,token);
-    const rows=Array.isArray(data.backups)?data.backups:[];
-    return rows.slice().sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0));
+    if (res.status<200 || res.status>=300 || !body.ok)
+      throw new Error('pCloud同期 HTTP '+res.status+'：'+String(body.error||'取得失敗'));
+    return Array.isArray(body.backups)?body.backups:[];
   }
 
   async function favoriteCloudFetch(item, token=state.favoriteCloudToken) {
-    if (!item || !item.id || !Number.isInteger(Number(item.partCount)) || Number(item.partCount)<1 || Number(item.partCount)>FAV_CLOUD_MAX_PARTS)
-      throw new Error('pCloudお気に入りバックアップの分割情報が不正です');
-    const size=Number(item.size||0);
-    if (!Number.isSafeInteger(size) || size<1 || size>FAV_CLOUD_CHUNK*FAV_CLOUD_MAX_PARTS)
-      throw new Error('pCloudお気に入りバックアップのサイズが不正です');
-    const out=new Uint8Array(size);
-    let offset=0;
-    for (let i=0;i<Number(item.partCount);i++) {
-      const part=await favoriteCloudRequest('GET','/'+encodeURIComponent(item.id)+'/parts/'+i,null,token);
-      const bytes=favoriteCloudFromB64(part.base64);
-      if (await favoriteCloudSha(bytes)!==part.sha256 || offset+bytes.length>out.length)
-        throw new Error('pCloudお気に入りバックアップの分割チェックに失敗しました');
-      out.set(bytes,offset); offset+=bytes.length;
-    }
-    if (offset!==out.length || await favoriteCloudSha(out)!==item.sha256)
-      throw new Error('pCloudお気に入りバックアップの整合性確認に失敗しました');
-    let parsed;
-    try { parsed=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(out)); }
+    if (!token) throw new Error('pCloudバックアップ専用トークンが未設定です');
+    if (!item?.id || !item?.sha256) throw new Error('お気に入りバックアップ情報が不正です');
+    const res=await gmRequest({
+      method:'GET',url:CLOUD_URL+'/v1/backups/'+encodeURIComponent(item.id),
+      headers:{authorization:'Bearer '+token},responseType:'arraybuffer',timeout:45000
+    });
+    if (res.status!==200) throw new Error('pCloud同期 HTTP '+res.status);
+    const raw=res.response instanceof ArrayBuffer ? new Uint8Array(res.response)
+      : ArrayBuffer.isView(res.response) ? new Uint8Array(res.response.buffer,res.response.byteOffset,res.response.byteLength)
+        : new TextEncoder().encode(res.responseText||String(res.response||''));
+    if (raw.byteLength!==Number(item.size||0)) throw new Error('pCloudお気に入りバックアップのサイズが一致しません');
+    if (await favoriteCloudSha(raw)!==item.sha256) throw new Error('pCloudお気に入りバックアップのSHA-256が一致しません');
+    let data;
+    try { data=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)); }
     catch { throw new Error('pCloudお気に入りバックアップのJSONが不正です'); }
-    if (parsed?.app!==FAV_CLOUD_APP || parsed?.format!==FAV_CLOUD_FORMAT || !Array.isArray(parsed?.favorites))
+    if (data?.app!=='Niji Research Helper' || data?.dbVersion!==NRH_DB_VERSION ||
+        data?.device!==FAV_CLOUD_DEVICE || data?.sourceOrigin!==FAV_CLOUD_ORIGIN ||
+        CLOUD_STORES.some(name=>!Array.isArray(data?.stores?.[name])) ||
+        !Array.isArray(data?.preferences?.favorites)) {
       throw new Error('pCloudお気に入りバックアップの形式が違います');
-    parsed.favorites=favoriteRecordItems(parsed.favorites);
-    parsed.revision=Math.max(0,Number(parsed.revision||0));
-    return parsed;
+    }
+    return {
+      favorites:favoriteRecordItems(data.preferences.favorites),
+      revision:Math.max(0,Number(data.preferences.favoriteRevision||0))
+    };
   }
 
-  async function favoriteCloudApplyRemote(item, data, note='同期済み') {
+  function favoriteCloudPayload(items,revision) {
+    const stores={};
+    for (const name of CLOUD_STORES) stores[name]=[];
+    return {
+      app:'Niji Research Helper',version:VERSION,dbVersion:NRH_DB_VERSION,
+      exportedAt:new Date().toISOString(),sourceOrigin:FAV_CLOUD_ORIGIN,
+      device:FAV_CLOUD_DEVICE,stores,
+      preferences:{
+        favorites:favoriteRecordItems(items),favoriteRevision:revision,
+        liverFavorites:[],settings:{},syncPoints:{},calibration:{}
+      }
+    };
+  }
+
+  async function favoriteCloudUpload(items,revision,token=state.favoriteCloudToken) {
+    const payload=favoriteCloudPayload(items,revision);
+    const text=JSON.stringify(payload);
+    const bytes=new TextEncoder().encode(text);
+    const sha=await favoriteCloudSha(bytes);
+    const res=await gmRequest({
+      method:'POST',url:CLOUD_URL+'/v1/backups',
+      headers:{
+        authorization:'Bearer '+token,accept:'application/json','content-type':'application/json',
+        'x-nrh-device':FAV_CLOUD_DEVICE,'x-nrh-origin':FAV_CLOUD_ORIGIN,
+        'x-nrh-sha256':sha,'x-nrh-version':VERSION
+      },
+      data:text,responseType:'text',timeout:45000
+    });
+    let body;
+    try { body=JSON.parse(res.responseText||res.response||'{}'); }
+    catch { throw new Error('pCloud中継Workerの保存応答を読み取れません'); }
+    if (res.status<200 || res.status>=300 || !body.ok)
+      throw new Error('pCloud保存 HTTP '+res.status+'：'+String(body.error||'保存失敗'));
+    const list=await favoriteCloudList(token);
+    const item=body.backup?.id ? list.find(x=>x.id===body.backup.id) : list[0];
+    if (!item) throw new Error('pCloudで保存済みお気に入り世代を確認できませんでした');
+    const downloaded=await favoriteCloudFetch(item,token);
+    if (downloaded.revision!==revision || favoriteHash(downloaded.favorites)!==favoriteHash(items))
+      throw new Error('pCloud保存後の読み取り照合に失敗しました');
+    return {item,data:downloaded};
+  }
+
+  async function favoriteCloudApplyRemote(item,data,note='読込済み') {
     const clean=favoriteRecordItems(data?.favorites);
     const rev=Math.max(1,Number(data?.revision||0));
     await writeFavoriteLocalCache(clean,rev);
@@ -646,7 +667,8 @@
       }
       state.favoriteCloudToken=token;
       const list=await favoriteCloudList(token);
-      if (!list.length) {
+      const latest=list[0]||null;
+      if (!latest) {
         state.favoriteCloudReady=true;
         state.favoriteCloudBackupId='';
         if (state.favorites.length) {
@@ -657,7 +679,6 @@
         }
         return;
       }
-      const latest=list[0];
       const data=await favoriteCloudFetch(latest,token);
       await favoriteCloudApplyRemote(latest,data,'から読込済み');
     } catch (e) {
@@ -678,8 +699,8 @@
     if (!isYoutubeHost()) injectChannelFavorites(true);
     try {
       const token=state.favoriteCloudToken;
-      const before=await favoriteCloudList(token);
-      const latest=before[0]||null;
+      const list=await favoriteCloudList(token);
+      const latest=list[0]||null;
       if (!initialSeed) {
         const expected=String(state.favoriteCloudBackupId||'');
         const actual=String(latest?.id||'');
@@ -696,27 +717,8 @@
       }
       const clean=favoriteRecordItems(items);
       const revision=Math.max(Date.now(),Number(state.favoriteRevision||0)+1);
-      const payload={app:FAV_CLOUD_APP,format:FAV_CLOUD_FORMAT,favorites:clean,revision,
-        savedAt:new Date().toISOString()};
-      const bytes=new TextEncoder().encode(JSON.stringify(payload));
-      const count=Math.ceil(bytes.length/FAV_CLOUD_CHUNK);
-      if (!count || count>FAV_CLOUD_MAX_PARTS) throw new Error('お気に入りデータが大きすぎます');
-      const totalSha=await favoriteCloudSha(bytes);
-      const id=crypto.randomUUID();
-      const dev=cloudDevice();
-      for (let i=0;i<count;i++) {
-        const part=bytes.subarray(i*FAV_CLOUD_CHUNK,Math.min(bytes.length,(i+1)*FAV_CLOUD_CHUNK));
-        await favoriteCloudRequest('POST','/parts',{id,index:i,count,device:dev,origin:location.origin,
-          totalSha,partSha:await favoriteCloudSha(part),base64:favoriteCloudB64(part)},token);
-      }
-      await favoriteCloudRequest('POST','/commit',{id,count,device:dev,origin:location.origin,totalSha},token);
-      const after=await favoriteCloudList(token);
-      const saved=after.find(x=>x.id===id);
-      if (!saved) throw new Error('pCloudで保存済み世代を確認できませんでした');
-      const downloaded=await favoriteCloudFetch(saved,token);
-      if (downloaded.revision!==revision || favoriteHash(downloaded.favorites)!==favoriteHash(clean))
-        throw new Error('pCloud保存後の読み取り照合に失敗しました');
-      await favoriteCloudApplyRemote(saved,downloaded,'保存・再読込確認済み');
+      const saved=await favoriteCloudUpload(clean,revision,token);
+      await favoriteCloudApplyRemote(saved.item,saved.data,'保存・再読込確認済み');
       return state.favorites;
     } catch (e) {
       if (!state.favoriteStorageStatus.includes('再読込済み')) state.favoriteStorageStatus=previousStatus;
@@ -925,6 +927,7 @@
       await GM.setValue(CLOUD_PENDING_KEY, true);
       if (input) input.value = '';
       cloudUpdateUi();
+      await favoriteCloudInitialize();
       await cloudBackup(true);
     } catch (e) {
       cloud.token = previous;
@@ -936,6 +939,8 @@
   async function cloudDisable() {
     if (!confirm('この端末の自動バックアップを停止しますか？ pCloudのバックアップとローカルDBは削除されません。')) return;
     cloud.enabled = false; cloud.token = ''; cloud.dirty = false;
+    state.favoriteCloudToken = ''; state.favoriteCloudReady = false;
+    state.favoriteStorageStatus = '☁️ pCloud未接続';
     clearTimeout(cloud.timer);
     cloud.status = '自動バックアップは停止中。クラウド上のデータは残っています';
     await GM.setValue(CLOUD_CONFIG_KEY, { enabled:false, token:'', lastSavedAt:0 });
@@ -1075,7 +1080,7 @@
       const result = await cloudRequest('GET', '/v1/backups');
       list.replaceChildren();
       if (!result.backups?.length) { list.textContent = 'まだクラウドバックアップがありません'; return; }
-      for (const item of result.backups) {
+      for (const item of result.backups.filter(x => x.device !== FAV_CLOUD_DEVICE)) {
         const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'npf-r-btn';
         btn.style.cssText = 'display:block;width:100%;text-align:left;margin:6px 0;white-space:normal;';
         btn.textContent = `📥 ${item.device} / ${new Date(item.createdAt).toLocaleString('ja-JP')} (${(item.size/1024/1024).toFixed(1)} MB)`;
