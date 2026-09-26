@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.5.6
-// @description  既存の検索調査結果をブクマ順・新着順で表示。投稿日フィルターと期間を検索条件に反映。小説対応。
+// @version      0.5.7
+// @description  既存の検索調査結果をブクマ順・新着順で表示。投稿日フィルターと期間を検索条件に反映。小説TXT編集・保存対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
 // @grant        none
@@ -383,3 +383,375 @@
     const timer = setInterval(() => {if (init() || ++tries >= 120) clearInterval(timer);},250);
   }
 })();
+
+
+// ---- Novel TXT editor/exporter (integrated in v0.5.7) ----
+(() => {
+  'use strict';
+  if (window.__pixivNovelTextExportV057) return;
+  window.__pixivNovelTextExportV057 = true;
+
+  const ROOT_ID = 'pnte-root';
+  const BTN_ID = 'pnte-button';
+  const STYLE_ID = 'pnte-style';
+
+  let original = null;
+  let overlay = null;
+  let pageHost = null;
+  let statusNode = null;
+  let metaToggle = null;
+
+  const novelId = () => {
+    const u = new URL(location.href);
+    return u.pathname === '/novel/show.php' && /^\d+$/.test(u.searchParams.get('id') || '')
+      ? u.searchParams.get('id')
+      : null;
+  };
+
+  const sleepFrame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
+
+  function normalizeNewlines(text) {
+    return String(text ?? '').replace(/\r\n?/g, '\n');
+  }
+
+  function decodeEntities(text) {
+    const t = document.createElement('textarea');
+    t.innerHTML = String(text ?? '');
+    return t.value;
+  }
+
+  function cleanupPlainText(text) {
+    return normalizeNewlines(text)
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n[ \t]+/g, '\n')
+      .replace(/\n{4,}/g, '\n\n\n')
+      .replace(/^\n+|\n+$/g, '');
+  }
+
+  function pixivMarkupToText(raw) {
+    let text = normalizeNewlines(raw);
+
+    // Preserve useful textual information while removing presentation-only pixiv tags.
+    text = text.replace(/\[chapter:([^\]\n]*)\]/g, (_, title) => `\n${title.trim()}\n`);
+    text = text.replace(/\[PARAGRAPH\]/g, '\n');
+    text = text.replace(/\\n/g, '\n');
+    text = text.replace(/\[uploadedimage:[^\]\n]*\]/g, '');
+    text = text.replace(/\[pixivimage:[^\]\n]*\]/g, '');
+    text = text.replace(/\[jump:\d+\]/g, '');
+    text = text.replace(/\[\[jumpuri:([\s\S]*?)\s*>\s*[^\]]+\]\]/g, (_, label) => label.trim());
+    text = text.replace(/\[\[rb:([\s\S]*?)\s*>\s*([^\]]*?)\]\]/g, (_, base, ruby) => {
+      base = base.trim(); ruby = ruby.trim();
+      return ruby ? `${base}《${ruby}》` : base;
+    });
+    text = text.replace(/\[\[emphasismark:([\s\S]*?)>[^\]]*\]\]/g, (_, body) => body.trim());
+    text = text.replace(/\[(?:b|i):([^\]]*)\]/g, '$1');
+
+    return cleanupPlainText(decodeEntities(text));
+  }
+
+  function htmlToText(html) {
+    const doc = new DOMParser().parseFromString(String(html ?? ''), 'text/html');
+    doc.querySelectorAll('script,style,noscript,img,picture,figure,svg,canvas').forEach(n => n.remove());
+
+    // Keep ruby readable in a plain-text file.
+    doc.querySelectorAll('ruby').forEach(ruby => {
+      const reading = [...ruby.querySelectorAll('rt')].map(n => n.textContent || '').join('').trim();
+      const clone = ruby.cloneNode(true);
+      clone.querySelectorAll('rt,rp').forEach(n => n.remove());
+      const base = (clone.textContent || '').trim();
+      ruby.replaceWith(doc.createTextNode(reading ? `${base}《${reading}》` : base));
+    });
+
+    doc.querySelectorAll('br').forEach(br => br.replaceWith(doc.createTextNode('\n')));
+    doc.querySelectorAll('p,div,section,article,h1,h2,h3,h4,h5,h6,li,blockquote').forEach(el => {
+      el.before(doc.createTextNode('\n'));
+      el.after(doc.createTextNode('\n'));
+    });
+    return cleanupPlainText(doc.body.textContent || '');
+  }
+
+  function parseContent(raw) {
+    const source = normalizeNewlines(raw);
+    const hasPixivPages = /\[newpage\]/i.test(source);
+    const looksHtml = /<\/?(?:p|div|br|span|a|ruby|rt|img|section|article|h[1-6])\b/i.test(source);
+
+    if (hasPixivPages) {
+      const chunks = source.split(/\[newpage\]/i);
+      return {
+        format: looksHtml ? 'pixiv記法＋HTML混在' : 'pixiv小説記法',
+        pages: chunks.map(chunk => looksHtml ? htmlToText(pixivMarkupToText(chunk)) : pixivMarkupToText(chunk))
+      };
+    }
+
+    return {
+      format: looksHtml ? 'HTML' : 'プレーン/小説記法',
+      pages: [looksHtml ? htmlToText(source) : pixivMarkupToText(source)]
+    };
+  }
+
+  async function fetchNovel(id) {
+    const response = await fetch(`/ajax/novel/${encodeURIComponent(id)}`, {
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json' }
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    if (json?.error || !json?.body) throw new Error(json?.message || '本文データを取得できませんでした');
+    if (typeof json.body.content !== 'string') throw new Error('本文 content が見つかりませんでした');
+    return json.body;
+  }
+
+  function safeFileName(name) {
+    const cleaned = String(name || 'pixiv小説')
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '＿')
+      .replace(/[. ]+$/g, '')
+      .trim();
+    return (cleaned || 'pixiv小説').slice(0, 140) + '.txt';
+  }
+
+  function buildOutput() {
+    if (!original || !pageHost) return '';
+    const pages = [...pageHost.querySelectorAll('.pnte-page')]
+      .filter(card => card.querySelector('.pnte-include')?.checked)
+      .map(card => cleanupPlainText(card.querySelector('textarea')?.value || ''))
+      .filter(Boolean);
+
+    const parts = [];
+    if (metaToggle?.checked) {
+      parts.push(original.title || '無題');
+      if (original.userName) parts.push(`作者：${original.userName}`);
+      parts.push('');
+    }
+    // ページ境界は空行2行ぶん空けて、TXTで見たときに区切りが分かりやすくする。
+    parts.push(pages.join('\n\n\n'));
+    return cleanupPlainText(parts.join('\n')) + '\n';
+  }
+
+  async function saveText() {
+    if (!original) return;
+    const text = buildOutput();
+    if (!text.trim()) {
+      statusNode.textContent = '保存する本文がありません。ページのチェックまたは本文を確認してください。';
+      return;
+    }
+
+    const file = new File([text], safeFileName(original.title), { type: 'text/plain;charset=utf-8' });
+
+    // iPhone/iPadでは共有シート →「ファイルに保存」が最も安定。
+    try {
+      const appleMobile = /iP(?:hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (appleMobile && navigator.share && navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file], title: original.title || 'pixiv小説' });
+        statusNode.textContent = '共有シートへ渡しました。「ファイルに保存」を選べます。';
+        return;
+      }
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        statusNode.textContent = '共有をキャンセルしました。';
+        return;
+      }
+      // Fall through to a normal Blob download.
+    }
+
+    const blobUrl = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = file.name;
+    a.style.display = 'none';
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+    statusNode.textContent = 'TXT保存を開始しました。';
+  }
+
+  async function copyText() {
+    const text = buildOutput();
+    if (!text.trim()) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      statusNode.textContent = '編集後の本文をクリップボードへコピーしました。';
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.append(ta); ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      statusNode.textContent = ok ? '編集後の本文をコピーしました。' : 'コピーできませんでした。';
+    }
+  }
+
+  function restorePages() {
+    if (!original) return;
+    drawPages(original.pages);
+    statusNode.textContent = '取得時の本文に戻しました。';
+  }
+
+  function drawPages(pages) {
+    pageHost.replaceChildren();
+    pages.forEach((text, index) => {
+      const card = document.createElement('section');
+      card.className = 'pnte-page';
+
+      const head = document.createElement('div');
+      head.className = 'pnte-page-head';
+      const label = document.createElement('label');
+      const include = document.createElement('input');
+      include.type = 'checkbox'; include.checked = true; include.className = 'pnte-include';
+      label.append(include, document.createTextNode(` ページ ${index + 1} を保存`));
+      const chars = document.createElement('span');
+      chars.textContent = `${Array.from(text).length.toLocaleString('ja-JP')}字`;
+      head.append(label, chars);
+
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.spellcheck = false;
+      ta.setAttribute('aria-label', `ページ${index + 1} 本文`);
+      ta.addEventListener('input', () => {
+        chars.textContent = `${Array.from(ta.value).length.toLocaleString('ja-JP')}字`;
+      });
+
+      include.addEventListener('change', () => {
+        card.classList.toggle('pnte-excluded', !include.checked);
+      });
+
+      card.append(head, ta);
+      pageHost.append(card);
+    });
+  }
+
+  function closeOverlay() {
+    overlay?.classList.remove('pnte-open');
+  }
+
+  async function openEditor() {
+    const id = novelId();
+    if (!id) return;
+    overlay.classList.add('pnte-open');
+    pageHost.replaceChildren();
+    statusNode.textContent = 'pixivから本文を取得中…';
+
+    try {
+      const body = await fetchNovel(id);
+      const parsed = parseContent(body.content);
+      original = {
+        id,
+        title: body.title || document.title || '無題',
+        userName: body.userName || body.user?.name || '',
+        url: `https://www.pixiv.net/novel/show.php?id=${id}`,
+        format: parsed.format,
+        pages: parsed.pages
+      };
+      drawPages(original.pages);
+      const total = original.pages.reduce((n, p) => n + Array.from(p).length, 0);
+      statusNode.textContent = `取得成功：${original.pages.length}ページ／${total.toLocaleString('ja-JP')}字／取得形式 ${original.format}`;
+    } catch (err) {
+      original = null;
+      statusNode.textContent = `取得失敗：${err?.message || err}`;
+      const detail = document.createElement('div');
+      detail.className = 'pnte-error';
+      detail.textContent = 'この表示をそのまま教えてください。pixiv側の返却形式に合わせて修正します。';
+      pageHost.append(detail);
+    }
+  }
+
+  function injectCss() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+      #${BTN_ID}{position:fixed;right:18px;bottom:90px;z-index:2147483000;border:0;border-radius:999px;padding:11px 15px;background:#0096fa;color:#fff;font:700 14px/1.2 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif;box-shadow:0 4px 16px #0003;cursor:pointer}
+      #${ROOT_ID}{display:none;position:fixed;inset:0;z-index:2147483646;background:#f4f6f8;color:#202124;font-family:-apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif;overflow:auto;-webkit-overflow-scrolling:touch}
+      #${ROOT_ID}.pnte-open{display:block}
+      #${ROOT_ID} *{box-sizing:border-box}
+      .pnte-header{position:sticky;top:0;z-index:3;background:#fff;border-bottom:1px solid #dfe3e8;padding:10px 12px;box-shadow:0 2px 8px #0000000d}
+      .pnte-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:980px;margin:auto}
+      .pnte-bar strong{font-size:16px;margin-right:auto}
+      .pnte-bar button{border:1px solid #ccd2d9;background:#fff;color:#202124;border-radius:8px;padding:8px 10px;font:inherit;font-weight:600}
+      .pnte-bar .pnte-save{background:#0096fa;color:#fff;border-color:#0096fa}
+      .pnte-meta{max-width:980px;margin:8px auto 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:12px;color:#59636e}
+      .pnte-status{max-width:980px;margin:7px auto 0;font-size:12px;color:#59636e;overflow-wrap:anywhere}
+      .pnte-pages{max-width:980px;margin:0 auto;padding:12px 10px 80px}
+      .pnte-page{background:#fff;border:1px solid #dfe3e8;border-radius:10px;margin:0 0 12px;padding:10px;transition:opacity .15s}
+      .pnte-page.pnte-excluded{opacity:.46}
+      .pnte-page-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:7px;font-size:13px;font-weight:700}
+      .pnte-page-head span{font-size:11px;color:#727d88;font-weight:400}
+      .pnte-page textarea{display:block;width:100%;min-height:46vh;resize:vertical;border:1px solid #ccd2d9;border-radius:8px;padding:12px;background:#fff;color:#202124;font:15px/1.8 ui-monospace,SFMono-Regular,Menlo,'Noto Sans Mono CJK JP','Noto Sans JP',monospace;white-space:pre-wrap}
+      .pnte-error{background:#fff3f3;color:#b42318;border:1px solid #f3c3c3;border-radius:8px;padding:12px}
+      @media(max-width:600px){#${BTN_ID}{right:12px;bottom:76px;padding:10px 13px}.pnte-header{padding:8px}.pnte-bar{gap:6px}.pnte-bar button{padding:7px 8px;font-size:12px}.pnte-bar strong{width:100%;font-size:15px}.pnte-meta{font-size:11px}.pnte-pages{padding:10px 7px 70px}.pnte-page{padding:8px}.pnte-page textarea{min-height:52vh;font-size:14px;line-height:1.75}}
+    `;
+    document.head.append(style);
+  }
+
+  function buildUi() {
+    if (document.getElementById(ROOT_ID)) return;
+    injectCss();
+
+    const button = document.createElement('button');
+    button.id = BTN_ID;
+    button.type = 'button';
+    button.textContent = '📄 TXT抽出';
+    button.addEventListener('click', openEditor);
+    document.body.append(button);
+
+    overlay = document.createElement('div');
+    overlay.id = ROOT_ID;
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+
+    const header = document.createElement('header');
+    header.className = 'pnte-header';
+    const bar = document.createElement('div');
+    bar.className = 'pnte-bar';
+    const title = document.createElement('strong');
+    title.textContent = '📖 pixiv小説 TXT編集・保存';
+
+    const restore = document.createElement('button');
+    restore.type = 'button'; restore.textContent = '↩ 原文に戻す';
+    restore.addEventListener('click', restorePages);
+
+    const copy = document.createElement('button');
+    copy.type = 'button'; copy.textContent = 'コピー';
+    copy.addEventListener('click', copyText);
+
+    const save = document.createElement('button');
+    save.type = 'button'; save.className = 'pnte-save'; save.textContent = '💾 TXT保存';
+    save.addEventListener('click', saveText);
+
+    const close = document.createElement('button');
+    close.type = 'button'; close.textContent = '閉じる';
+    close.addEventListener('click', closeOverlay);
+
+    bar.append(title, restore, copy, save, close);
+
+    const meta = document.createElement('div');
+    meta.className = 'pnte-meta';
+    const metaLabel = document.createElement('label');
+    metaToggle = document.createElement('input');
+    metaToggle.type = 'checkbox'; metaToggle.checked = false;
+    metaLabel.append(metaToggle, document.createTextNode(' タイトル・作者名をTXT先頭に入れる'));
+    const hint = document.createElement('span');
+    hint.textContent = '不要なページはチェックOFF／一部分だけ消す場合は本文を直接編集';
+    meta.append(metaLabel, hint);
+
+    statusNode = document.createElement('div');
+    statusNode.className = 'pnte-status';
+    statusNode.textContent = 'まだ取得していません。';
+
+    header.append(bar, meta, statusNode);
+    pageHost = document.createElement('main');
+    pageHost.className = 'pnte-pages';
+    overlay.append(header, pageHost);
+    document.body.append(overlay);
+  }
+
+  async function init() {
+    // pixiv can re-render portions of the page; attach only after body exists.
+    if (!document.body) await sleepFrame();
+    if (novelId()) buildUi();
+  }
+
+  void init();
+})();
+
