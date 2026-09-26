@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
+// @name         Pixiv ツール（全体ブックマーク・小説TXT）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.5.11
-// @description  pixiv検索を横断して全体ブクマ順・新着順で表示。投稿日フィルター、小説TXT編集・整形・保存に対応。
+// @version      0.6.0
+// @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・並び替えと、小説TXT編集・整形・保存に対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
 // @grant        none
@@ -11,7 +11,7 @@
 // ==/UserScript==
 
 
-// ---- Cross-page bookmark engine (embedded in v0.5.11; DB schema preserved) ----
+// ---- Cross-page bookmark engine (embedded; DB schema preserved) ----
 (() => {
 'use strict';
 if (window.__pixivBookmarkCrossPageV05) return;
@@ -446,11 +446,11 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
-// ---- Novel TXT editor/exporter (integrated in v0.5.11) ----
+// ---- Novel TXT editor/exporter (integrated in v0.6.0) ----
 (() => {
   'use strict';
-  if (window.__pixivNovelTextExportV0511) return;
-  window.__pixivNovelTextExportV0511 = true;
+  if (window.__pixivNovelTextExportV060) return;
+  window.__pixivNovelTextExportV060 = true;
 
   const ROOT_ID = 'pnte-root';
   const BTN_ID = 'pnte-button';
@@ -853,7 +853,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const button = document.createElement('button');
     button.id = BTN_ID;
     button.type = 'button';
-    button.textContent = '📄 TXT抽出';
+    button.textContent = '📖 小説TXT';
     button.addEventListener('click', openEditor);
     document.body.append(button);
 
@@ -889,7 +889,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     close.type = 'button'; close.textContent = '閉じる';
     close.addEventListener('click', closeOverlay);
 
-    bar.append(title, restore, format, copy, save, close);
+    bar.append(title, restore, format, copy, save);
 
     const meta = document.createElement('div');
     meta.className = 'pnte-meta';
@@ -905,7 +905,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       new Option('改行ごと', 'line'),
       new Option('空行の後だけ', 'blank')
     );
-    indentModeSelect.value = 'line';
+    indentModeSelect.value = 'blank';
     indentLabel.append(indentModeSelect);
 
     const dialogueLabel = document.createElement('label');
@@ -937,3 +937,264 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   void init();
 })();
 
+
+
+// ---- Unified Pixiv tools shell (v0.6.0) ----
+(() => {
+  'use strict';
+  if (window.__pixivUnifiedToolsV060) return;
+  window.__pixivUnifiedToolsV060 = true;
+
+  const BAR_ID = 'pixiv-tools-unified-bar';
+  const LAUNCH_ID = 'pixiv-tools-unified-launch';
+  const PLACEHOLDER_ID = 'pixiv-tools-unified-placeholder';
+  const OFFSET = 78;
+  let opened = false;
+  let active = '';
+
+  function isNovelPage() {
+    const u = new URL(location.href);
+    return u.pathname === '/novel/show.php' && /^\d+$/.test(u.searchParams.get('id') || '');
+  }
+
+  function isSearchPage() {
+    const u = new URL(location.href);
+    if (/^\/tags\/[^/]+(?:\/(?:artworks|illustrations|manga|novels))?(?:\/|$)/.test(u.pathname)) return true;
+    if (u.pathname === '/novel/search.php') return !!(u.searchParams.get('word') || u.searchParams.get('q'));
+    if (['/search', '/search.php'].includes(u.pathname)) return !!(u.searchParams.get('word') || u.searchParams.get('q'));
+    return false;
+  }
+
+  function bookmarkUi() {
+    const host = document.getElementById('pixiv-bookmark-sort-cross-page-v05');
+    const root = host?.shadowRoot;
+    return root ? {
+      root,
+      launch: root.querySelector('.launch'),
+      veil: root.querySelector('.veil'),
+      close: root.querySelector('.close'),
+      viewer: root.querySelector('.pbs-new-overlay')
+    } : null;
+  }
+
+  function novelUi() {
+    return {
+      button: document.getElementById('pnte-button'),
+      overlay: document.getElementById('pnte-root')
+    };
+  }
+
+  function ensurePageSpecificUi() {
+    // The novel module may be initialized a frame after this shell.
+    const n = novelUi();
+    if (n.button) n.button.style.setProperty('display', 'none', 'important');
+
+    const b = bookmarkUi();
+    if (b?.launch) b.launch.style.setProperty('display', 'none', 'important');
+
+    if (b?.root && !b.root.getElementById?.('pixiv-tools-unified-shadow-style')) {
+      const style = document.createElement('style');
+      style.id = 'pixiv-tools-unified-shadow-style';
+      style.textContent = `
+        .launch{display:none!important}
+        .veil{top:${OFFSET}px!important;right:0!important;bottom:0!important;left:0!important}
+        .panel{height:100%!important;max-height:100%!important;border-radius:0!important}
+        .heading .close{display:none!important}
+        .pbs-new-overlay{top:${OFFSET}px!important;right:0!important;bottom:0!important;left:0!important;height:auto!important}
+      `;
+      b.root.append(style);
+    }
+  }
+
+  function hideBookmark() {
+    const b = bookmarkUi();
+    if (!b) return;
+    b.viewer?.classList.remove('pbs-open');
+    b.veil?.classList.remove('open');
+  }
+
+  function hideNovel() {
+    novelUi().overlay?.classList.remove('pnte-open');
+  }
+
+  function showPlaceholder(message) {
+    const node = document.getElementById(PLACEHOLDER_ID);
+    if (!node) return;
+    node.textContent = message;
+    node.classList.add('open');
+  }
+
+  function hidePlaceholder() {
+    document.getElementById(PLACEHOLDER_ID)?.classList.remove('open');
+  }
+
+  function paintTabs() {
+    const bar = document.getElementById(BAR_ID);
+    if (!bar) return;
+    for (const btn of bar.querySelectorAll('[data-tool-tab]')) {
+      btn.classList.toggle('active', btn.dataset.toolTab === active);
+    }
+  }
+
+  function openBookmark() {
+    active = 'bookmark';
+    paintTabs();
+    hidePlaceholder();
+    hideNovel();
+
+    if (!isSearchPage()) {
+      hideBookmark();
+      showPlaceholder('♥ 全体ブックマークは、pixivのタグ検索・作品検索ページで利用できます。');
+      return;
+    }
+
+    const b = bookmarkUi();
+    if (!b?.launch || !b?.veil) {
+      showPlaceholder('全体ブックマーク機能を準備中です。少し待ってからもう一度お試しください。');
+      return;
+    }
+
+    if (!b.veil.classList.contains('open')) b.launch.click();
+  }
+
+  function openNovel() {
+    active = 'novel';
+    paintTabs();
+    hidePlaceholder();
+    hideBookmark();
+
+    if (!isNovelPage()) {
+      hideNovel();
+      showPlaceholder('📖 小説TXTは、pixivの小説作品ページで利用できます。');
+      return;
+    }
+
+    const n = novelUi();
+    if (!n.overlay || !n.button) {
+      showPlaceholder('小説TXT機能を準備中です。少し待ってからもう一度お試しください。');
+      return;
+    }
+
+    if (n.overlay.querySelector('.pnte-page')) {
+      n.overlay.classList.add('pnte-open');
+    } else {
+      n.button.click();
+    }
+  }
+
+  function switchTo(tab) {
+    ensurePageSpecificUi();
+    if (tab === 'novel') openNovel();
+    else openBookmark();
+  }
+
+  function closeAll() {
+    opened = false;
+    hidePlaceholder();
+    hideNovel();
+
+    const b = bookmarkUi();
+    if (b?.veil?.classList.contains('open') && b.close) b.close.click();
+    else hideBookmark();
+
+    document.getElementById(BAR_ID)?.classList.remove('open');
+  }
+
+  function openShell() {
+    opened = true;
+    document.getElementById(BAR_ID)?.classList.add('open');
+    const preferred = isNovelPage() ? 'novel' : 'bookmark';
+    switchTo(preferred);
+  }
+
+  function updateAvailability() {
+    ensurePageSpecificUi();
+    const launch = document.getElementById(LAUNCH_ID);
+    if (!launch) return;
+    const useful = isNovelPage() || isSearchPage();
+    launch.style.display = useful ? 'block' : 'none';
+
+    if (opened) {
+      // On pixiv SPA navigation, keep the shell open but move to the useful tab.
+      if (isNovelPage() && active !== 'novel') switchTo('novel');
+      else if (isSearchPage() && active !== 'bookmark') switchTo('bookmark');
+    }
+  }
+
+  function buildShell() {
+    if (document.getElementById(BAR_ID)) return;
+
+    const style = document.createElement('style');
+    style.textContent = `
+      #pnte-button{display:none!important}
+      #pnte-root{top:${OFFSET}px!important;right:0!important;bottom:0!important;left:0!important;height:auto!important}
+      #${LAUNCH_ID}{position:fixed;right:14px;bottom:max(76px,env(safe-area-inset-bottom));z-index:2147483001;border:0;border-radius:999px;padding:12px 16px;background:#0096fa;color:#fff;font:700 14px/1.2 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif;box-shadow:0 4px 18px #0004}
+      #${BAR_ID}{display:none;position:fixed;top:0;left:0;right:0;height:${OFFSET}px;z-index:2147483647;background:#fff;color:#202124;border-bottom:1px solid #dfe3e8;box-shadow:0 2px 9px #0002;padding:max(7px,env(safe-area-inset-top)) 10px 7px;font-family:-apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif}
+      #${BAR_ID}.open{display:flex;align-items:flex-end;gap:8px}
+      #${BAR_ID} .pt-title{font-weight:800;font-size:15px;white-space:nowrap;margin:0 4px 5px 2px}
+      #${BAR_ID} [data-tool-tab]{border:1px solid #ccd2d9;background:#fff;color:#333;border-radius:9px;padding:9px 11px;font:700 13px/1 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif}
+      #${BAR_ID} [data-tool-tab].active{background:#0096fa;color:#fff;border-color:#0096fa}
+      #${BAR_ID} .pt-close{margin-left:auto;border:1px solid #ccd2d9;background:#fff;color:#333;border-radius:9px;padding:9px 11px;font:700 13px/1 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif}
+      #${PLACEHOLDER_ID}{display:none;position:fixed;top:${OFFSET}px;right:0;bottom:0;left:0;z-index:2147483645;background:#f4f6f8;color:#59636e;padding:36px 20px;text-align:center;font:14px/1.8 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif}
+      #${PLACEHOLDER_ID}.open{display:block}
+      @media(max-width:600px){
+        #${BAR_ID}{padding-left:7px;padding-right:7px;gap:5px}
+        #${BAR_ID} .pt-title{font-size:13px;margin-right:1px}
+        #${BAR_ID} [data-tool-tab],#${BAR_ID} .pt-close{font-size:11px;padding:8px 7px}
+        #${LAUNCH_ID}{right:12px;bottom:max(76px,env(safe-area-inset-bottom));padding:11px 14px}
+      }
+    `;
+    document.head.append(style);
+
+    const launch = document.createElement('button');
+    launch.id = LAUNCH_ID;
+    launch.type = 'button';
+    launch.textContent = '🧰 Pixivツール';
+    launch.addEventListener('click', openShell);
+
+    const bar = document.createElement('div');
+    bar.id = BAR_ID;
+
+    const title = document.createElement('div');
+    title.className = 'pt-title';
+    title.textContent = 'Pixivツール';
+
+    const bookmark = document.createElement('button');
+    bookmark.type = 'button';
+    bookmark.dataset.toolTab = 'bookmark';
+    bookmark.textContent = '♥ 全体ブックマーク';
+    bookmark.addEventListener('click', () => switchTo('bookmark'));
+
+    const novel = document.createElement('button');
+    novel.type = 'button';
+    novel.dataset.toolTab = 'novel';
+    novel.textContent = '📖 小説TXT';
+    novel.addEventListener('click', () => switchTo('novel'));
+
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'pt-close';
+    close.textContent = '閉じる';
+    close.addEventListener('click', closeAll);
+
+    bar.append(title, bookmark, novel, close);
+
+    const placeholder = document.createElement('div');
+    placeholder.id = PLACEHOLDER_ID;
+
+    document.body.append(launch, bar, placeholder);
+    updateAvailability();
+  }
+
+  function init() {
+    if (!document.body) {
+      requestAnimationFrame(init);
+      return;
+    }
+    buildShell();
+    ensurePageSpecificUi();
+    setInterval(updateAvailability, 900);
+  }
+
+  init();
+})();
