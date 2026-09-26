@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         pictBLand 小説TXTツール
 // @namespace    local.pictbland.novel-text-tools
-// @version      0.1.0
+// @version      0.1.1
 // @description  pictBLandの閲覧可能な小説をページ分割して編集・整形し、TXTとしてダウンロード／共有保存します。
 // @match        https://pictbland.net/items/detail/*
 // @run-at       document-idle
@@ -656,9 +656,11 @@
   }
 
   function looksLikeNovelPage() {
+    const u = new URL(location.href);
+    if (!/^\/items\/detail\/[^/?#]+/.test(u.pathname)) return false;
     const text = document.body?.innerText || '';
-    return /\b1\s*\/\s*\d+\b/.test(text) &&
-      (text.includes('小説のみ表示') || text.includes('文字数：'));
+    return /(?:^|\n)\s*1\s*\/\s*\d+\s*(?:\n|$)/m.test(text) ||
+      /\b1\s*\/\s*\d+\b/.test(text);
   }
 
   function init() {
