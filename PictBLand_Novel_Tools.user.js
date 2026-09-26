@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         pictBLand 小説TXTツール
 // @namespace    local.pictbland.novel-text-tools
-// @version      0.1.2
+// @version      0.1.3
 // @description  pictBLandの閲覧可能な小説をページ分割して編集・整形し、TXTとしてダウンロード／共有保存します。
 // @match        https://pictbland.net/items/detail/*
 // @run-at       document-idle
@@ -25,6 +25,7 @@
   let metaToggle = null;
   let indentModeSelect = null;
   let dialogueSpacingToggle = null;
+  let titleInput = null;
   let original = null;
 
   function normalizeNewlines(text) {
@@ -121,7 +122,7 @@
   }
 
   function cleanExtractedSegment(lines) {
-    const navOnly = /^(?:前のページ|次のページ|作品に戻る|縦狭|縦普|縦広|横極|横狭|横普|無|ゴ|明)$/;
+    const navOnly = /^(?:前のページ|次のページ|前頁|次頁|前へ|次へ|作品に戻る|縦狭|縦普|縦広|横極|横狭|横普|無|ゴ|明)(?:\s*[>＞›»〈<])?$/;
     const out = lines
       .map(line => String(line || '').replace(/[ \t]+$/g, ''))
       .filter(line => !navOnly.test(line.trim()));
@@ -212,24 +213,70 @@
   }
 
   function extractTitle() {
+    const generic = /(?:pictbland\.net|pictBLand|同人\s*[・･]?\s*BL|小説投稿SNS|イラスト\s*[・･]?\s*小説投稿SNS)/i;
+    const reject = /^(?:R18|R-18|鍵付|編集|表紙を表示|小|中|大|ステキ！?|ブクマ|非公開|前へ|次へ|前頁|次頁|コメント|プロフィールタグ)$/;
+
+    // まず作品本文の「1 / n」より上にある、見た目が見出しらしい要素を探す。
+    const all = [...document.querySelectorAll('body *')];
+    const marker = all.find(el => /^\s*1\s*\/\s*\d+\s*$/.test((el.textContent || '').trim()));
+    const markerY = marker ? marker.getBoundingClientRect().top + window.scrollY : Infinity;
+
+    const candidates = [];
+    const seen = new Set();
+
+    for (const el of all) {
+      if (!(el instanceof HTMLElement)) continue;
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length < 2 || text.length > 180 || seen.has(text)) continue;
+      if (generic.test(text) || reject.test(text) || /\b\d+\s*\/\s*\d+\b/.test(text)) continue;
+      if (/^(?:投稿日|文字数|ステキ数|フォロー|タグ|プロフィール|メッセージ)/.test(text)) continue;
+      if (text.includes('pictBLandへようこそ')) continue;
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 20 || rect.height < 10) continue;
+      const y = rect.top + window.scrollY;
+      if (y >= markerY || y < 80) continue;
+
+      const style = getComputedStyle(el);
+      const size = parseFloat(style.fontSize) || 0;
+      const weight = parseInt(style.fontWeight, 10) || (style.fontWeight === 'bold' ? 700 : 400);
+      const tag = el.tagName;
+      const cls = String(el.className || '');
+
+      let score = 0;
+      if (/^H[1-6]$/.test(tag)) score += 120;
+      if (/title|subject|headline|item[_-]?name/i.test(cls)) score += 100;
+      if (size >= 24) score += 90;
+      else if (size >= 20) score += 65;
+      else if (size >= 17) score += 25;
+      if (weight >= 700) score += 45;
+      else if (weight >= 600) score += 25;
+      if (el.children.length === 0) score += 20;
+      if (text.length <= 80) score += 15;
+
+      if (score >= 60) {
+        candidates.push({ text, score, y });
+        seen.add(text);
+      }
+    }
+
+    candidates.sort((a, b) => b.score - a.score || a.y - b.y);
+    if (candidates[0]?.text) return candidates[0].text;
+
+    // セマンティック見出しを次点として使う。
+    const heading = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')]
+      .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
+      .find(text => text && text.length <= 180 && !generic.test(text) && !reject.test(text));
+    if (heading) return heading;
+
+    // サイト共通タイトルは採用しない。
     const meta = document.querySelector('meta[property="og:title"]')?.content?.trim();
-    const bad = /^(?:pictBLand|pictbland\.net)$/i;
+    if (meta && !generic.test(meta)) return meta;
 
-    const headings = [...document.querySelectorAll('h1,h2,h3')]
-      .map(el => (el.textContent || '').trim())
-      .filter(text =>
-        text &&
-        text.length <= 180 &&
-        !bad.test(text) &&
-        !/^(?:プロフィールタグ|コメント|この作品を運営事務局に報告する|pictBLandへようこそ|pictBLandについて)$/.test(text)
-      );
+    const docTitle = (document.title || '').trim();
+    if (docTitle && !generic.test(docTitle)) return docTitle;
 
-    let title = headings[0] || meta || document.title || 'pictBLand小説';
-    title = title
-      .replace(/\s*[-|｜]\s*pictBLand.*$/i, '')
-      .replace(/^pictBLand\s*[-|｜]\s*/i, '')
-      .trim();
-    return title || 'pictBLand小説';
+    return 'pictBLand小説';
   }
 
   function extractAuthor() {
@@ -338,7 +385,7 @@
 
     const parts = [];
     if (metaToggle?.checked) {
-      parts.push(original.title || '無題');
+      parts.push(titleInput?.value.trim() || original.title || '無題');
       if (original.author) parts.push(`作者：${original.author}`);
       parts.push('');
     }
@@ -443,7 +490,7 @@
       return;
     }
 
-    const file = new File([text], safeFileName(original.title), { type: 'text/plain;charset=utf-8' });
+    const file = new File([text], safeFileName(titleInput?.value.trim() || original.title), { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = url;
@@ -472,7 +519,7 @@
     }
 
     try {
-      await navigator.share({ files: [file], title: original.title || 'pictBLand小説' });
+      await navigator.share({ files: [file], title: titleInput?.value.trim() || original.title || 'pictBLand小説' });
       statusNode.textContent = '共有シートへ渡しました。';
     } catch (err) {
       statusNode.textContent = err?.name === 'AbortError'
@@ -498,6 +545,7 @@
         url: location.href
       };
 
+      if (titleInput) titleInput.value = title;
       drawPages(original.pages);
       const totalChars = original.pages.reduce((sum, page) => sum + Array.from(page).length, 0);
       statusNode.textContent =
@@ -528,7 +576,7 @@
       .pbnt-bar button{border:1px solid #ccd2d9;background:#fff;color:#202124;border-radius:8px;padding:8px 10px;font:inherit;font-weight:600}
       .pbnt-bar .pbnt-primary{background:#7356a8;color:#fff;border-color:#7356a8}
       .pbnt-meta{max-width:980px;margin:8px auto 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:12px;color:#59636e}
-      .pbnt-meta select{font:inherit;border:1px solid #ccd2d9;border-radius:7px;padding:5px;background:#fff;color:#202124}
+      .pbnt-meta select,.pbnt-meta input[type=text]{font:inherit;border:1px solid #ccd2d9;border-radius:7px;padding:5px;background:#fff;color:#202124}
       .pbnt-status{max-width:980px;margin:7px auto 0;font-size:12px;color:#59636e;overflow-wrap:anywhere}
       .pbnt-pages{max-width:980px;margin:0 auto;padding:12px 10px 80px}
       .pbnt-page{background:#fff;border:1px solid #dfe3e8;border-radius:10px;margin:0 0 12px;padding:10px;transition:opacity .15s}
@@ -612,6 +660,16 @@
     const meta = document.createElement('div');
     meta.className = 'pbnt-meta';
 
+    const titleLabel = document.createElement('label');
+    titleLabel.append(document.createTextNode('ファイル名：'));
+    titleInput = document.createElement('input');
+    titleInput.type = 'text';
+    titleInput.placeholder = '作品タイトル';
+    titleInput.setAttribute('aria-label', 'TXTファイル名');
+    titleInput.style.minWidth = '220px';
+    titleInput.style.maxWidth = '100%';
+    titleLabel.append(titleInput);
+
     const metaLabel = document.createElement('label');
     metaToggle = document.createElement('input');
     metaToggle.type = 'checkbox';
@@ -637,7 +695,7 @@
     const hint = document.createElement('span');
     hint.textContent = '不要なページはチェックOFF／一部分だけ消す場合は本文を直接編集';
 
-    meta.append(metaLabel, indentLabel, dialogueLabel, hint);
+    meta.append(titleLabel, metaLabel, indentLabel, dialogueLabel, hint);
 
     statusNode = document.createElement('div');
     statusNode.className = 'pbnt-status';
