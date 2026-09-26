@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.1
+// @version      0.6.2
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・並び替えと、小説TXT編集・整形・保存に対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1114,11 +1114,9 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const useful = isNovelPage() || isSearchPage();
     launch.style.display = useful ? 'block' : 'none';
 
-    if (opened) {
-      // On pixiv SPA navigation, keep the shell open but move to the useful tab.
-      if (isNovelPage() && active !== 'novel') switchTo('novel');
-      else if (isSearchPage() && active !== 'bookmark') switchTo('bookmark');
-    }
+    // Do not change tabs automatically while the panel is open.
+    // A manually selected tab must stay selected, even when the current page
+    // cannot use that tool; that tab will show its own availability message.
   }
 
   function buildShell() {
