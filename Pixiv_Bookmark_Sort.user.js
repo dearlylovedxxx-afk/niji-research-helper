@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.5.8
+// @version      0.5.9
 // @description  既存の検索調査結果をブクマ順・新着順で表示。投稿日フィルターと期間を検索条件に反映。小説TXT編集・保存対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -385,11 +385,11 @@
 })();
 
 
-// ---- Novel TXT editor/exporter (integrated in v0.5.8) ----
+// ---- Novel TXT editor/exporter (integrated in v0.5.9) ----
 (() => {
   'use strict';
-  if (window.__pixivNovelTextExportV058) return;
-  window.__pixivNovelTextExportV058 = true;
+  if (window.__pixivNovelTextExportV059) return;
+  window.__pixivNovelTextExportV059 = true;
 
   const ROOT_ID = 'pnte-root';
   const BTN_ID = 'pnte-button';
@@ -601,7 +601,7 @@
   }
 
   function formatNovelText(text, addDialogueSpacing) {
-    const rawLines = normalizeNewlines(text).split('\\n').map(line => line.replace(/[ \\t]+$/g, ''));
+    const rawLines = normalizeNewlines(text).split('\n').map(line => line.replace(/[ \t　]+$/g, ''));
     const prepared = [];
 
     for (const raw of rawLines) {
@@ -610,13 +610,11 @@
         continue;
       }
 
-      let line = raw;
-      const trimmed = line.trimStart();
-      const alreadyIndented = /^[ \\t　]/.test(line);
-      const heading = isNovelHeading(line);
-      const special = isDialogueLike(line);
-
-      if (!alreadyIndented && !heading && !special) line = '　' + trimmed;
+      // 地の文は先頭空白の状態に関係なく、必ず全角スペース1個で字下げする。
+      const visible = raw.replace(/^[ \t\u00a0　]+/g, '');
+      const heading = isNovelHeading(visible);
+      const special = isDialogueLike(visible);
+      const line = (!heading && !special) ? '　' + visible : visible;
       prepared.push(line);
     }
 
@@ -646,9 +644,9 @@
       if (heading) spaced.push('');
     }
 
-    return normalizeNewlines(spaced.join('\\n'))
-      .replace(/\\n{4,}/g, '\\n\\n\\n')
-      .replace(/^\\n+|\\n+$/g, '');
+    return normalizeNewlines(spaced.join('\n'))
+      .replace(/\n{4,}/g, '\n\n\n')
+      .replace(/^\n+|\n+$/g, '');
   }
 
   function formatAllPages() {
