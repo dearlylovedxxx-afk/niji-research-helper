@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.2
+// @version      0.6.3
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・並び替えと、小説TXT編集・整形・保存に対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -610,33 +610,17 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     }
 
     const file = new File([text], safeFileName(original.title), { type: 'text/plain;charset=utf-8' });
-
-    // iPhone/iPadでは共有シート →「ファイルに保存」が最も安定。
-    try {
-      const appleMobile = /iP(?:hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-      if (appleMobile && navigator.share && navigator.canShare?.({ files: [file] })) {
-        await navigator.share({ files: [file], title: original.title || 'pixiv小説' });
-        statusNode.textContent = '共有シートへ渡しました。「ファイルに保存」を選べます。';
-        return;
-      }
-    } catch (err) {
-      if (err?.name === 'AbortError') {
-        statusNode.textContent = '共有をキャンセルしました。';
-        return;
-      }
-      // Fall through to a normal Blob download.
-    }
-
     const blobUrl = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = blobUrl;
     a.download = file.name;
+    a.rel = 'noopener';
     a.style.display = 'none';
     document.body.append(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
-    statusNode.textContent = 'TXT保存を開始しました。';
+    statusNode.textContent = 'TXTをダウンロードしました。iPhone/iPadでは「ダウンロード」フォルダを確認してください。';
   }
 
   async function copyText() {
