@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.4
+// @version      0.6.5
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・並び替えと、小説TXT編集・整形・保存に対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -623,6 +623,32 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     statusNode.textContent = 'TXTをダウンロードしました。iPhone/iPadでは「ダウンロード」フォルダを確認してください。';
   }
 
+  async function shareText() {
+    if (!original) return;
+    const text = buildOutput();
+    if (!text.trim()) {
+      statusNode.textContent = '共有する本文がありません。ページのチェックまたは本文を確認してください。';
+      return;
+    }
+
+    const file = new File([text], safeFileName(original.title), { type: 'text/plain;charset=utf-8' });
+    if (!navigator.share || !navigator.canShare?.({ files: [file] })) {
+      statusNode.textContent = 'このブラウザではファイル共有に対応していません。ダウンロードをお使いください。';
+      return;
+    }
+
+    try {
+      await navigator.share({ files: [file], title: original.title || 'pixiv小説' });
+      statusNode.textContent = '共有シートへ渡しました。';
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        statusNode.textContent = '共有をキャンセルしました。';
+      } else {
+        statusNode.textContent = `共有できませんでした：${err?.message || err}`;
+      }
+    }
+  }
+
   async function copyText() {
     const text = buildOutput();
     if (!text.trim()) return;
@@ -866,14 +892,18 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     copy.addEventListener('click', copyText);
 
     const save = document.createElement('button');
-    save.type = 'button'; save.className = 'pnte-save'; save.textContent = '💾 TXT保存';
+    save.type = 'button'; save.className = 'pnte-save'; save.textContent = '⬇️ ダウンロード';
     save.addEventListener('click', saveText);
+
+    const share = document.createElement('button');
+    share.type = 'button'; share.textContent = '📤 共有して保存';
+    share.addEventListener('click', shareText);
 
     const close = document.createElement('button');
     close.type = 'button'; close.textContent = '閉じる';
     close.addEventListener('click', closeOverlay);
 
-    bar.append(title, restore, format, copy, save);
+    bar.append(title, restore, format, copy, save, share);
 
     const meta = document.createElement('div');
     meta.className = 'pnte-meta';
