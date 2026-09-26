@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         pictBLand 小説TXTツール
 // @namespace    local.pictbland.novel-text-tools
-// @version      0.1.3
+// @version      0.1.4
 // @description  pictBLandの閲覧可能な小説をページ分割して編集・整形し、TXTとしてダウンロード／共有保存します。
 // @match        https://pictbland.net/items/detail/*
 // @run-at       document-idle
@@ -298,6 +298,14 @@
   function normalizePictMarkup(text) {
     let out = normalizeNewlines(text);
     out = out.replace(/\[\[rb:([\s\S]*?)\s*>\s*([^\]]*?)\]\]/g, (_, base) => base.trim());
+
+    // ページ送りなどのUI文字列は本文として保存しない。
+    const navOnly = /^(?:前のページ|次のページ|前頁|次頁|前へ|次へ|作品に戻る)(?:\s*[>＞›»〈<])?$/;
+    out = out
+      .split('\n')
+      .filter(line => !navOnly.test(line.trim()))
+      .join('\n');
+
     return cleanupPlainText(out, 3);
   }
 
@@ -512,7 +520,7 @@
       return;
     }
 
-    const file = new File([text], safeFileName(original.title), { type: 'text/plain;charset=utf-8' });
+    const file = new File([text], safeFileName(titleInput?.value.trim() || original.title), { type: 'text/plain;charset=utf-8' });
     if (!navigator.share || !navigator.canShare?.({ files: [file] })) {
       statusNode.textContent = 'このブラウザではファイル共有に対応していません。ダウンロードをお使いください。';
       return;
