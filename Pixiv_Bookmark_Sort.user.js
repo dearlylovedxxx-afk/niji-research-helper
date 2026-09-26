@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.5.9
+// @version      0.5.10
 // @description  既存の検索調査結果をブクマ順・新着順で表示。投稿日フィルターと期間を検索条件に反映。小説TXT編集・保存対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -385,11 +385,11 @@
 })();
 
 
-// ---- Novel TXT editor/exporter (integrated in v0.5.9) ----
+// ---- Novel TXT editor/exporter (integrated in v0.5.10) ----
 (() => {
   'use strict';
-  if (window.__pixivNovelTextExportV059) return;
-  window.__pixivNovelTextExportV059 = true;
+  if (window.__pixivNovelTextExportV0510) return;
+  window.__pixivNovelTextExportV0510 = true;
 
   const ROOT_ID = 'pnte-root';
   const BTN_ID = 'pnte-button';
@@ -412,7 +412,11 @@
   const sleepFrame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
 
   function normalizeNewlines(text) {
-    return String(text ?? '').replace(/\r\n?/g, '\n');
+    // pixiv本文には通常のLF/CRLF以外のUnicode行区切りが混ざる場合がある。
+    // textareaでは改行に見えても split('\n') では分割されないため、先にすべてLFへ統一する。
+    return String(text ?? '')
+      .replace(/\r\n?/g, '\n')
+      .replace(/[\u0085\u2028\u2029]/g, '\n');
   }
 
   function decodeEntities(text) {
