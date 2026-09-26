@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         pictBLand 小説TXTツール
 // @namespace    local.pictbland.novel-text-tools
-// @version      0.1.1
+// @version      0.1.2
 // @description  pictBLandの閲覧可能な小説をページ分割して編集・整形し、TXTとしてダウンロード／共有保存します。
 // @match        https://pictbland.net/items/detail/*
 // @run-at       document-idle
@@ -56,7 +56,7 @@
       const copy = ruby.cloneNode(true);
       copy.querySelectorAll('rt,rp').forEach(n => n.remove());
       const base = (copy.textContent || '').trim();
-      ruby.replaceWith(document.createTextNode(reading ? `${base}《${reading}》` : base));
+      ruby.replaceWith(document.createTextNode(base));
     });
 
     const blockTags = new Set([
@@ -250,11 +250,7 @@
 
   function normalizePictMarkup(text) {
     let out = normalizeNewlines(text);
-    out = out.replace(/\[\[rb:([\s\S]*?)\s*>\s*([^\]]*?)\]\]/g, (_, base, ruby) => {
-      base = base.trim();
-      ruby = ruby.trim();
-      return ruby ? `${base}《${ruby}》` : base;
-    });
+    out = out.replace(/\[\[rb:([\s\S]*?)\s*>\s*([^\]]*?)\]\]/g, (_, base) => base.trim());
     return cleanupPlainText(out, 3);
   }
 
@@ -655,32 +651,14 @@
     document.body.append(button, overlay);
   }
 
-  function looksLikeNovelPage() {
-    const u = new URL(location.href);
-    if (!/^\/items\/detail\/[^/?#]+/.test(u.pathname)) return false;
-    const text = document.body?.innerText || '';
-    return /(?:^|\n)\s*1\s*\/\s*\d+\s*(?:\n|$)/m.test(text) ||
-      /\b1\s*\/\s*\d+\b/.test(text);
-  }
-
   function init() {
     if (!document.body) {
       requestAnimationFrame(init);
       return;
     }
 
-    if (looksLikeNovelPage()) buildUi();
-    else {
-      let tries = 0;
-      const timer = setInterval(() => {
-        if (looksLikeNovelPage()) {
-          clearInterval(timer);
-          buildUi();
-        } else if (++tries >= 40) {
-          clearInterval(timer);
-        }
-      }, 250);
-    }
+    // @match が作品詳細ページに限定されているため、判定せず必ずUIを出す。
+    buildUi();
   }
 
   init();
