@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.5.7
+// @version      0.5.8
 // @description  既存の検索調査結果をブクマ順・新着順で表示。投稿日フィルターと期間を検索条件に反映。小説TXT編集・保存対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -385,11 +385,11 @@
 })();
 
 
-// ---- Novel TXT editor/exporter (integrated in v0.5.7) ----
+// ---- Novel TXT editor/exporter (integrated in v0.5.8) ----
 (() => {
   'use strict';
-  if (window.__pixivNovelTextExportV057) return;
-  window.__pixivNovelTextExportV057 = true;
+  if (window.__pixivNovelTextExportV058) return;
+  window.__pixivNovelTextExportV058 = true;
 
   const ROOT_ID = 'pnte-root';
   const BTN_ID = 'pnte-button';
@@ -400,6 +400,7 @@
   let pageHost = null;
   let statusNode = null;
   let metaToggle = null;
+  let dialogueSpacingToggle = null;
 
   const novelId = () => {
     const u = new URL(location.href);
@@ -509,6 +510,13 @@
     return (cleaned || 'pixiv小説').slice(0, 140) + '.txt';
   }
 
+  function cleanupOutputText(text) {
+    return normalizeNewlines(text)
+      .replace(/[ \\t]+\\n/g, '\\n')
+      .replace(/\\n[ \\t]+/g, '\\n')
+      .replace(/^\\n+|\\n+$/g, '');
+  }
+
   function buildOutput() {
     if (!original || !pageHost) return '';
     const pages = [...pageHost.querySelectorAll('.pnte-page')]
@@ -522,9 +530,9 @@
       if (original.userName) parts.push(`作者：${original.userName}`);
       parts.push('');
     }
-    // ページ境界は空行2行ぶん空けて、TXTで見たときに区切りが分かりやすくする。
-    parts.push(pages.join('\n\n\n'));
-    return cleanupPlainText(parts.join('\n')) + '\n';
+    // ページ境界は改行6個（空行5行）をそのまま保持する。
+    parts.push(pages.join('\\n\\n\\n\\n\\n\\n'));
+    return cleanupOutputText(parts.join('\\n')) + '\\n';
   }
 
   async function saveText() {
@@ -580,6 +588,83 @@
       ta.remove();
       statusNode.textContent = ok ? '編集後の本文をコピーしました。' : 'コピーできませんでした。';
     }
+  }
+
+  function isNovelHeading(line) {
+    const s = line.trim();
+    if (!s || Array.from(s).length > 40) return false;
+    return /^(?:第.{1,18}[章話節幕部編]|序章|終章|序幕|終幕|幕間|間章|前書き|まえがき|後書き|あとがき|プロローグ|エピローグ|Prologue|Epilogue|Chapter\\s*[0-9０-９]+|CHAPTER\\s*[0-9０-９]+|[0-9０-９]+[.．、]\s*\\S+)/i.test(s);
+  }
+
+  function isDialogueLike(line) {
+    return /^[「『（【〔［〈《“‘〝〟…‥―—─・※＊*#◇◆○●◎△▲▽▼□■☆★♪♩♬]/.test(line.trimStart());
+  }
+
+  function formatNovelText(text, addDialogueSpacing) {
+    const rawLines = normalizeNewlines(text).split('\\n').map(line => line.replace(/[ \\t]+$/g, ''));
+    const prepared = [];
+
+    for (const raw of rawLines) {
+      if (!raw.trim()) {
+        prepared.push('');
+        continue;
+      }
+
+      let line = raw;
+      const trimmed = line.trimStart();
+      const alreadyIndented = /^[ \\t　]/.test(line);
+      const heading = isNovelHeading(line);
+      const special = isDialogueLike(line);
+
+      if (!alreadyIndented && !heading && !special) line = '　' + trimmed;
+      prepared.push(line);
+    }
+
+    const spaced = [];
+    for (let i = 0; i < prepared.length; i++) {
+      const line = prepared[i];
+      if (!line) {
+        if (spaced.length && spaced[spaced.length - 1] !== '') spaced.push('');
+        continue;
+      }
+
+      const heading = isNovelHeading(line);
+      if (heading && spaced.length && spaced[spaced.length - 1] !== '') spaced.push('');
+
+      if (addDialogueSpacing && spaced.length) {
+        let j = spaced.length - 1;
+        while (j >= 0 && spaced[j] === '') j--;
+        if (j >= 0 && spaced[spaced.length - 1] !== '') {
+          const prev = spaced[j];
+          if (!isNovelHeading(prev) && !heading && isDialogueLike(prev) !== isDialogueLike(line)) {
+            spaced.push('');
+          }
+        }
+      }
+
+      spaced.push(line);
+      if (heading) spaced.push('');
+    }
+
+    return normalizeNewlines(spaced.join('\\n'))
+      .replace(/\\n{4,}/g, '\\n\\n\\n')
+      .replace(/^\\n+|\\n+$/g, '');
+  }
+
+  function formatAllPages() {
+    if (!pageHost) return;
+    const cards = [...pageHost.querySelectorAll('.pnte-page')];
+    if (!cards.length) return;
+
+    for (const card of cards) {
+      const ta = card.querySelector('textarea');
+      if (!ta) continue;
+      ta.value = formatNovelText(ta.value, !!dialogueSpacingToggle?.checked);
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    statusNode.textContent = dialogueSpacingToggle?.checked
+      ? '小説向けに整形しました。地の文を字下げし、会話と地の文の切り替わりにも空行を入れています。'
+      : '小説向けに整形しました。地の文を字下げし、見出し・空行・行末空白を整理しました。';
   }
 
   function restorePages() {
@@ -711,6 +796,10 @@
     restore.type = 'button'; restore.textContent = '↩ 原文に戻す';
     restore.addEventListener('click', restorePages);
 
+    const format = document.createElement('button');
+    format.type = 'button'; format.textContent = '📖 小説向け整形';
+    format.addEventListener('click', formatAllPages);
+
     const copy = document.createElement('button');
     copy.type = 'button'; copy.textContent = 'コピー';
     copy.addEventListener('click', copyText);
@@ -723,7 +812,7 @@
     close.type = 'button'; close.textContent = '閉じる';
     close.addEventListener('click', closeOverlay);
 
-    bar.append(title, restore, copy, save, close);
+    bar.append(title, restore, format, copy, save, close);
 
     const meta = document.createElement('div');
     meta.className = 'pnte-meta';
@@ -731,9 +820,14 @@
     metaToggle = document.createElement('input');
     metaToggle.type = 'checkbox'; metaToggle.checked = false;
     metaLabel.append(metaToggle, document.createTextNode(' タイトル・作者名をTXT先頭に入れる'));
+    const dialogueLabel = document.createElement('label');
+    dialogueSpacingToggle = document.createElement('input');
+    dialogueSpacingToggle.type = 'checkbox'; dialogueSpacingToggle.checked = false;
+    dialogueLabel.append(dialogueSpacingToggle, document.createTextNode(' 整形時、会話と地の文の間を1行空ける'));
+
     const hint = document.createElement('span');
     hint.textContent = '不要なページはチェックOFF／一部分だけ消す場合は本文を直接編集';
-    meta.append(metaLabel, hint);
+    meta.append(metaLabel, dialogueLabel, hint);
 
     statusNode = document.createElement('div');
     statusNode.className = 'pnte-status';
