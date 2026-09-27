@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.5
+// @version      0.6.6
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・並び替えと、小説TXT編集・整形・保存に対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -481,6 +481,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       .replace(/[\u0085\u2028\u2029]/g, '\n');
   }
 
+  function normalizeTxtPunctuation(text) {
+    return String(text ?? '')
+      .replace(/!/g, '！')
+      .replace(/\?/g, '？');
+  }
+
   function decodeEntities(text) {
     const t = document.createElement('textarea');
     t.innerHTML = String(text ?? '');
@@ -577,10 +583,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
 
   function cleanupOutputText(text) {
-    return normalizeNewlines(text)
-      .replace(/[ \\t]+\\n/g, '\\n')
-      .replace(/\\n[ \\t]+/g, '\\n')
-      .replace(/^\\n+|\\n+$/g, '');
+    return normalizeTxtPunctuation(
+      normalizeNewlines(text)
+        .replace(/[ \\t]+\\n/g, '\\n')
+        .replace(/\\n[ \\t]+/g, '\\n')
+        .replace(/^\\n+|\\n+$/g, '')
+    );
   }
 
   function buildOutput() {
