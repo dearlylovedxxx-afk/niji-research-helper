@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.6
+// @version      0.6.7
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・並び替えと、小説TXT編集・整形・保存に対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -483,6 +483,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
   function normalizeTxtPunctuation(text) {
     return String(text ?? '')
+      .replace(/\u203C\uFE0F?/g, '！！')
+      .replace(/\u2049\uFE0F?/g, '！？')
+      .replace(/\u2047\uFE0F?/g, '？？')
+      .replace(/\u2048\uFE0F?/g, '？！')
+      .replace(/\u2757\uFE0F?/g, '！')
+      .replace(/\u2753\uFE0F?/g, '？')
       .replace(/!/g, '！')
       .replace(/\?/g, '？');
   }
