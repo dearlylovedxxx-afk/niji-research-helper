@@ -1,13 +1,15 @@
 // ==UserScript==
-// @name         Niji Cloud Backup (OR / X / Pixiv)
+// @name         Niji Cloud Backup (OR / X / Pixiv / pictBLand)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.1.6
+// @version      0.1.7
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
-// @description  OR検索・X保存検索・Pixiv調査DB/保存検索をアプリ別にpCloudへ保存・検証・安全に統合復元。Xの一時的ないいね順投稿は含めません。
+// @description  OR検索・X保存検索・Pixiv調査DB/保存検索・pictBLand保存検索をアプリ別にpCloudへ保存・検証・安全に統合復元。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @match        https://www.pixiv.net/*
+// @match        https://pictbland.net/*
+// @match        https://www.pictbland.net/*
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @grant        GM.xmlHttpRequest
@@ -25,6 +27,8 @@ const APPS={
  'x.com':{id:'x',label:'X Search Favorites',name:'X Search Favorites'},
  'twitter.com':{id:'x',label:'X Search Favorites',name:'X Search Favorites'},
  'www.pixiv.net':{id:'pixiv',label:'Pixivブクマ順',name:'Pixiv Bookmark Sort'},
+ 'pictbland.net':{id:'pictbland',label:'pictBLand',name:'pictBLand Tools'},
+ 'www.pictbland.net':{id:'pictbland',label:'pictBLand',name:'pictBLand Tools'},
 };
 const app=APPS[location.hostname.toLowerCase()];if (!app) return;
 const GATEWAY='https://niji-research-backup.dearlylovedxxx.workers.dev';
@@ -150,6 +154,14 @@ async function snapshot(){
   payload={savedSearches:Array.isArray(saved.savedSearches)?saved.savedSearches:[],
    folders:Array.isArray(saved.folders)?saved.folders:[],history:Array.isArray(saved.history)?saved.history:[]};
   if(!payload.savedSearches.length&&!payload.history.length)throw Error('保存検索と履歴が空のため、既存のバックアップを保護して保存しません');
+ }else if(app.id==='pictbland'){
+  let savedSearches=[];
+  try{
+   const parsed=JSON.parse(localStorage.getItem('pictbland-saved-search-words-v1')||'[]');
+   if(Array.isArray(parsed))savedSearches=parsed.filter(row=>row&&typeof row.word==='string'&&row.word.trim()).slice(0,200);
+  }catch{}
+  if(!savedSearches.length)throw Error('pictBLandの保存検索が空のため、既存のバックアップを保護して保存しません');
+  payload={savedSearches};
  }else payload=await pixivSnapshot();
  if(app.id==='or'&&!Array.isArray(payload.values?.niji_or_merger_addon_batches_v1))
   throw Error('ORの保存データを取得できませんでした');
@@ -199,6 +211,29 @@ async function restore(snapshot){
   const result={...prev,folders,savedSearches:[...saved.values()],history:[...history.values()].sort((a,b)=>(b.usedAt||0)-(a.usedAt||0))};
   localStorage.setItem('xsf_userscript_v1',JSON.stringify(result));
   return `保存検索${result.savedSearches.length}件・履歴${result.history.length}件を統合しました。Xを再読み込みしてください。`;
+ }
+ if(app.id==='pictbland'){
+  const incoming=Array.isArray(snapshot.payload.savedSearches)?snapshot.payload.savedSearches:null;
+  if(!incoming)throw Error('pictBLandの保存検索形式が違います');
+  let current=[];
+  try{const parsed=JSON.parse(localStorage.getItem('pictbland-saved-search-words-v1')||'[]');if(Array.isArray(parsed))current=parsed;}catch{}
+  const merged=[],seen=new Set();
+  for(const row of [...current,...incoming]){
+   if(!row||typeof row.word!=='string'||!row.word.trim())continue;
+   const key=row.word.trim();
+   if(seen.has(key))continue;
+   seen.add(key);
+   merged.push({
+    ...row,
+    id:typeof row.id==='string'&&row.id?row.id:crypto.randomUUID(),
+    name:typeof row.name==='string'&&row.name.trim()?row.name.trim():key,
+    word:key,
+    href:typeof row.href==='string'&&row.href.startsWith('/')?row.href:''
+   });
+   if(merged.length>=200)break;
+  }
+  localStorage.setItem('pictbland-saved-search-words-v1',JSON.stringify(merged));
+  return `pictBLandの保存検索${merged.length}件を統合しました。pictBLandを再読み込みしてください。`;
  }
  const count=await mergePixivDatabases(snapshot.payload.databases||[]);
  const pref=snapshot.payload.preferences||{};
@@ -354,6 +389,10 @@ function integrateNativeBackup() {
     slot=counted.parentNode;
     nativeReady=true;
    }
+  } else if(app.id==='pictbland') {
+   const bar=document.getElementById('pictbland-tools-unified-bar');
+   slot=bar?.querySelector('[data-ncb-slot="pictbland"]');
+   nativeReady=!!slot;
   }
   if(slot && !slot.querySelector('[data-ncb-native-backup="'+app.id+'"]')) {
    const button=document.createElement('button');
@@ -365,6 +404,9 @@ function integrateNativeBackup() {
     button.style.cssText='display:block!important;width:100%!important;margin:9px 0!important;min-height:44px!important;padding:10px!important;border-radius:9px!important;background:#156a89!important;color:#fff!important;border:0!important;font:700 14px system-ui!important;cursor:pointer!important';
    } else if(app.id==='x') {
     button.style.cssText='min-height:43px!important;padding:8px 10px!important;border-radius:9px!important;border:1px solid #9baeca!important;background:#e9f5fc!important;color:#173b54!important;font:700 12px system-ui!important;cursor:pointer!important';
+   } else if(app.id==='pictbland') {
+    button.textContent='☁️ pCloud';
+    button.style.cssText='min-height:34px!important;padding:8px 7px!important;border-radius:9px!important;border:1px solid #cec7dc!important;background:#fff!important;color:#33294a!important;font:700 11px system-ui!important;cursor:pointer!important';
    }
    button.addEventListener('click',()=>{panel.hidden=false;update();});
    if(app.id==='pixiv') {
@@ -373,7 +415,7 @@ function integrateNativeBackup() {
     else slot.append(button);
    } else slot.append(button);
   }
-  if(app.id==='x'||nativeReady) launch.style.setProperty('display','none','important');
+  if(app.id==='x'||app.id==='pictbland'||nativeReady) launch.style.setProperty('display','none','important');
   else launch.style.removeProperty('display');
  } catch(e) { console.warn('[NCB] native menu attachment failed',e); }
 }
