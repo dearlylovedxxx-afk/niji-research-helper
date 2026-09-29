@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.11
+// @version      0.6.12
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1427,7 +1427,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   function openShell() {
     opened = true;
     document.getElementById(BAR_ID)?.classList.add('open');
-    const preferred = isNovelPage() ? 'novel' : isSearchPage() ? 'bookmark' : 'searches';
+    const preferred = isNovelPage() ? 'novel' : 'searches';
     switchTo(preferred);
   }
 
@@ -1504,7 +1504,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     close.textContent = '閉じる';
     close.addEventListener('click', closeAll);
 
-    bar.append(title, bookmark, novel, searches, close);
+    bar.append(title, searches, bookmark, novel, close);
 
     const placeholder = document.createElement('div');
     placeholder.id = PLACEHOLDER_ID;
