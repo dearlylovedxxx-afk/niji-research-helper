@@ -7,6 +7,7 @@ const APP_BACKUP_TYPES = Object.freeze({
   or: { name:'Niji OR Results Merger', secret:'NRH_OR_BACKUP_TOKEN', origins:['https://comment2434.com','https://www.comment2434.com'] },
   x: { name:'X Search Favorites', secret:'NRH_X_BACKUP_TOKEN', origins:['https://x.com','https://twitter.com'] },
   pixiv: { name:'Pixiv Bookmark Sort', secret:'NRH_PIXIV_BACKUP_TOKEN', origins:['https://www.pixiv.net'] },
+  pictbland: { name:'pictBLand Tools', secret:'NRH_PICTBLAND_BACKUP_TOKEN', origins:['https://pictbland.net','https://www.pictbland.net'] },
 });
 const APP_BACKUP_PART_MAX = 3 * 1024 * 1024;
 const APP_BACKUP_PARTS_MAX = 80;
