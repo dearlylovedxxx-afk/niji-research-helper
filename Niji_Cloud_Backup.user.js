@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Niji Cloud Backup (OR / X / Pixiv / pictBLand)
+// @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
 // @version      0.1.7
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
