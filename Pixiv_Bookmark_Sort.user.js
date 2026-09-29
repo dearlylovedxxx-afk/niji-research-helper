@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.9
+// @version      0.6.10
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1231,11 +1231,11 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
-// ---- Unified Pixiv tools shell (v0.6.0) ----
+// ---- Unified Pixiv tools shell (v0.6.10) ----
 (() => {
   'use strict';
-  if (window.__pixivUnifiedToolsV060) return;
-  window.__pixivUnifiedToolsV060 = true;
+  if (window.__pixivUnifiedToolsV0610) return;
+  window.__pixivUnifiedToolsV0610 = true;
 
   const BAR_ID = 'pixiv-tools-unified-bar';
   const LAUNCH_ID = 'pixiv-tools-unified-launch';
@@ -1429,12 +1429,11 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     ensurePageSpecificUi();
     const launch = document.getElementById(LAUNCH_ID);
     if (!launch) return;
-    const useful = isNovelPage() || isSearchPage() || (savedSearchUi()?.count?.() || 0) > 0;
-    launch.style.display = useful ? 'block' : 'none';
+    // 3機能を1つの「Pixivツール」ボタンに統合し、Pixiv内では常に呼び出せるようにする。
+    launch.style.display = 'block';
 
-    // Do not change tabs automatically while the panel is open.
-    // A manually selected tab must stay selected, even when the current page
-    // cannot use that tool; that tab will show its own availability message.
+    // ページに合わない機能を選んだ場合は、そのタブ内で利用可能ページを案内する。
+    // 単独の全体ブックマーク／小説TXTボタンは隠し、入口はこのボタンだけにする。
   }
 
   function buildShell() {
@@ -1486,6 +1485,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     novel.dataset.toolTab = 'novel';
     novel.textContent = '📖 小説TXT';
     novel.addEventListener('click', () => switchTo('novel'));
+
+    const searches = document.createElement('button');
+    searches.type = 'button';
+    searches.dataset.toolTab = 'searches';
+    searches.textContent = '🔖 保存検索';
+    searches.addEventListener('click', () => switchTo('searches'));
 
     const close = document.createElement('button');
     close.type = 'button';
