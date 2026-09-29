@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.10
+// @version      0.6.11
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
 // @grant        none
+// @noframes
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
 // ==/UserScript==
@@ -13,6 +14,7 @@
 
 // ---- Cross-page bookmark engine (embedded; DB schema preserved) ----
 (() => {
+  try { if (window.top !== window.self) return; } catch { return; }
 'use strict';
 if (window.__pixivBookmarkCrossPageV05) return;
 window.__pixivBookmarkCrossPageV05 = true;
@@ -72,6 +74,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 (() => {
+  try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
   // The pinned v0.5.2 engine alone owns acquisition and the existing IndexedDB schema.
   // Replace the v0.5.3/0.5.4 display layers with ONE viewer; never clear the research DB.
@@ -448,6 +451,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
 // ---- Novel TXT editor/exporter (integrated in v0.6.0) ----
 (() => {
+  try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
   if (window.__pixivNovelTextExportV060) return;
   window.__pixivNovelTextExportV060 = true;
@@ -976,6 +980,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
 // ---- Saved Pixiv searches (v0.6.9) ----
 (() => {
+  try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
   if (window.__pixivSavedSearchesV069) return;
   window.__pixivSavedSearchesV069 = true;
@@ -1233,6 +1238,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
 // ---- Unified Pixiv tools shell (v0.6.10) ----
 (() => {
+  try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
   if (window.__pixivUnifiedToolsV0610) return;
   window.__pixivUnifiedToolsV0610 = true;
