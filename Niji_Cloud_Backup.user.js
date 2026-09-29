@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.1.5
+// @version      0.1.6
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
-// @description  OR検索・X保存検索・Pixiv調査DBをアプリ別にpCloudへ保存・検証・安全に統合復元。Xの一時的ないいね順投稿は含めません。
+// @description  OR検索・X保存検索・Pixiv調査DB/保存検索をアプリ別にpCloudへ保存・検証・安全に統合復元。Xの一時的ないいね順投稿は含めません。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @match        https://www.pixiv.net/*
@@ -134,8 +134,13 @@ async function pixivSnapshot(){
   }finally{db.close();}
  }
  const preferences={minimum:localStorage.getItem('pixiv-bookmark-sort-minimum-v03'),sort:localStorage.getItem('pixiv-bsort-view-sort-v055')};
- if (!databases.some(d=>Object.values(d.stores).some(a=>a.length)))throw Error('Pixivの調査DBに保存済みデータがありません。空のバックアップは作成しません');
- return {databases,preferences};
+ let savedSearches=[];
+ try{
+  const parsed=JSON.parse(localStorage.getItem('pixiv-saved-searches-v1')||'[]');
+  if(Array.isArray(parsed))savedSearches=parsed.filter(row=>row&&typeof row.name==='string'&&typeof row.href==='string'&&row.href.startsWith('/')).slice(0,200);
+ }catch{}
+ if (!databases.some(d=>Object.values(d.stores).some(a=>a.length))&&!savedSearches.length)throw Error('Pixivの調査DBと保存検索が空のため、既存のバックアップを保護して保存しません');
+ return {databases,preferences,savedSearches};
 }
 async function snapshot(){
  let payload;
@@ -199,7 +204,22 @@ async function restore(snapshot){
  const pref=snapshot.payload.preferences||{};
  for(const [key,v] of [['pixiv-bookmark-sort-minimum-v03',pref.minimum],['pixiv-bsort-view-sort-v055',pref.sort]])
   if(localStorage.getItem(key)===null&&typeof v==='string')localStorage.setItem(key,v);
- return `Pixivの未登録レコード${count}件を追加しました。Pixivを再読み込みしてください。`;
+ let localSearches=[];
+ try{const parsed=JSON.parse(localStorage.getItem('pixiv-saved-searches-v1')||'[]');if(Array.isArray(parsed))localSearches=parsed;}catch{}
+ const incomingSearches=Array.isArray(snapshot.payload.savedSearches)?snapshot.payload.savedSearches:[];
+ const mergedSearches=[],seenSearches=new Set();
+ for(const row of [...localSearches,...incomingSearches]){
+  if(!row||typeof row.name!=='string'||typeof row.href!=='string'||!row.href.startsWith('/'))continue;
+  if(seenSearches.has(row.href))continue;
+  seenSearches.add(row.href);
+  mergedSearches.push({...row,id:typeof row.id==='string'&&row.id?row.id:crypto.randomUUID()});
+  if(mergedSearches.length>=200)break;
+ }
+ if(mergedSearches.length){
+  localStorage.setItem('pixiv-saved-searches-v1',JSON.stringify(mergedSearches));
+  try{window.dispatchEvent(new Event('pixiv-saved-searches-changed'));}catch{}
+ }
+ return `Pixivの未登録レコード${count}件・保存検索${mergedSearches.length}件を統合しました。Pixivを再読み込みしてください。`;
 }
 async function getBackups(token=settings.token){const r=await xhr('GET','',null,token);return r.backups||[];}
 async function fetchBackup(item,token=settings.token){
