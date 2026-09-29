@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.8
-// @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・並び替えと、小説TXT編集・整形・保存に対応。
+// @version      0.6.9
+// @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
 // @grant        none
@@ -913,6 +913,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     share.type = 'button'; share.textContent = '📤 共有して保存';
     share.addEventListener('click', shareText);
 
+    const searches = document.createElement('button');
+    searches.type = 'button';
+    searches.dataset.toolTab = 'searches';
+    searches.textContent = '🔖 保存検索';
+    searches.addEventListener('click', () => switchTo('searches'));
+
     const close = document.createElement('button');
     close.type = 'button'; close.textContent = '閉じる';
     close.addEventListener('click', closeOverlay);
@@ -967,6 +973,264 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
 
 
+
+// ---- Saved Pixiv searches (v0.6.9) ----
+(() => {
+  'use strict';
+  if (window.__pixivSavedSearchesV069) return;
+  window.__pixivSavedSearchesV069 = true;
+
+  const STORAGE_KEY = 'pixiv-saved-searches-v1';
+  const ROOT_ID = 'pixiv-saved-searches-root';
+  const OFFSET = 78;
+  const MAX_SAVED = 200;
+  let root = null;
+
+  function isSearchUrl(u) {
+    if (/^\/tags\/[^/]+(?:\/(?:artworks|illustrations|manga|novels))?(?:\/|$)/.test(u.pathname)) return true;
+    if (u.pathname === '/novel/search.php') return !!(u.searchParams.get('word') || u.searchParams.get('q'));
+    if (['/search', '/search.php'].includes(u.pathname)) return !!(u.searchParams.get('word') || u.searchParams.get('q'));
+    return false;
+  }
+
+  function currentSearch() {
+    const u = new URL(location.href);
+    if (!isSearchUrl(u)) return null;
+    u.searchParams.delete('p');
+    const tag = u.pathname.match(/^\/tags\/([^/]+)(?:\/(artworks|illustrations|manga|novels))?/);
+    let word = '';
+    if (tag) {
+      try { word = decodeURIComponent(tag[1]); } catch { word = tag[1]; }
+    } else {
+      word = u.searchParams.get('word') || u.searchParams.get('q') || '';
+    }
+    let kind = tag?.[2] || '';
+    if (!kind) {
+      if (u.pathname === '/novel/search.php') kind = 'novels';
+      else {
+        const type = u.searchParams.get('type') || '';
+        kind = ['novel','novels'].includes(type) ? 'novels' : type === 'manga' ? 'manga' : ['illust','illustrations'].includes(type) ? 'illustrations' : 'artworks';
+      }
+    }
+    const query = u.searchParams.toString();
+    return {
+      href: u.pathname + (query ? '?' + query : ''),
+      word,
+      kind
+    };
+  }
+
+  function readSaved() {
+    try {
+      const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      if (!Array.isArray(value)) return [];
+      return value.filter(row => row && typeof row.href === 'string' && row.href.startsWith('/') && typeof row.name === 'string');
+    } catch {
+      return [];
+    }
+  }
+
+  function writeSaved(rows) {
+    const clean = rows.slice(0, MAX_SAVED);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
+    window.dispatchEvent(new Event('pixiv-saved-searches-changed'));
+    render();
+  }
+
+  function kindLabel(kind) {
+    return kind === 'novels' ? '小説' : kind === 'manga' ? '漫画' : kind === 'illustrations' ? 'イラスト' : '作品';
+  }
+
+  function defaultName(search) {
+    return `${search.word || '検索'}｜${kindLabel(search.kind)}`.slice(0, 80);
+  }
+
+  function conditionSummary(row) {
+    try {
+      const u = new URL(row.href, location.origin);
+      const params = [...u.searchParams.keys()].filter(k => !['word','q','p'].includes(k));
+      return `${kindLabel(row.kind)} ／ ${row.word || '検索条件'}${params.length ? ` ／ 条件${new Set(params).size}項目` : ''}`;
+    } catch {
+      return row.word || row.href;
+    }
+  }
+
+  function saveCurrent() {
+    const cur = currentSearch();
+    if (!cur) {
+      alert('Pixivの検索結果ページを開いてから保存してください。');
+      return;
+    }
+    const rows = readSaved();
+    const same = rows.find(row => row.href === cur.href);
+    const name = prompt(same ? 'この検索条件は保存済みです。名前を変更しますか？' : 'この検索条件の保存名を入力してください。', same?.name || defaultName(cur));
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const now = Date.now();
+    if (same) {
+      same.name = trimmed;
+      same.word = cur.word;
+      same.kind = cur.kind;
+      same.updatedAt = now;
+    } else {
+      rows.unshift({id: crypto.randomUUID(), name: trimmed, href: cur.href, word: cur.word, kind: cur.kind, createdAt: now, updatedAt: now});
+    }
+    writeSaved(rows);
+  }
+
+  function renameRow(id) {
+    const rows = readSaved(), row = rows.find(x => x.id === id);
+    if (!row) return;
+    const name = prompt('保存名を変更', row.name);
+    if (name === null || !name.trim()) return;
+    row.name = name.trim();
+    row.updatedAt = Date.now();
+    writeSaved(rows);
+  }
+
+  function overwriteRow(id) {
+    const cur = currentSearch();
+    if (!cur) {
+      alert('上書き元にするPixiv検索結果ページを開いてください。');
+      return;
+    }
+    const rows = readSaved(), row = rows.find(x => x.id === id);
+    if (!row) return;
+    if (!confirm(`「${row.name}」を現在の検索条件で上書きしますか？`)) return;
+    row.href = cur.href;
+    row.word = cur.word;
+    row.kind = cur.kind;
+    row.updatedAt = Date.now();
+    writeSaved(rows);
+  }
+
+  function deleteRow(id) {
+    const rows = readSaved(), row = rows.find(x => x.id === id);
+    if (!row || !confirm(`「${row.name}」を保存検索から削除しますか？`)) return;
+    writeSaved(rows.filter(x => x.id !== id));
+  }
+
+  function moveRow(id, delta) {
+    const rows = readSaved(), i = rows.findIndex(x => x.id === id);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= rows.length) return;
+    [rows[i], rows[j]] = [rows[j], rows[i]];
+    writeSaved(rows);
+  }
+
+  function openRow(row) {
+    location.assign(new URL(row.href, location.origin).href);
+  }
+
+  function render() {
+    if (!root) return;
+    const rows = readSaved();
+    const list = root.querySelector('.pss-list');
+    const current = currentSearch();
+    const currentText = root.querySelector('.pss-current-text');
+    const saveBtn = root.querySelector('.pss-save-current');
+    currentText.textContent = current
+      ? `現在：${current.word || '検索'} ／ ${kindLabel(current.kind)}`
+      : '現在のページは検索結果ページではありません。';
+    saveBtn.disabled = !current;
+    list.replaceChildren();
+
+    if (!rows.length) {
+      const empty = document.createElement('p');
+      empty.className = 'pss-empty';
+      empty.textContent = '保存した検索条件はまだありません。検索結果ページで「現在の検索を保存」を押してください。';
+      list.append(empty);
+      return;
+    }
+
+    rows.forEach((row, index) => {
+      const card = document.createElement('article');
+      card.className = 'pss-card';
+
+      const main = document.createElement('button');
+      main.type = 'button';
+      main.className = 'pss-open';
+      main.addEventListener('click', () => openRow(row));
+      const name = document.createElement('strong');
+      name.textContent = row.name;
+      const summary = document.createElement('span');
+      summary.textContent = conditionSummary(row);
+      main.append(name, summary);
+
+      const actions = document.createElement('div');
+      actions.className = 'pss-actions';
+      const make = (label, fn, disabled=false) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = label; b.disabled = disabled;
+        b.addEventListener('click', fn); return b;
+      };
+      actions.append(
+        make('名前変更', () => renameRow(row.id)),
+        make('現在条件で上書き', () => overwriteRow(row.id), !current),
+        make('↑', () => moveRow(row.id, -1), index === 0),
+        make('↓', () => moveRow(row.id, 1), index === rows.length - 1),
+        make('削除', () => deleteRow(row.id))
+      );
+      card.append(main, actions);
+      list.append(card);
+    });
+  }
+
+  function build() {
+    if (root || !document.body) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      #${ROOT_ID}{display:none;position:fixed;top:${OFFSET}px;right:0;bottom:0;left:0;z-index:2147483646;background:#f4f6f8;color:#202124;overflow:auto;-webkit-overflow-scrolling:touch;font:14px/1.5 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif}
+      #${ROOT_ID}.open{display:block}
+      #${ROOT_ID} *{box-sizing:border-box}
+      #${ROOT_ID} .pss-wrap{max-width:900px;margin:auto;padding:18px 14px 80px}
+      #${ROOT_ID} .pss-head{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:#fff;border:1px solid #dde2e8;border-radius:12px;padding:14px;margin-bottom:12px}
+      #${ROOT_ID} .pss-head h2{font-size:18px;margin:0}
+      #${ROOT_ID} .pss-current-text{font-size:12px;color:#65707d;flex:1 1 100%}
+      #${ROOT_ID} button{font:inherit;border:1px solid #ccd2d9;border-radius:8px;background:#fff;color:#202124;padding:9px 10px}
+      #${ROOT_ID} button:disabled{opacity:.45}
+      #${ROOT_ID} .pss-save-current{background:#0096fa;color:#fff;border-color:#0096fa;font-weight:700}
+      #${ROOT_ID} .pss-card{background:#fff;border:1px solid #dde2e8;border-radius:12px;padding:10px;margin-bottom:10px}
+      #${ROOT_ID} .pss-open{display:flex;width:100%;text-align:left;flex-direction:column;gap:4px;border:0;background:transparent;padding:5px}
+      #${ROOT_ID} .pss-open strong{font-size:15px}
+      #${ROOT_ID} .pss-open span{font-size:12px;color:#66717e;overflow-wrap:anywhere}
+      #${ROOT_ID} .pss-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+      #${ROOT_ID} .pss-actions button{font-size:12px;padding:7px 9px}
+      #${ROOT_ID} .pss-empty{background:#fff;border:1px solid #dde2e8;border-radius:12px;padding:18px;color:#66717e}
+      @media(max-width:600px){#${ROOT_ID} .pss-wrap{padding:12px 9px 70px}#${ROOT_ID} .pss-head h2{font-size:16px}#${ROOT_ID} .pss-actions button{font-size:11px;padding:7px}}
+    `;
+    document.head.append(style);
+
+    root = document.createElement('section');
+    root.id = ROOT_ID;
+    root.innerHTML = '<div class="pss-wrap"><div class="pss-head"><h2>🔖 保存したPixiv検索</h2><button type="button" class="pss-save-current">現在の検索を保存</button><div class="pss-current-text"></div></div><div class="pss-list"></div></div>';
+    root.querySelector('.pss-save-current').addEventListener('click', saveCurrent);
+    document.body.append(root);
+    render();
+  }
+
+  function open() {
+    build();
+    if (!root) return;
+    render();
+    root.classList.add('open');
+  }
+
+  function close() {
+    root?.classList.remove('open');
+  }
+
+  function count() {
+    return readSaved().length;
+  }
+
+  window.__pixivSavedSearchesUi = {open, close, count, render, storageKey: STORAGE_KEY};
+  window.addEventListener('pixiv-saved-searches-changed', render);
+  if (document.body) build(); else addEventListener('DOMContentLoaded', build, {once:true});
+})();
+
+
 // ---- Unified Pixiv tools shell (v0.6.0) ----
 (() => {
   'use strict';
@@ -1012,6 +1276,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     };
   }
 
+  function savedSearchUi() {
+    return window.__pixivSavedSearchesUi || null;
+  }
+
   function ensurePageSpecificUi() {
     // The novel module may be initialized a frame after this shell.
     const n = novelUi();
@@ -1045,6 +1313,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     novelUi().overlay?.classList.remove('pnte-open');
   }
 
+  function hideSavedSearches() {
+    savedSearchUi()?.close?.();
+  }
+
   function showPlaceholder(message) {
     const node = document.getElementById(PLACEHOLDER_ID);
     if (!node) return;
@@ -1069,6 +1341,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     paintTabs();
     hidePlaceholder();
     hideNovel();
+    hideSavedSearches();
 
     if (!isSearchPage()) {
       hideBookmark();
@@ -1090,6 +1363,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     paintTabs();
     hidePlaceholder();
     hideBookmark();
+    hideSavedSearches();
 
     if (!isNovelPage()) {
       hideNovel();
@@ -1110,9 +1384,24 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     }
   }
 
+  function openSavedSearches() {
+    active = 'searches';
+    paintTabs();
+    hidePlaceholder();
+    hideBookmark();
+    hideNovel();
+    const s = savedSearchUi();
+    if (!s?.open) {
+      showPlaceholder('保存検索機能を準備中です。少し待ってからもう一度お試しください。');
+      return;
+    }
+    s.open();
+  }
+
   function switchTo(tab) {
     ensurePageSpecificUi();
     if (tab === 'novel') openNovel();
+    else if (tab === 'searches') openSavedSearches();
     else openBookmark();
   }
 
@@ -1120,6 +1409,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     opened = false;
     hidePlaceholder();
     hideNovel();
+    hideSavedSearches();
 
     const b = bookmarkUi();
     if (b?.veil?.classList.contains('open') && b.close) b.close.click();
@@ -1131,7 +1421,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   function openShell() {
     opened = true;
     document.getElementById(BAR_ID)?.classList.add('open');
-    const preferred = isNovelPage() ? 'novel' : 'bookmark';
+    const preferred = isNovelPage() ? 'novel' : isSearchPage() ? 'bookmark' : 'searches';
     switchTo(preferred);
   }
 
@@ -1139,7 +1429,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     ensurePageSpecificUi();
     const launch = document.getElementById(LAUNCH_ID);
     if (!launch) return;
-    const useful = isNovelPage() || isSearchPage();
+    const useful = isNovelPage() || isSearchPage() || (savedSearchUi()?.count?.() || 0) > 0;
     launch.style.display = useful ? 'block' : 'none';
 
     // Do not change tabs automatically while the panel is open.
@@ -1156,7 +1446,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       #pnte-root{top:${OFFSET}px!important;right:0!important;bottom:0!important;left:0!important;height:auto!important}
       #${LAUNCH_ID}{position:fixed;right:14px;bottom:max(76px,env(safe-area-inset-bottom));z-index:2147483001;border:0;border-radius:999px;padding:12px 16px;background:#0096fa;color:#fff;font:700 14px/1.2 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif;box-shadow:0 4px 18px #0004}
       #${BAR_ID}{display:none;position:fixed;top:0;left:0;right:0;height:${OFFSET}px;z-index:2147483647;background:#fff;color:#202124;border-bottom:1px solid #dfe3e8;box-shadow:0 2px 9px #0002;padding:max(7px,env(safe-area-inset-top)) 10px 7px;font-family:-apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif}
-      #${BAR_ID}.open{display:flex;align-items:flex-end;gap:8px}
+      #${BAR_ID}.open{display:flex;align-items:flex-end;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch}
       #${BAR_ID} .pt-title{font-weight:800;font-size:15px;white-space:nowrap;margin:0 4px 5px 2px}
       #${BAR_ID} [data-tool-tab]{border:1px solid #ccd2d9;background:#fff;color:#333;border-radius:9px;padding:9px 11px;font:700 13px/1 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif}
       #${BAR_ID} [data-tool-tab].active{background:#0096fa;color:#fff;border-color:#0096fa}
@@ -1165,7 +1455,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       #${PLACEHOLDER_ID}.open{display:block}
       @media(max-width:600px){
         #${BAR_ID}{padding-left:7px;padding-right:7px;gap:5px}
-        #${BAR_ID} .pt-title{font-size:13px;margin-right:1px}
+        #${BAR_ID} .pt-title{display:none}
         #${BAR_ID} [data-tool-tab],#${BAR_ID} .pt-close{font-size:11px;padding:8px 7px}
         #${LAUNCH_ID}{right:12px;bottom:max(76px,env(safe-area-inset-bottom));padding:11px 14px}
       }
@@ -1203,7 +1493,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     close.textContent = '閉じる';
     close.addEventListener('click', closeAll);
 
-    bar.append(title, bookmark, novel, close);
+    bar.append(title, bookmark, novel, searches, close);
 
     const placeholder = document.createElement('div');
     placeholder.id = PLACEHOLDER_ID;
