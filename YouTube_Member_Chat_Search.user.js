@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.5
+// @version      0.1.6
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -20,19 +20,200 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.5';
+  const VERSION = '0.1.6';
 
   const state = {
     videoId: null,
     messages: [],
+    messageMap: new Map(),
     loadedVideoId: null,
     loading: false,
     abortController: null,
     lastUrl: location.href,
     requestCount: 0,
+    workerProgress: [],
+    cacheRecord: null,
+    cacheCompleted: false,
+    manualAbort: false,
+    persistBusy: false,
+    persistPending: false,
+    lastPersistRequest: 0,
+    autoResumeStartedFor: null,
   };
 
+  const CACHE_DB_NAME = 'MarinaMemberChatSearchDB';
+  const CACHE_DB_VERSION = 1;
+  const CACHE_STORE = 'videoCache';
+  const FAST_WORKERS = 3;
+  const FAST_OVERLAP_MS = 60 * 1000;
+  let cacheDbPromise = null;
+
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function openCacheDb() {
+    if (cacheDbPromise) return cacheDbPromise;
+    cacheDbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(CACHE_DB_NAME, CACHE_DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(CACHE_STORE)) {
+          db.createObjectStore(CACHE_STORE, { keyPath: 'videoId' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('キャッシュDBを開けませんでした。'));
+    });
+    return cacheDbPromise;
+  }
+
+  async function readCache(videoId) {
+    if (!videoId || typeof indexedDB === 'undefined') return null;
+    try {
+      const db = await openCacheDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(CACHE_STORE, 'readonly');
+        const req = tx.objectStore(CACHE_STORE).get(videoId);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) {
+      console.warn('[Member Chat Search] cache read failed', e);
+      return null;
+    }
+  }
+
+  async function writeCache(record) {
+    if (!record?.videoId || typeof indexedDB === 'undefined') return;
+    const db = await openCacheDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(CACHE_STORE, 'readwrite');
+      tx.objectStore(CACHE_STORE).put(record);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error || new Error('cache write failed'));
+      tx.onabort = () => reject(tx.error || new Error('cache write aborted'));
+    });
+  }
+
+  async function deleteCache(videoId) {
+    if (!videoId || typeof indexedDB === 'undefined') return;
+    try {
+      const db = await openCacheDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(CACHE_STORE, 'readwrite');
+        tx.objectStore(CACHE_STORE).delete(videoId);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('[Member Chat Search] cache delete failed', e);
+    }
+  }
+
+  function currentMessagesSorted() {
+    return [...state.messageMap.values()].sort((a, b) => a.offsetMs - b.offsetMs);
+  }
+
+  function progressLabelFromWorkers(workers = state.workerProgress) {
+    if (!Array.isArray(workers) || !workers.length) return '';
+    if (workers.length === 1) {
+      const w = workers[0];
+      return formatTime((w.offsetMs || 0) / 1000);
+    }
+    const ratios = workers.map((w) => {
+      const span = Math.max(1, (w.endMs || 0) - (w.startMs || 0));
+      return Math.max(0, Math.min(1, ((w.offsetMs || w.startMs || 0) - (w.startMs || 0)) / span));
+    });
+    const pct = Math.round((ratios.reduce((a, b) => a + b, 0) / ratios.length) * 100);
+    return `${pct}%`;
+  }
+
+  async function persistSnapshot({ completed = false, inProgress = true, force = false } = {}) {
+    const videoId = state.videoId || getVideoId();
+    if (!videoId || !state.messageMap) return;
+
+    if (state.persistBusy && !force) {
+      state.persistPending = true;
+      return;
+    }
+    state.persistBusy = true;
+    try {
+      const messages = currentMessagesSorted();
+      const record = {
+        videoId,
+        version: VERSION,
+        messages,
+        workers: Array.isArray(state.workerProgress) ? state.workerProgress.map((w) => ({ ...w })) : [],
+        completed: Boolean(completed),
+        inProgress: Boolean(inProgress),
+        fastMode: state.workerProgress.length > 1,
+        updatedAt: Date.now(),
+        requestCount: state.requestCount,
+      };
+      await writeCache(record);
+      state.cacheRecord = record;
+      state.cacheCompleted = record.completed;
+      state.messages = messages;
+      state.lastPersistRequest = state.requestCount;
+    } catch (e) {
+      console.warn('[Member Chat Search] persist failed', e);
+    } finally {
+      state.persistBusy = false;
+      if (state.persistPending) {
+        state.persistPending = false;
+        void persistSnapshot({ completed, inProgress });
+      }
+    }
+  }
+
+  function maybePersistSnapshot() {
+    if (state.requestCount - state.lastPersistRequest >= 40) {
+      void persistSnapshot({ completed: false, inProgress: true });
+    }
+  }
+
+  async function restoreCacheForVideo(videoId, { allowAutoResume = true } = {}) {
+    if (!videoId) return;
+    const record = await readCache(videoId);
+    if (getVideoId() !== videoId) return;
+
+    state.cacheRecord = record;
+    state.cacheCompleted = Boolean(record?.completed);
+    state.messageMap = new Map();
+    for (const msg of record?.messages || []) {
+      const key = msg.id || `${msg.offsetMs}|${msg.author}|${msg.message}`;
+      state.messageMap.set(key, msg);
+    }
+    state.messages = currentMessagesSorted();
+    state.workerProgress = Array.isArray(record?.workers) ? record.workers.map((w) => ({ ...w })) : [];
+    if (record?.completed) state.loadedVideoId = videoId;
+
+    if (record?.messages?.length) {
+      const progress = progressLabelFromWorkers(record.workers);
+      status(
+        record.completed
+          ? `保存済み：${record.messages.length.toLocaleString()}件（取得完了）`
+          : `保存済み：${record.messages.length.toLocaleString()}件${progress ? ` / 進捗 ${progress}` : ''}`
+      );
+      setLoadButton(record.completed ? '再取得' : '続きから取得', false);
+      renderSearchResults();
+    }
+
+    if (
+      allowAutoResume &&
+      record?.inProgress &&
+      !record?.completed &&
+      !state.loading &&
+      state.autoResumeStartedFor !== videoId
+    ) {
+      state.autoResumeStartedFor = videoId;
+      setTimeout(() => {
+        if (getVideoId() === videoId && !state.loading) {
+          status('前回の続きから自動再開します…');
+          void handleLoadClick(true);
+        }
+      }, 700);
+    }
+  }
 
   function getVideoId() {
     try {
@@ -843,54 +1024,192 @@
     return max;
   }
 
-  async function loadAllChat(onProgress, signal) {
-    state.requestCount = 0;
-    const ctx = await makeRequestContext(signal);
+  function getVideoDurationMs(ctx) {
+    const video = document.querySelector('video');
+    const d = Number(video?.duration);
+    if (Number.isFinite(d) && d > 0) return Math.round(d * 1000);
+
+    const lengths = deepFindValues(ctx?.initialData, 'lengthSeconds', 50)
+      .map((v) => Number(v))
+      .filter((v) => Number.isFinite(v) && v > 0);
+    if (lengths.length) return Math.round(Math.max(...lengths) * 1000);
+    return null;
+  }
+
+  function seedMessageMap() {
     const map = new Map();
+    for (const msg of state.messages || []) {
+      const key = msg.id || `${msg.offsetMs}|${msg.author}|${msg.message}`;
+      map.set(key, msg);
+    }
+    state.messageMap = map;
+    return map;
+  }
+
+  function addActionsTracked(actions, map) {
+    const before = map.size;
+    addActions(actions, map);
+    if (map.size !== before) state.messageMap = map;
+    return map.size - before;
+  }
+
+  async function freshPlayerSeek(ctx, signal) {
+    const first = await innertubeReplay(ctx, ctx.continuation.continuation, signal, null, false);
+    return {
+      response: first,
+      playerSeek: findContinuation(first, 'playerSeekContinuationData'),
+      replay: findContinuation(first, 'liveChatReplayContinuationData'),
+    };
+  }
+
+  function buildFastRanges(durationMs, resumeWorkers = []) {
+    const workers = [];
+    for (let i = 0; i < FAST_WORKERS; i++) {
+      const nominalStart = Math.floor((durationMs * i) / FAST_WORKERS);
+      const nominalEnd = Math.floor((durationMs * (i + 1)) / FAST_WORKERS);
+      const startMs = Math.max(0, nominalStart - (i > 0 ? FAST_OVERLAP_MS : 0));
+      const endMs = Math.min(durationMs, nominalEnd + (i < FAST_WORKERS - 1 ? FAST_OVERLAP_MS : 0));
+      const old = resumeWorkers.find((w) => Number(w.index) === i);
+      const saved = Number(old?.offsetMs);
+      const offsetMs = Number.isFinite(saved) && saved >= startMs && saved <= endMs
+        ? Math.max(startMs, saved - FAST_OVERLAP_MS)
+        : startMs;
+      workers.push({ index: i, startMs, endMs, offsetMs, done: Boolean(old?.done && saved >= endMs) });
+    }
+    return workers;
+  }
+
+  async function runSeekWorker(ctx, worker, map, onProgress, signal, initialToken = null) {
+    if (worker.done) return;
+    let token = initialToken;
+    if (!token) {
+      const init = await freshPlayerSeek(ctx, signal);
+      token = init.playerSeek;
+      if (!token) throw new Error('高速取得用playerSeekトークンを取得できませんでした。');
+    }
+
+    let offsetMs = Math.max(worker.startMs, Number(worker.offsetMs) || worker.startMs);
+    let previousToken = null;
+    let loops = 0;
+
+    while (token && loops < 30000) {
+      loops++;
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
+      const response = await innertubeReplay(ctx, token, signal, offsetMs, false);
+      const actions = getActions(response);
+      addActionsTracked(actions, map);
+
+      const lastOffset = maxOffsetFromActions(actions);
+      const nextToken = findContinuation(response, 'playerSeekContinuationData');
+
+      if (lastOffset !== null) {
+        offsetMs = Math.max(offsetMs, lastOffset);
+        worker.offsetMs = offsetMs;
+      }
+      if (offsetMs >= worker.endMs) {
+        worker.done = true;
+      }
+
+      const doneCount = state.workerProgress.filter((w) => w.done).length;
+      const ratios = state.workerProgress.map((w) => {
+        const span = Math.max(1, w.endMs - w.startMs);
+        return Math.max(0, Math.min(1, ((w.offsetMs || w.startMs) - w.startMs) / span));
+      });
+      const pct = Math.round((ratios.reduce((a, b) => a + b, 0) / ratios.length) * 100);
+
+      onProgress({
+        phase: 'fast',
+        count: map.size,
+        requests: state.requestCount,
+        detail: `高速${FAST_WORKERS}並列 ${pct}%（完了 ${doneCount}/${FAST_WORKERS}）`,
+      });
+      maybePersistSnapshot();
+
+      if (worker.done || !nextToken) break;
+      if (lastOffset === null) {
+        if (nextToken === token || nextToken === previousToken) break;
+      } else if (lastOffset <= offsetMs && nextToken === token) {
+        break;
+      }
+
+      previousToken = token;
+      token = nextToken;
+      if (loops % 12 === 0) await sleep(0);
+    }
+
+    if (worker.offsetMs >= worker.endMs - 1000) worker.done = true;
+  }
+
+  async function loadAllChat(onProgress, signal, { fastMode = true, resumeRecord = null } = {}) {
+    state.requestCount = 0;
+    state.lastPersistRequest = 0;
+    const ctx = await makeRequestContext(signal);
+    const map = seedMessageMap();
 
     onProgress({
       phase: 'auth',
-      count: 0,
+      count: map.size,
       requests: 0,
-      detail: `認証:${ctx.auth.hasBaseSecret ? 'OK' : 'なし'} / Safariアカウント:${ctx.pageSessionIndex ?? '不明'} / 送信:${ctx.cfg.SESSION_INDEX ?? '不明'} / token:${ctx.continuation.source} / client:${ctx.cfg.INNERTUBE_CONTEXT?.client?.clientName || ctx.cfg.clientName || '?'}`,
+      detail: `認証:${ctx.auth.hasBaseSecret ? 'OK' : 'なし'} / Safariアカウント:${ctx.pageSessionIndex ?? '不明'} / 送信:${ctx.cfg.SESSION_INDEX ?? '不明'} / token:${ctx.continuation.source}`,
     });
 
     if (!ctx.auth.header) {
       throw new Error('ログイン認証用SAPISIDを取得できません。メン限アーカイブでは認証が必要です。');
     }
 
-    // Stage 1: 現行API。最初の応答からplayerSeekContinuationを取得する。
-    let firstResponse;
+    let init;
     try {
-      firstResponse = await innertubeReplay(ctx, ctx.continuation.continuation, signal, null, false);
+      init = await freshPlayerSeek(ctx, signal);
     } catch (e) {
-      // 一部の旧形式ではAPI key + offset方式が必要な場合があるためフォールバック。
       if ((e?.status === 400 || e?.status === 404) && ctx.cfg.INNERTUBE_API_KEY) {
-        onProgress({ phase: 'legacy', count: 0, requests: state.requestCount, detail: '現行方式が失敗。旧方式を試します…' });
-        return loadLegacyReplay(ctx, map, onProgress, signal);
+        onProgress({ phase: 'legacy', count: map.size, requests: state.requestCount, detail: '現行方式が失敗。旧方式を試します…' });
+        return loadLegacyReplay(ctx, map, onProgress, signal, resumeRecord);
       }
       throw e;
     }
 
-    const playerSeek = findContinuation(firstResponse, 'playerSeekContinuationData');
-    const replayContinuation = findContinuation(firstResponse, 'liveChatReplayContinuationData');
+    const durationMs = getVideoDurationMs(ctx);
+    const canFast = Boolean(fastMode && init.playerSeek && durationMs && durationMs >= 30 * 60 * 1000);
 
-    if (playerSeek) {
-      let token = playerSeek;
-      let offsetMs = 0;
+    if (canFast) {
+      state.workerProgress = buildFastRanges(durationMs, resumeRecord?.workers || []);
+      const active = state.workerProgress.filter((w) => !w.done);
+
+      // worker 0だけは既に取得したplayerSeekトークンを使い、他は独立tokenを取得する。
+      await Promise.all(active.map((worker) =>
+        runSeekWorker(
+          ctx,
+          worker,
+          map,
+          onProgress,
+          signal,
+          worker.index === 0 ? init.playerSeek : null
+        )
+      ));
+    } else if (init.playerSeek) {
+      const old = resumeRecord?.workers?.[0];
+      let token = init.playerSeek;
+      let offsetMs = Math.max(0, Number(old?.offsetMs || 0) - FAST_OVERLAP_MS);
       let previousToken = null;
       let loops = 0;
+      state.workerProgress = [{ index: 0, startMs: 0, endMs: durationMs || Number.MAX_SAFE_INTEGER, offsetMs, done: false }];
 
-      while (token && loops < 20000) {
+      while (token && loops < 30000) {
         loops++;
         if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
         const response = await innertubeReplay(ctx, token, signal, offsetMs, false);
         const actions = getActions(response);
-        addActions(actions, map);
+        addActionsTracked(actions, map);
 
         const lastOffset = maxOffsetFromActions(actions);
         const nextToken = findContinuation(response, 'playerSeekContinuationData');
+
+        if (lastOffset !== null) {
+          offsetMs = Math.max(offsetMs, lastOffset);
+          state.workerProgress[0].offsetMs = offsetMs;
+        }
 
         onProgress({
           phase: 'playerSeek',
@@ -898,80 +1217,88 @@
           requests: state.requestCount,
           detail: lastOffset === null ? '取得中…' : `${formatTime(lastOffset / 1000)} まで取得`,
         });
+        maybePersistSnapshot();
 
         if (!nextToken) break;
         if (lastOffset === null) {
-          // アクションなしでもtokenが更新される場合だけ継続。
           if (nextToken === token || nextToken === previousToken) break;
-        } else {
-          if (lastOffset <= offsetMs && nextToken === token) break;
-          offsetMs = Math.max(offsetMs, lastOffset);
+        } else if (lastOffset <= offsetMs && nextToken === token) {
+          break;
         }
 
         previousToken = token;
         token = nextToken;
-
-        // UIを固めない。
-        if (loops % 8 === 0) await sleep(0);
+        if (loops % 12 === 0) await sleep(0);
       }
-    } else if (replayContinuation) {
-      // playerSeekがない場合は最初のバッチも検索対象にする。
-      addActions(getActions(firstResponse), map);
-      let token = replayContinuation;
+      state.workerProgress[0].done = true;
+    } else if (init.replay) {
+      addActionsTracked(getActions(init.response), map);
+      let token = init.replay;
       let previous = null;
       let loops = 0;
+      state.workerProgress = [{ index: 0, startMs: 0, endMs: durationMs || Number.MAX_SAFE_INTEGER, offsetMs: 0, done: false }];
 
-      while (token && loops < 20000) {
+      while (token && loops < 30000) {
         loops++;
         if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
         const response = await innertubeReplay(ctx, token, signal, null, false);
-        addActions(getActions(response), map);
+        addActionsTracked(getActions(response), map);
+        const lastOffset = maxOffsetFromActions(getActions(response));
+        if (lastOffset !== null) state.workerProgress[0].offsetMs = lastOffset;
 
         onProgress({ phase: 'replay', count: map.size, requests: state.requestCount, detail: '取得中…' });
+        maybePersistSnapshot();
 
         const next = findContinuation(response, 'liveChatReplayContinuationData');
         if (!next || next === token || next === previous) break;
         previous = token;
         token = next;
-        if (loops % 8 === 0) await sleep(0);
+        if (loops % 12 === 0) await sleep(0);
       }
+      state.workerProgress[0].done = true;
     } else {
-      // 初回応答にメッセージがあるケースだけ救済。
-      addActions(getActions(firstResponse), map);
+      addActionsTracked(getActions(init.response), map);
       if (!map.size) throw new Error('Chat Replayの継続トークンが返りませんでした。');
     }
 
-    return [...map.values()].sort((a, b) => a.offsetMs - b.offsetMs);
+    state.messageMap = map;
+    return currentMessagesSorted();
   }
 
-  async function loadLegacyReplay(ctx, map, onProgress, signal) {
+  async function loadLegacyReplay(ctx, map, onProgress, signal, resumeRecord = null) {
     const fixedToken = ctx.continuation.continuation;
-    let offsetMs = 0;
+    const old = resumeRecord?.workers?.[0];
+    let offsetMs = Math.max(0, Number(old?.offsetMs || 0) - FAST_OVERLAP_MS);
     let loops = 0;
+    state.workerProgress = [{ index: 0, startMs: 0, endMs: Number.MAX_SAFE_INTEGER, offsetMs, done: false }];
 
-    while (loops < 20000) {
+    while (loops < 30000) {
       loops++;
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
       const response = await innertubeReplay(ctx, fixedToken, signal, offsetMs, true);
       const actions = getActions(response);
-      addActions(actions, map);
+      addActionsTracked(actions, map);
       const lastOffset = maxOffsetFromActions(actions);
 
+      if (lastOffset !== null) state.workerProgress[0].offsetMs = lastOffset;
       onProgress({
         phase: 'legacy',
         count: map.size,
         requests: state.requestCount,
         detail: lastOffset === null ? '旧方式で取得中…' : `${formatTime(lastOffset / 1000)} まで取得`,
       });
+      maybePersistSnapshot();
 
       if (lastOffset === null || lastOffset <= offsetMs) break;
       offsetMs = lastOffset;
-      if (loops % 8 === 0) await sleep(0);
+      if (loops % 12 === 0) await sleep(0);
     }
 
+    state.workerProgress[0].done = true;
     if (!map.size) throw new Error('旧方式でもチャットを取得できませんでした。');
-    return [...map.values()].sort((a, b) => a.offsetMs - b.offsetMs);
+    state.messageMap = map;
+    return currentMessagesSorted();
   }
 
   function injectStyle() {
@@ -1005,6 +1332,8 @@
       #${PANEL_ID} .mcs-status { font-size:12px; color:#606060; min-height:18px; overflow-wrap:anywhere; }
       #${PANEL_ID} .mcs-search { width:100%; box-sizing:border-box; border:1px solid #bbb; border-radius:10px; padding:10px 11px; font:inherit; }
       #${PANEL_ID} .mcs-help { font-size:11px; color:#777; }
+      #${PANEL_ID} .mcs-fast-label { display:flex; align-items:center; gap:7px; font-size:12px; color:#555; }
+      #${PANEL_ID} .mcs-fast { width:18px; height:18px; }
       #${PANEL_ID} .mcs-results { overflow:auto; border-top:1px solid #e5e5e5; min-height:90px; -webkit-overflow-scrolling:touch; }
       #${PANEL_ID} .mcs-empty { padding:18px 14px; color:#777; text-align:center; }
       #${PANEL_ID} .mcs-row { display:block; width:100%; text-align:left; border:0; border-bottom:1px solid #eee; background:#fff; padding:10px 12px; cursor:pointer; color:#111; }
@@ -1088,11 +1417,15 @@
       placeholder: '本文・投稿者を検索（A | B でOR）',
       autocomplete: 'off',
     });
+    const fast = makeEl('input', { className: 'mcs-fast', type: 'checkbox' });
+    fast.checked = true;
+    const fastLabel = makeEl('label', { className: 'mcs-fast-label' });
+    fastLabel.append(fast, document.createTextNode('高速取得（3並列・長時間アーカイブ向け）'));
     const help = makeEl('div', {
       className: 'mcs-help',
-      text: '検索結果をタップすると、その発言時刻へ移動します。',
+      text: '検索結果をタップすると、その発言時刻へ移動します。取得途中のデータは自動保存されます。',
     });
-    controls.append(load, statusEl, search, help);
+    controls.append(load, statusEl, fastLabel, search, help);
 
     const results = makeEl('div', { className: 'mcs-results' });
     results.appendChild(makeEl('div', { className: 'mcs-empty', text: 'まだ取得していません。' }));
@@ -1122,7 +1455,7 @@
       event.stopPropagation();
       setPanelOpen(false);
     });
-    load.addEventListener('click', handleLoadClick);
+    load.addEventListener('click', () => void handleLoadClick(false));
     search.addEventListener('input', renderSearchResults);
   }
 
@@ -1140,7 +1473,7 @@
     el.disabled = disabled;
   }
 
-  async function handleLoadClick() {
+  async function handleLoadClick(autoResume = false) {
     const videoId = getVideoId();
     if (!videoId) {
       status('YouTubeの動画・配信アーカイブページで使ってください。', true);
@@ -1148,46 +1481,89 @@
     }
 
     if (state.loading) {
+      state.manualAbort = true;
       state.abortController?.abort();
       return;
     }
 
+    if (!autoResume && state.cacheCompleted) {
+      await deleteCache(videoId);
+      state.cacheRecord = null;
+      state.cacheCompleted = false;
+      state.messages = [];
+      state.messageMap = new Map();
+      state.workerProgress = [];
+    }
+
+    const cache = state.cacheRecord?.videoId === videoId ? state.cacheRecord : await readCache(videoId);
+    if (cache && !state.messages.length) {
+      state.messages = cache.messages || [];
+      state.messageMap = new Map();
+      for (const msg of state.messages) {
+        const key = msg.id || `${msg.offsetMs}|${msg.author}|${msg.message}`;
+        state.messageMap.set(key, msg);
+      }
+    }
+
     state.videoId = videoId;
     state.loading = true;
+    state.manualAbort = false;
     state.abortController = new AbortController();
-    state.messages = [];
     state.loadedVideoId = null;
     setLoadButton('中止', false);
-    status('準備中…');
+    status(autoResume || cache?.messages?.length ? '保存済みデータから続き取得を開始…' : '準備中…');
     renderSearchResults();
 
+    const fastInput = document.querySelector(`#${PANEL_ID} .mcs-fast`);
+    const fastMode = fastInput ? Boolean(fastInput.checked) : true;
+
     try {
+      await persistSnapshot({ completed: false, inProgress: true, force: true });
+
       const messages = await loadAllChat((p) => {
         status(`${p.detail}　${p.count.toLocaleString()}件 / API ${p.requests}回`);
-      }, state.abortController.signal);
+      }, state.abortController.signal, {
+        fastMode,
+        resumeRecord: cache,
+      });
 
       state.messages = messages;
+      state.messageMap = new Map(messages.map((msg) => [
+        msg.id || `${msg.offsetMs}|${msg.author}|${msg.message}`,
+        msg,
+      ]));
       state.loadedVideoId = videoId;
+      await persistSnapshot({ completed: true, inProgress: false, force: true });
       status(`取得完了：${messages.length.toLocaleString()}件（API ${state.requestCount}回）`);
       setLoadButton('再取得', false);
       renderSearchResults();
     } catch (e) {
       if (e?.name === 'AbortError') {
-        status('取得を中止しました。');
+        await persistSnapshot({
+          completed: false,
+          inProgress: !state.manualAbort,
+          force: true,
+        });
+        status(state.manualAbort ? '取得を中止しました。続きは保存されています。' : '取得が中断されました。戻ったとき続きから再開します。');
       } else {
         console.error('[Member Chat Search]', e);
+        await persistSnapshot({ completed: false, inProgress: false, force: true });
         let extra = '';
         if (/HTTP 400/.test(String(e?.message))) {
-          extra = '／認証セッション不一致の可能性があります。赤字内のSafariAccountとsentAccountを確認します。';
+          extra = '／認証セッション不一致の可能性があります。';
         } else if (/HTTP 403/.test(String(e?.message))) {
           extra = '／このアカウントに視聴権限があるか確認してください。';
+        } else if (/HTTP 429/.test(String(e?.message))) {
+          extra = '／高速取得で制限された可能性があります。「高速取得」のチェックを外して再開できます。';
         }
         status(`${e?.message || e}${extra}`, true);
       }
-      setLoadButton('チャットを取得', false);
+      setLoadButton('続きから取得', false);
     } finally {
       state.loading = false;
       state.abortController = null;
+      state.manualAbort = false;
+      state.messages = currentMessagesSorted();
       renderSearchResults();
     }
   }
@@ -1275,15 +1651,24 @@
   function resetForNavigation() {
     const id = getVideoId();
     if (id === state.videoId) return;
-    if (state.loading) state.abortController?.abort();
+    if (state.loading) {
+      void persistSnapshot({ completed: false, inProgress: true, force: true });
+      state.abortController?.abort();
+    }
     state.videoId = id;
     state.loadedVideoId = null;
     state.messages = [];
+    state.messageMap = new Map();
+    state.workerProgress = [];
+    state.cacheRecord = null;
+    state.cacheCompleted = false;
+    state.autoResumeStartedFor = null;
     const input = document.querySelector(`#${PANEL_ID} .mcs-search`);
     if (input) input.value = '';
     status('アーカイブを開いて「チャットを取得」を押してください。');
     setLoadButton('チャットを取得', false);
     renderSearchResults();
+    if (id) void restoreCacheForVideo(id, { allowAutoResume: true });
   }
 
   function boot() {
@@ -1293,6 +1678,20 @@
 
     document.addEventListener('yt-navigate-finish', resetForNavigation, true);
     window.addEventListener('popstate', resetForNavigation);
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && state.loading) {
+        void persistSnapshot({ completed: false, inProgress: true, force: true });
+      } else if (!document.hidden && state.videoId && !state.loading) {
+        void restoreCacheForVideo(state.videoId, { allowAutoResume: true });
+      }
+    });
+
+    window.addEventListener('pagehide', () => {
+      if (state.loading) void persistSnapshot({ completed: false, inProgress: true, force: true });
+    });
+
+    if (state.videoId) void restoreCacheForVideo(state.videoId, { allowAutoResume: true });
 
     setInterval(() => {
       if (!document.getElementById(BUTTON_ID) || !document.getElementById(PANEL_ID)) createUi();
