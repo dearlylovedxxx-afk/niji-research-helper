@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.3
+// @version      0.1.4
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM.xmlHttpRequest
+// @grant        GM.xmlhttpRequest
+// @grant        GM_xmlhttpRequest
+// @connect      www.youtube.com
 // ==/UserScript==
 
 (() => {
@@ -17,7 +20,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.3';
+  const VERSION = '0.1.4';
 
   const state = {
     videoId: null,
@@ -165,21 +168,25 @@
   }
 
   async function fetchPageData(signal) {
-    // @grant none なら通常はページ本体のグローバルをそのまま参照できます。
-    // Safari系ユーザースクリプトで見えない場合に備え、HTML再取得をフォールバックにします。
+    // MacaqueのGM権限を使う版ではisolated worldになる可能性があるため、
+    // ページ本体のYouTube変数はunsafeWindowが使える場合そちらを優先する。
     let initialData = null;
     let cfg = {};
+    let page = window;
+    try {
+      if (typeof unsafeWindow !== 'undefined') page = unsafeWindow;
+    } catch { /* ignore */ }
 
     try {
-      if (window.ytInitialData && typeof window.ytInitialData === 'object') {
-        initialData = window.ytInitialData;
+      if (page.ytInitialData && typeof page.ytInitialData === 'object') {
+        initialData = page.ytInitialData;
       }
     } catch { /* ignore */ }
 
     try {
-      if (window.ytcfg?.data_ && typeof window.ytcfg.data_ === 'object') {
-        cfg = { ...window.ytcfg.data_ };
-      } else if (window.ytcfg?.get) {
+      if (page.ytcfg?.data_ && typeof page.ytcfg.data_ === 'object') {
+        cfg = { ...page.ytcfg.data_ };
+      } else if (page.ytcfg?.get) {
         const keys = [
           'INNERTUBE_API_KEY',
           'INNERTUBE_CONTEXT',
@@ -199,7 +206,7 @@
           'HL',
         ];
         for (const key of keys) {
-          const value = window.ytcfg.get(key);
+          const value = page.ytcfg.get(key);
           if (value !== undefined) cfg[key] = value;
         }
       }
@@ -314,6 +321,123 @@
       return parsed && typeof parsed === 'object' ? parsed : null;
     } catch (e) {
       console.warn('[Member Chat Search] PBJ fallback failed', e);
+      return null;
+    }
+  }
+
+  function gmRequest(details, signal) {
+    const gmFn =
+      (typeof GM !== 'undefined' && (GM.xmlHttpRequest || GM.xmlhttpRequest)) ||
+      (typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null);
+
+    if (!gmFn) {
+      return Promise.reject(new Error('MacaqueのGM通信APIが利用できません。'));
+    }
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let control = null;
+
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        if (signal) signal.removeEventListener('abort', onAbort);
+        fn(value);
+      };
+
+      const onAbort = () => {
+        try { control?.abort?.(); } catch { /* ignore */ }
+        finish(reject, new DOMException('Aborted', 'AbortError'));
+      };
+
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      try {
+        control = gmFn({
+          ...details,
+          anonymous: false,
+          onload: (response) => finish(resolve, response),
+          onerror: (error) => finish(reject, new Error(error?.error || error?.message || 'GM request failed')),
+          ontimeout: () => finish(reject, new Error('GM request timeout')),
+        });
+      } catch (e) {
+        finish(reject, e);
+      }
+    });
+  }
+
+  function continuationFromDesktopHtml(html) {
+    if (!html) return null;
+
+    const initialData =
+      parseJsonAfterMarker(html, 'var ytInitialData = ') ||
+      parseJsonAfterMarker(html, 'ytInitialData = ') ||
+      parseJsonAfterMarker(html, 'window["ytInitialData"] = ');
+
+    const parsed = extractInitialContinuation(initialData);
+    if (parsed?.continuation) {
+      return { initialData, continuation: parsed, method: 'parsed' };
+    }
+
+    // YouTubeのHTML構造が変わってytInitialDataの抽出に失敗しても、
+    // liveChatRenderer付近だけに限定してcontinuationを救済する。
+    const chatIndex = html.indexOf('"liveChatRenderer"');
+    if (chatIndex >= 0) {
+      const region = html.slice(chatIndex, chatIndex + 250000);
+      const match =
+        region.match(/"reloadContinuationData"\s*:\s*\{[^{}]*?"continuation"\s*:\s*"([^"]+)"/) ||
+        region.match(/"continuation"\s*:\s*"([^"]+)"/);
+      if (match?.[1]) {
+        let token = match[1];
+        try { token = JSON.parse(`"${token.replace(/"/g, '\\"')}"`); } catch { /* keep raw */ }
+        if (token) {
+          return {
+            initialData,
+            continuation: { continuation: token, source: 'liveChatRenderer.regex' },
+            method: 'regex',
+          };
+        }
+      }
+    }
+
+    return { initialData, continuation: null, method: 'none' };
+  }
+
+  async function fetchDesktopWatchDataViaGM(videoId, signal) {
+    if (!videoId) return null;
+    const target = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&app=desktop&persist_app=1`;
+    try {
+      const response = await gmRequest({
+        method: 'GET',
+        url: target,
+        timeout: 30000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+        },
+      }, signal);
+
+      if (Number(response?.status) !== 200) {
+        console.warn('[Member Chat Search] GM desktop HTML HTTP', response?.status);
+        return null;
+      }
+
+      const html = String(response.responseText || response.response || '');
+      const parsed = continuationFromDesktopHtml(html);
+      return {
+        initialData: parsed?.initialData || null,
+        cfg: parseAllYtcfgSets(html),
+        continuation: parsed?.continuation || null,
+        method: parsed?.method || 'none',
+      };
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      console.warn('[Member Chat Search] GM desktop fallback failed', e);
       return null;
     }
   }
@@ -480,7 +604,28 @@
       }
     }
 
-    // 2) PBJでも無ければ、表示は変えずに裏でPC版watch HTMLを取得。
+    // 2) SafariのfetchではUser-AgentをPCにできないため、MacaqueのGM通信で
+    //    本当にPC版User-Agentを付けてwatch HTMLを取得する。
+    if (!continuation?.continuation && videoId) {
+      const gmDesktop = await fetchDesktopWatchDataViaGM(videoId, signal);
+      if (gmDesktop) {
+        cfg = normalizeCfg({ ...cfg, ...(gmDesktop.cfg || {}) });
+        auth = await buildAuthorization(origin);
+        const gmContinuation =
+          gmDesktop.continuation ||
+          extractInitialContinuation(gmDesktop.initialData);
+        if (gmContinuation?.continuation) {
+          initialData = gmDesktop.initialData || initialData;
+          continuation = {
+            ...gmContinuation,
+            source: `gm-desktop:${gmContinuation.source || gmDesktop.method || 'unknown'}`,
+          };
+          source = 'gm-desktop';
+        }
+      }
+    }
+
+    // 3) GM通信が使えない/取れない場合だけ、通常fetchのPC版URLも試す。
     if (!continuation?.continuation && videoId) {
       const desktop = await fetchDesktopWatchData(videoId, signal);
       if (desktop) {
@@ -495,7 +640,7 @@
       }
     }
 
-    // 3) HTMLに無くても /youtubei/v1/next がconversationBarを返す場合がある。
+    // 4) HTMLに無くても /youtubei/v1/next がconversationBarを返す場合がある。
     if (!continuation?.continuation && videoId) {
       const nextData = await fetchNextInitialData(videoId, cfg, auth, origin, signal);
       const nextContinuation = extractInitialContinuation(nextData);
@@ -508,7 +653,7 @@
 
     if (!continuation?.continuation) {
       throw new Error(
-        'チャットリプレイの開始トークンが見つかりません。Safari表示ページ・PBJ・PC版watch・Innertube nextの4経路で確認しました。'
+        'チャットリプレイの開始トークンが見つかりません。Safari表示ページ・PBJ・GM経由PC版watch・通常PC版watch・Innertube nextの5経路で確認しました。'
       );
     }
 
