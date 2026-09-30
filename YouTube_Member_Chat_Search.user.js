@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.7
+// @version      0.1.8
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -20,7 +20,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.7';
+  const VERSION = '0.1.8';
 
   const state = {
     videoId: null,
@@ -1532,7 +1532,7 @@
     const fast = makeEl('input', { className: 'mcs-fast', type: 'checkbox' });
     fast.checked = true;
     const fastLabel = makeEl('label', { className: 'mcs-fast-label' });
-    fastLabel.append(fast, document.createTextNode('高速取得（3並列・長時間アーカイブ向け）'));
+    fastLabel.append(fast, document.createTextNode('超高速取得（8並列・長時間アーカイブ向け）'));
     const help = makeEl('div', {
       className: 'mcs-help',
       text: '検索結果をタップすると、その発言時刻へ移動します。取得途中のデータは自動保存されます。',
