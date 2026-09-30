@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.1
+// @version      0.1.2
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -17,7 +17,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.1';
+  const VERSION = '0.1.2';
 
   const state = {
     videoId: null,
@@ -187,6 +187,8 @@
           'INNERTUBE_CONTEXT_CLIENT_VERSION',
           'SESSION_INDEX',
           'DELEGATED_SESSION_ID',
+          'VISITOR_DATA',
+          'DATASYNC_ID',
           'HL',
         ];
         for (const key of keys) {
@@ -222,16 +224,43 @@
   }
 
   function extractInitialContinuation(initialData) {
-    const direct =
-      initialData?.contents?.twoColumnWatchNextResults?.conversationBar?.liveChatRenderer?.continuations?.[0]?.reloadContinuationData ||
-      initialData?.response?.contents?.twoColumnWatchNextResults?.conversationBar?.liveChatRenderer?.continuations?.[0]?.reloadContinuationData;
+    const candidates = [
+      initialData?.contents?.twoColumnWatchNextResults?.conversationBar?.liveChatRenderer,
+      initialData?.response?.contents?.twoColumnWatchNextResults?.conversationBar?.liveChatRenderer,
+      initialData?.contents?.singleColumnWatchNextResults?.conversationBar?.liveChatRenderer,
+      initialData?.response?.contents?.singleColumnWatchNextResults?.conversationBar?.liveChatRenderer,
+    ].filter(Boolean);
 
-    if (direct?.continuation) return { ...direct, source: 'direct' };
-
-    const all = deepFindValues(initialData, 'reloadContinuationData');
-    for (let i = all.length - 1; i >= 0; i--) {
-      if (all[i]?.continuation) return { ...all[i], source: 'deep' };
+    // Mobile/desktopの構造差に備えて、reloadContinuationData全体ではなく
+    // liveChatRendererそのものを再帰検索する。コメント欄等の別tokenを誤取得しない。
+    for (const renderer of deepFindValues(initialData, 'liveChatRenderer')) {
+      if (renderer && typeof renderer === 'object') candidates.push(renderer);
     }
+
+    const seen = new Set();
+    for (const renderer of candidates) {
+      if (!renderer || seen.has(renderer)) continue;
+      seen.add(renderer);
+
+      const direct = renderer?.continuations?.[0]?.reloadContinuationData;
+      if (direct?.continuation) return { ...direct, source: 'liveChatRenderer.continuations' };
+
+      const submenu = renderer?.header?.liveChatHeaderRenderer?.viewSelector
+        ?.sortFilterSubMenuRenderer?.subMenuItems;
+      if (Array.isArray(submenu)) {
+        // 「チャットのリプレイ」側を優先し、無ければcontinuationを持つ項目を使う。
+        const replayItem = submenu.find((item) =>
+          /replay|リプレイ/i.test(String(item?.title || item?.label || '')) &&
+          item?.continuation?.reloadContinuationData?.continuation
+        );
+        const picked = replayItem || submenu.find((item) =>
+          item?.continuation?.reloadContinuationData?.continuation
+        );
+        const data = picked?.continuation?.reloadContinuationData;
+        if (data?.continuation) return { ...data, source: 'liveChatRenderer.header' };
+      }
+    }
+
     return null;
   }
 
@@ -292,16 +321,25 @@
   }
 
   function normalizeCfg(cfg) {
-    const client = cfg?.INNERTUBE_CONTEXT?.client || {};
+    const client = { ...(cfg?.INNERTUBE_CONTEXT?.client || {}) };
     const clientName = cfg?.INNERTUBE_CONTEXT_CLIENT_NAME ?? client.clientName ?? '1';
     const clientVersion = cfg?.INNERTUBE_CONTEXT_CLIENT_VERSION ?? client.clientVersion;
+    const visitorData = cfg?.VISITOR_DATA ?? client.visitorData ?? '';
 
     if (!client.clientName && typeof clientName === 'string' && !/^\d+$/.test(clientName)) {
       client.clientName = clientName;
     }
     if (!client.clientVersion && clientVersion) client.clientVersion = clientVersion;
 
-    return { ...cfg, INNERTUBE_CONTEXT: { ...(cfg.INNERTUBE_CONTEXT || {}), client }, clientName, clientVersion };
+    if (!client.visitorData && visitorData) client.visitorData = visitorData;
+
+    return {
+      ...cfg,
+      INNERTUBE_CONTEXT: { ...(cfg.INNERTUBE_CONTEXT || {}), client },
+      clientName,
+      clientVersion,
+      visitorData,
+    };
   }
 
   async function makeRequestContext(signal) {
@@ -338,11 +376,19 @@
       'cache-control': 'no-store',
       'pragma': 'no-cache',
       'x-youtube-client-name': String(ctx.cfg.clientName ?? '1'),
+      'x-origin': 'https://www.youtube.com',
     };
     if (ctx.cfg.clientVersion) h['x-youtube-client-version'] = String(ctx.cfg.clientVersion);
-    if (ctx.auth.header) h['authorization'] = ctx.auth.header;
-    if (ctx.cfg.SESSION_INDEX !== undefined && ctx.cfg.SESSION_INDEX !== null) {
-      h['x-goog-authuser'] = String(ctx.cfg.SESSION_INDEX);
+    if (ctx.cfg.visitorData) h['x-goog-visitor-id'] = String(ctx.cfg.visitorData);
+
+    if (ctx.auth.header) {
+      h['authorization'] = ctx.auth.header;
+      // 認証時は未指定より0を明示した方がSafari/MWEBで安定する。
+      h['x-goog-authuser'] = String(
+        ctx.cfg.SESSION_INDEX !== undefined && ctx.cfg.SESSION_INDEX !== null
+          ? ctx.cfg.SESSION_INDEX
+          : 0
+      );
     }
     if (ctx.cfg.DELEGATED_SESSION_ID) {
       h['x-goog-pageid'] = String(ctx.cfg.DELEGATED_SESSION_ID);
@@ -362,10 +408,11 @@
   }
 
   async function innertubeReplay(ctx, continuation, signal, offsetMs = null, legacyWithKey = false) {
-    let endpoint = `${location.origin}/youtubei/v1/live_chat/get_live_chat_replay?prettyPrint=false`;
-    if (legacyWithKey && ctx.cfg.INNERTUBE_API_KEY) {
-      endpoint = `${location.origin}/youtubei/v1/live_chat/get_live_chat_replay?key=${encodeURIComponent(ctx.cfg.INNERTUBE_API_KEY)}`;
-    }
+    const baseEndpoint = `${location.origin}/youtubei/v1/live_chat/get_live_chat_replay`;
+    const qs = new URLSearchParams();
+    if (ctx.cfg.INNERTUBE_API_KEY) qs.set('key', String(ctx.cfg.INNERTUBE_API_KEY));
+    qs.set('prettyPrint', 'false');
+    const endpoint = `${baseEndpoint}?${qs.toString()}`;
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -382,7 +429,12 @@
     state.requestCount++;
 
     if (!res.ok) {
-      const err = new Error(`Chat Replay API: HTTP ${res.status} ${res.statusText}`);
+      const tokenSource = ctx.continuation?.source || 'unknown';
+      const sessionIndex = ctx.cfg.SESSION_INDEX ?? 0;
+      const client = ctx.cfg.INNERTUBE_CONTEXT?.client?.clientName || ctx.cfg.clientName || '?';
+      const err = new Error(
+        `Chat Replay API: HTTP ${res.status} ${res.statusText} [token:${tokenSource} / account:${sessionIndex} / client:${client} / visitor:${ctx.cfg.visitorData ? 'yes' : 'no'}]`
+      );
       err.status = res.status;
       throw err;
     }
@@ -478,7 +530,7 @@
       phase: 'auth',
       count: 0,
       requests: 0,
-      detail: `認証:${ctx.auth.hasBaseSecret ? 'OK' : 'なし'} / アカウント:${ctx.cfg.SESSION_INDEX ?? '不明'} / 初期データ:${ctx.source}`,
+      detail: `認証:${ctx.auth.hasBaseSecret ? 'OK' : 'なし'} / アカウント:${ctx.cfg.SESSION_INDEX ?? 0} / token:${ctx.continuation.source} / client:${ctx.cfg.INNERTUBE_CONTEXT?.client?.clientName || ctx.cfg.clientName || '?'} / visitor:${ctx.cfg.visitorData ? '有' : '無'}`,
     });
 
     if (!ctx.auth.header) {
