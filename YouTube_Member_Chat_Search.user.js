@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.6
+// @version      0.1.7
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -20,7 +20,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.6';
+  const VERSION = '0.1.7';
 
   const state = {
     videoId: null,
@@ -38,13 +38,16 @@
     persistBusy: false,
     persistPending: false,
     lastPersistRequest: 0,
+    lastPersistAt: 0,
+    lastProgressUiAt: 0,
+    rateLimitUntil: 0,
     autoResumeStartedFor: null,
   };
 
   const CACHE_DB_NAME = 'MarinaMemberChatSearchDB';
   const CACHE_DB_VERSION = 1;
   const CACHE_STORE = 'videoCache';
-  const FAST_WORKERS = 3;
+  const FAST_WORKERS = 8;
   const FAST_OVERLAP_MS = 60 * 1000;
   let cacheDbPromise = null;
 
@@ -154,6 +157,7 @@
       state.cacheCompleted = record.completed;
       state.messages = messages;
       state.lastPersistRequest = state.requestCount;
+      state.lastPersistAt = Date.now();
     } catch (e) {
       console.warn('[Member Chat Search] persist failed', e);
     } finally {
@@ -166,10 +170,23 @@
   }
 
   function maybePersistSnapshot() {
-    if (state.requestCount - state.lastPersistRequest >= 40) {
+    // 全チャットを毎回丸ごとIndexedDBへ書くため、頻繁に行うと
+    // 件数が増えた後半・再開後ほど遅くなる。通常時は大きく間引き、
+    // visibilitychange/pagehide/中止時だけ強制保存する。
+    const enoughRequests = state.requestCount - state.lastPersistRequest >= 120;
+    const enoughTime = Date.now() - state.lastPersistAt >= 30000;
+    if (enoughRequests && enoughTime) {
       void persistSnapshot({ completed: false, inProgress: true });
     }
   }
+
+  function reportProgressThrottled(p) {
+    const now = performance.now();
+    if (now - state.lastProgressUiAt < 500) return;
+    state.lastProgressUiAt = now;
+    status(`${p.detail}　${p.count.toLocaleString()}件 / API ${p.requests}回`);
+  }
+
 
   async function restoreCacheForVideo(videoId, { allowAutoResume = true } = {}) {
     if (!videoId) return;
@@ -1062,25 +1079,116 @@
     };
   }
 
+  function mergeCoveredIntervals(resumeWorkers = []) {
+    const intervals = (resumeWorkers || [])
+      .map((w) => {
+        const start = Math.max(0, Number(w?.startMs) || 0);
+        const rawEnd = w?.done ? Number(w?.endMs) : Number(w?.offsetMs);
+        const end = Number.isFinite(rawEnd) ? Math.max(start, rawEnd) : start;
+        return [start, end];
+      })
+      .filter((pair) => pair[1] > pair[0])
+      .sort((a, b) => a[0] - b[0]);
+
+    const merged = [];
+    for (const [start, end] of intervals) {
+      const last = merged[merged.length - 1];
+      if (last && start <= last[1] + FAST_OVERLAP_MS) {
+        last[1] = Math.max(last[1], end);
+      } else {
+        merged.push([start, end]);
+      }
+    }
+    return merged;
+  }
+
+  function resumeOffsetForRange(startMs, endMs, coveredIntervals) {
+    let cursor = startMs;
+    let advanced = true;
+    while (advanced) {
+      advanced = false;
+      for (const [a, b] of coveredIntervals) {
+        if (a <= cursor + FAST_OVERLAP_MS && b > cursor) {
+          const next = Math.min(endMs, b);
+          if (next > cursor) {
+            cursor = next;
+            advanced = true;
+          }
+        }
+      }
+    }
+    return Math.max(startMs, cursor - (cursor > startMs ? FAST_OVERLAP_MS : 0));
+  }
+
   function buildFastRanges(durationMs, resumeWorkers = []) {
     const workers = [];
+    const covered = mergeCoveredIntervals(resumeWorkers);
+
     for (let i = 0; i < FAST_WORKERS; i++) {
       const nominalStart = Math.floor((durationMs * i) / FAST_WORKERS);
       const nominalEnd = Math.floor((durationMs * (i + 1)) / FAST_WORKERS);
       const startMs = Math.max(0, nominalStart - (i > 0 ? FAST_OVERLAP_MS : 0));
       const endMs = Math.min(durationMs, nominalEnd + (i < FAST_WORKERS - 1 ? FAST_OVERLAP_MS : 0));
-      const old = resumeWorkers.find((w) => Number(w.index) === i);
-      const saved = Number(old?.offsetMs);
-      const offsetMs = Number.isFinite(saved) && saved >= startMs && saved <= endMs
-        ? Math.max(startMs, saved - FAST_OVERLAP_MS)
-        : startMs;
-      workers.push({ index: i, startMs, endMs, offsetMs, done: Boolean(old?.done && saved >= endMs) });
+
+      const exactOld = resumeWorkers.find((w) =>
+        Number(w?.index) === i &&
+        Math.abs((Number(w?.startMs) || 0) - startMs) < 2000 &&
+        Math.abs((Number(w?.endMs) || 0) - endMs) < 2000
+      );
+
+      let offsetMs;
+      let done = false;
+      if (exactOld) {
+        const saved = Number(exactOld.offsetMs);
+        offsetMs = Number.isFinite(saved)
+          ? Math.max(startMs, Math.min(endMs, saved - FAST_OVERLAP_MS))
+          : startMs;
+        done = Boolean(exactOld.done);
+      } else {
+        offsetMs = resumeOffsetForRange(startMs, endMs, covered);
+        done = offsetMs >= endMs - 1000;
+      }
+
+      workers.push({ index: i, startMs, endMs, offsetMs, done });
     }
     return workers;
   }
 
+  async function waitForRateLimit(signal) {
+    const delay = state.rateLimitUntil - Date.now();
+    if (delay <= 0) return;
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, delay);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  async function replayWithRateLimitBackoff(ctx, token, signal, offsetMs) {
+    let attempt = 0;
+    while (true) {
+      await waitForRateLimit(signal);
+      try {
+        return await innertubeReplay(ctx, token, signal, offsetMs, false);
+      } catch (e) {
+        if (e?.status !== 429 || attempt >= 4) throw e;
+        attempt++;
+        const waitMs = Math.min(12000, 1200 * (2 ** attempt));
+        state.rateLimitUntil = Math.max(state.rateLimitUntil, Date.now() + waitMs);
+        await waitForRateLimit(signal);
+      }
+    }
+  }
+
+
   async function runSeekWorker(ctx, worker, map, onProgress, signal, initialToken = null) {
     if (worker.done) return;
+
+    // playerSeek tokenは位置をbodyのplayerOffsetMsで指定するため、
+    // 初回tokenは各workerで共有し、余分な初期化APIを省く。
     let token = initialToken;
     if (!token) {
       const init = await freshPlayerSeek(ctx, signal);
@@ -1096,7 +1204,7 @@
       loops++;
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
-      const response = await innertubeReplay(ctx, token, signal, offsetMs, false);
+      const response = await replayWithRateLimitBackoff(ctx, token, signal, offsetMs);
       const actions = getActions(response);
       addActionsTracked(actions, map);
 
@@ -1107,9 +1215,7 @@
         offsetMs = Math.max(offsetMs, lastOffset);
         worker.offsetMs = offsetMs;
       }
-      if (offsetMs >= worker.endMs) {
-        worker.done = true;
-      }
+      if (offsetMs >= worker.endMs) worker.done = true;
 
       const doneCount = state.workerProgress.filter((w) => w.done).length;
       const ratios = state.workerProgress.map((w) => {
@@ -1122,7 +1228,7 @@
         phase: 'fast',
         count: map.size,
         requests: state.requestCount,
-        detail: `高速${FAST_WORKERS}並列 ${pct}%（完了 ${doneCount}/${FAST_WORKERS}）`,
+        detail: `超高速${FAST_WORKERS}並列 ${pct}%（完了 ${doneCount}/${FAST_WORKERS}）`,
       });
       maybePersistSnapshot();
 
@@ -1135,15 +1241,22 @@
 
       previousToken = token;
       token = nextToken;
-      if (loops % 12 === 0) await sleep(0);
+      if (loops % 20 === 0) await sleep(0);
     }
 
-    if (worker.offsetMs >= worker.endMs - 1000) worker.done = true;
+    if (!signal.aborted) {
+      worker.done = true;
+      worker.offsetMs = Math.max(worker.offsetMs || 0, Math.min(worker.endMs, offsetMs));
+    }
   }
+
 
   async function loadAllChat(onProgress, signal, { fastMode = true, resumeRecord = null } = {}) {
     state.requestCount = 0;
     state.lastPersistRequest = 0;
+    state.lastPersistAt = Date.now();
+    state.lastProgressUiAt = 0;
+    state.rateLimitUntil = 0;
     const ctx = await makeRequestContext(signal);
     const map = seedMessageMap();
 
@@ -1176,7 +1289,6 @@
       state.workerProgress = buildFastRanges(durationMs, resumeRecord?.workers || []);
       const active = state.workerProgress.filter((w) => !w.done);
 
-      // worker 0だけは既に取得したplayerSeekトークンを使い、他は独立tokenを取得する。
       await Promise.all(active.map((worker) =>
         runSeekWorker(
           ctx,
@@ -1184,7 +1296,7 @@
           map,
           onProgress,
           signal,
-          worker.index === 0 ? init.playerSeek : null
+          init.playerSeek
         )
       ));
     } else if (init.playerSeek) {
@@ -1517,11 +1629,15 @@
     const fastInput = document.querySelector(`#${PANEL_ID} .mcs-fast`);
     const fastMode = fastInput ? Boolean(fastInput.checked) : true;
 
-    try {
+    // 新規取得時だけ空の開始記録を保存。再開時に巨大な全件スナップショットを
+    // もう一度書き直してから開始する無駄を避ける。
+    if (!cache?.messages?.length) {
       await persistSnapshot({ completed: false, inProgress: true, force: true });
+    }
 
+    try {
       const messages = await loadAllChat((p) => {
-        status(`${p.detail}　${p.count.toLocaleString()}件 / API ${p.requests}回`);
+        reportProgressThrottled(p);
       }, state.abortController.signal, {
         fastMode,
         resumeRecord: cache,
@@ -1554,7 +1670,7 @@
         } else if (/HTTP 403/.test(String(e?.message))) {
           extra = '／このアカウントに視聴権限があるか確認してください。';
         } else if (/HTTP 429/.test(String(e?.message))) {
-          extra = '／高速取得で制限された可能性があります。「高速取得」のチェックを外して再開できます。';
+          extra = '／自動待機でも解除されませんでした。少し時間を置くか、高速取得をOFFにして再開できます。';
         }
         status(`${e?.message || e}${extra}`, true);
       }
