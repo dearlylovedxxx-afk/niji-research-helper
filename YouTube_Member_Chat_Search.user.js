@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.0
+// @version      0.1.1
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -17,7 +17,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.0';
+  const VERSION = '0.1.1';
 
   const state = {
     videoId: null,
@@ -652,39 +652,102 @@
     document.documentElement.appendChild(style);
   }
 
+  function makeEl(tag, options = {}, children = []) {
+    const el = document.createElement(tag);
+    if (options.id) el.id = options.id;
+    if (options.className) el.className = options.className;
+    if (options.text !== undefined) el.textContent = String(options.text);
+    if (options.type) el.type = options.type;
+    if (options.placeholder) el.placeholder = options.placeholder;
+    if (options.autocomplete) el.autocomplete = options.autocomplete;
+    if (options.ariaLabel) el.setAttribute('aria-label', options.ariaLabel);
+    if (options.style) el.style.cssText = options.style;
+    for (const child of children) if (child) el.appendChild(child);
+    return el;
+  }
+
   function createUi() {
     injectStyle();
     if (document.getElementById(BUTTON_ID)) return;
 
-    const btn = document.createElement('button');
-    btn.id = BUTTON_ID;
-    btn.type = 'button';
-    btn.textContent = '🔎 チャット検索';
-    document.body.appendChild(btn);
+    const mount = document.documentElement || document.body;
+    if (!mount) return;
 
-    const panel = document.createElement('section');
-    panel.id = PANEL_ID;
-    panel.innerHTML = `
-      <div class="mcs-head">
-        <div class="mcs-title">メン限アーカイブ チャット検索 <span style="font-size:11px;font-weight:500;color:#777">v${VERSION}</span></div>
-        <button class="mcs-close" type="button" aria-label="閉じる">×</button>
-      </div>
-      <div class="mcs-controls">
-        <button class="mcs-load" type="button">チャットを取得</button>
-        <div class="mcs-status">アーカイブを開いて「チャットを取得」を押してください。</div>
-        <input class="mcs-search" type="search" placeholder="本文・投稿者を検索（A | B でOR）" autocomplete="off" />
-        <div class="mcs-help">検索結果をタップすると、その発言時刻へ移動します。</div>
-      </div>
-      <div class="mcs-results"><div class="mcs-empty">まだ取得していません。</div></div>
-    `;
-    document.body.appendChild(panel);
+    const btn = makeEl('button', {
+      id: BUTTON_ID,
+      type: 'button',
+      text: '🔎 チャット検索',
+    });
 
-    const close = panel.querySelector('.mcs-close');
-    const load = panel.querySelector('.mcs-load');
-    const search = panel.querySelector('.mcs-search');
+    const panel = makeEl('section', { id: PANEL_ID });
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', 'メン限アーカイブ チャット検索');
 
-    btn.addEventListener('click', () => panel.classList.toggle('open'));
-    close.addEventListener('click', () => panel.classList.remove('open'));
+    const head = makeEl('div', { className: 'mcs-head' });
+    const title = makeEl('div', { className: 'mcs-title' });
+    title.appendChild(document.createTextNode('メン限アーカイブ チャット検索 '));
+    title.appendChild(makeEl('span', {
+      text: `v${VERSION}`,
+      style: 'font-size:11px;font-weight:500;color:#777',
+    }));
+    const close = makeEl('button', {
+      className: 'mcs-close',
+      type: 'button',
+      text: '×',
+      ariaLabel: '閉じる',
+    });
+    head.append(title, close);
+
+    const controls = makeEl('div', { className: 'mcs-controls' });
+    const load = makeEl('button', {
+      className: 'mcs-load',
+      type: 'button',
+      text: 'チャットを取得',
+    });
+    const statusEl = makeEl('div', {
+      className: 'mcs-status',
+      text: 'アーカイブを開いて「チャットを取得」を押してください。',
+    });
+    const search = makeEl('input', {
+      className: 'mcs-search',
+      type: 'search',
+      placeholder: '本文・投稿者を検索（A | B でOR）',
+      autocomplete: 'off',
+    });
+    const help = makeEl('div', {
+      className: 'mcs-help',
+      text: '検索結果をタップすると、その発言時刻へ移動します。',
+    });
+    controls.append(load, statusEl, search, help);
+
+    const results = makeEl('div', { className: 'mcs-results' });
+    results.appendChild(makeEl('div', { className: 'mcs-empty', text: 'まだ取得していません。' }));
+
+    panel.append(head, controls, results);
+
+    // YouTube mobile / WebKit側のCSSに負けないよう、初期表示だけinlineでも固定。
+    panel.style.setProperty('display', 'none', 'important');
+
+    mount.appendChild(panel);
+    mount.appendChild(btn);
+
+    const setPanelOpen = (open) => {
+      panel.classList.toggle('open', open);
+      panel.style.setProperty('display', open ? 'flex' : 'none', 'important');
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+
+    btn.setAttribute('aria-expanded', 'false');
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setPanelOpen(panel.style.display === 'none');
+    });
+    close.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setPanelOpen(false);
+    });
     load.addEventListener('click', handleLoadClick);
     search.addEventListener('input', renderSearchResults);
   }
@@ -769,8 +832,17 @@
     const input = panel.querySelector('.mcs-search');
     if (!results || !input) return;
 
+    const clearResults = () => {
+      while (results.firstChild) results.removeChild(results.firstChild);
+    };
+
+    const showEmpty = (text) => {
+      clearResults();
+      results.appendChild(makeEl('div', { className: 'mcs-empty', text }));
+    };
+
     if (!state.messages.length) {
-      results.innerHTML = `<div class="mcs-empty">${state.loading ? 'チャット取得中…' : 'まだ取得していません。'}</div>`;
+      showEmpty(state.loading ? 'チャット取得中…' : 'まだ取得していません。');
       return;
     }
 
@@ -779,23 +851,31 @@
     const display = filtered.slice(0, 1000);
 
     if (!display.length) {
-      results.innerHTML = '<div class="mcs-empty">該当するチャットはありません。</div>';
+      showEmpty('該当するチャットはありません。');
       return;
     }
 
-    results.innerHTML = display.map((m, i) => `
-      <button class="mcs-row" type="button" data-index="${i}">
-        <div class="mcs-meta">
-          <span class="mcs-time">${escapeHtml(formatTime(m.seconds))}</span>
-          <span class="mcs-author">${escapeHtml(m.author || '（投稿者不明）')}</span>
-          ${i === 0 ? `<span class="mcs-count">${filtered.length.toLocaleString()}件${filtered.length > 1000 ? '（先頭1000件）' : ''}</span>` : ''}
-        </div>
-        <div class="mcs-msg">${escapeHtml(m.message)}</div>
-      </button>
-    `).join('');
+    clearResults();
 
-    results.querySelectorAll('.mcs-row').forEach((row, i) => {
-      row.addEventListener('click', () => seekTo(display[i].seconds));
+    display.forEach((m, i) => {
+      const row = makeEl('button', { className: 'mcs-row', type: 'button' });
+      row.dataset.index = String(i);
+
+      const meta = makeEl('div', { className: 'mcs-meta' });
+      meta.appendChild(makeEl('span', { className: 'mcs-time', text: formatTime(m.seconds) }));
+      meta.appendChild(makeEl('span', { className: 'mcs-author', text: m.author || '（投稿者不明）' }));
+
+      if (i === 0) {
+        meta.appendChild(makeEl('span', {
+          className: 'mcs-count',
+          text: `${filtered.length.toLocaleString()}件${filtered.length > 1000 ? '（先頭1000件）' : ''}`,
+        }));
+      }
+
+      row.appendChild(meta);
+      row.appendChild(makeEl('div', { className: 'mcs-msg', text: m.message }));
+      row.addEventListener('click', () => seekTo(m.seconds));
+      results.appendChild(row);
     });
   }
 
