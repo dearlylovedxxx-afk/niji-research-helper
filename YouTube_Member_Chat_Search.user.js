@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.4
+// @version      0.1.5
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -20,7 +20,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.4';
+  const VERSION = '0.1.5';
 
   const state = {
     videoId: null,
@@ -586,6 +586,22 @@
       throw new Error('YouTubeのInnertube設定を取得できませんでした。');
     }
 
+    // 認証対象アカウントは「今Safariで表示しているYouTubeページ」のytcfgを優先する。
+    // PC版watchを裏取得した際のSESSION_INDEXで上書きすると、複数Googleアカウント時に
+    // メンバーシップを持たない別アカウントとして扱われHTTP 400になる。
+    const pageSessionIndex =
+      pageData.cfg?.SESSION_INDEX !== undefined && pageData.cfg?.SESSION_INDEX !== null
+        ? pageData.cfg.SESSION_INDEX
+        : null;
+    const pageDelegatedSessionId = pageData.cfg?.DELEGATED_SESSION_ID || null;
+
+    const applyPageAuthSession = (candidate) => {
+      const next = { ...(candidate || {}) };
+      if (pageSessionIndex !== null) next.SESSION_INDEX = pageSessionIndex;
+      if (pageDelegatedSessionId) next.DELEGATED_SESSION_ID = pageDelegatedSessionId;
+      return next;
+    };
+
     const videoId = getVideoId();
     const origin = 'https://www.youtube.com';
     let auth = await buildAuthorization(origin);
@@ -593,7 +609,6 @@
     let continuation = extractInitialContinuation(initialData);
     let source = pageData.source;
 
-    // 1) Safariのモバイルwatchにチャット情報が無い場合、YCSと同じPBJ経路を試す。
     if (!continuation?.continuation && videoId) {
       const pbj = await fetchPbjInitialData(videoId, cfg, auth, origin, signal);
       const pbjContinuation = extractInitialContinuation(pbj);
@@ -604,12 +619,10 @@
       }
     }
 
-    // 2) SafariのfetchではUser-AgentをPCにできないため、MacaqueのGM通信で
-    //    本当にPC版User-Agentを付けてwatch HTMLを取得する。
     if (!continuation?.continuation && videoId) {
       const gmDesktop = await fetchDesktopWatchDataViaGM(videoId, signal);
       if (gmDesktop) {
-        cfg = normalizeCfg({ ...cfg, ...(gmDesktop.cfg || {}) });
+        cfg = normalizeCfg(applyPageAuthSession({ ...cfg, ...(gmDesktop.cfg || {}) }));
         auth = await buildAuthorization(origin);
         const gmContinuation =
           gmDesktop.continuation ||
@@ -625,11 +638,10 @@
       }
     }
 
-    // 3) GM通信が使えない/取れない場合だけ、通常fetchのPC版URLも試す。
     if (!continuation?.continuation && videoId) {
       const desktop = await fetchDesktopWatchData(videoId, signal);
       if (desktop) {
-        cfg = normalizeCfg({ ...cfg, ...(desktop.cfg || {}) });
+        cfg = normalizeCfg(applyPageAuthSession({ ...cfg, ...(desktop.cfg || {}) }));
         auth = await buildAuthorization(origin);
         const desktopContinuation = extractInitialContinuation(desktop.initialData);
         if (desktopContinuation?.continuation) {
@@ -640,7 +652,6 @@
       }
     }
 
-    // 4) HTMLに無くても /youtubei/v1/next がconversationBarを返す場合がある。
     if (!continuation?.continuation && videoId) {
       const nextData = await fetchNextInitialData(videoId, cfg, auth, origin, signal);
       const nextContinuation = extractInitialContinuation(nextData);
@@ -657,6 +668,8 @@
       );
     }
 
+    cfg = normalizeCfg(applyPageAuthSession(cfg));
+
     return {
       initialData,
       cfg,
@@ -664,34 +677,44 @@
       origin,
       auth,
       source,
+      pageSessionIndex,
     };
   }
 
   function buildHeaders(ctx) {
     const h = {
       'accept': '*/*',
+      'accept-language': ctx.cfg?.GOOGLE_FEEDBACK_PRODUCT_DATA?.accept_language || 'en-US,en;q=0.9',
       'content-type': 'application/json',
-      'cache-control': 'no-store',
       'pragma': 'no-cache',
-      'x-youtube-client-name': String(ctx.cfg.clientName ?? '1'),
-      'x-origin': ctx.origin || 'https://www.youtube.com',
+      'cache-control': 'no-store',
+      'x-youtube-client-name': String(ctx.cfg.INNERTUBE_CONTEXT_CLIENT_NAME ?? ctx.cfg.clientName ?? '1'),
     };
-    if (ctx.cfg.clientVersion) h['x-youtube-client-version'] = String(ctx.cfg.clientVersion);
-    if (ctx.cfg.visitorData) h['x-goog-visitor-id'] = String(ctx.cfg.visitorData);
+    if (ctx.cfg.INNERTUBE_CONTEXT_CLIENT_VERSION ?? ctx.cfg.clientVersion) {
+      h['x-youtube-client-version'] = String(
+        ctx.cfg.INNERTUBE_CONTEXT_CLIENT_VERSION ?? ctx.cfg.clientVersion
+      );
+    }
 
     if (ctx.auth.header) {
       h['authorization'] = ctx.auth.header;
-      // 認証時は未指定より0を明示した方がSafari/MWEBで安定する。
-      h['x-goog-authuser'] = String(
-        ctx.cfg.SESSION_INDEX !== undefined && ctx.cfg.SESSION_INDEX !== null
-          ? ctx.cfg.SESSION_INDEX
-          : 0
-      );
-    }
-    if (ctx.cfg.DELEGATED_SESSION_ID) {
-      h['x-goog-pageid'] = String(ctx.cfg.DELEGATED_SESSION_ID);
+      if (ctx.cfg.SESSION_INDEX !== undefined && ctx.cfg.SESSION_INDEX !== null) {
+        h['x-goog-authuser'] = String(ctx.cfg.SESSION_INDEX);
+      }
+      if (ctx.cfg.DELEGATED_SESSION_ID) {
+        h['x-goog-pageid'] = String(ctx.cfg.DELEGATED_SESSION_ID);
+      }
     }
     return h;
+  }
+
+  function getPageFetch() {
+    try {
+      if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.fetch === 'function') {
+        return unsafeWindow.fetch.bind(unsafeWindow);
+      }
+    } catch { /* ignore */ }
+    return window.fetch.bind(window);
   }
 
   function buildBody(ctx, continuation, offsetMs = null) {
@@ -712,13 +735,14 @@
     qs.set('prettyPrint', 'false');
     const endpoint = `${baseEndpoint}?${qs.toString()}`;
 
-    const res = await fetch(endpoint, {
+    const pageFetch = getPageFetch();
+    const res = await pageFetch(endpoint, {
       method: 'POST',
       credentials: 'include',
       cache: 'no-store',
       mode: 'cors',
       referrer: location.href,
-      referrerPolicy: 'strict-origin-when-cross-origin',
+      referrerPolicy: 'origin-when-cross-origin',
       headers: buildHeaders(ctx),
       body: JSON.stringify(buildBody(ctx, continuation, offsetMs)),
       signal,
@@ -728,10 +752,10 @@
 
     if (!res.ok) {
       const tokenSource = ctx.continuation?.source || 'unknown';
-      const sessionIndex = ctx.cfg.SESSION_INDEX ?? 0;
+      const sessionIndex = ctx.cfg.SESSION_INDEX ?? 'unknown';
       const client = ctx.cfg.INNERTUBE_CONTEXT?.client?.clientName || ctx.cfg.clientName || '?';
       const err = new Error(
-        `Chat Replay API: HTTP ${res.status} ${res.statusText} [token:${tokenSource} / account:${sessionIndex} / client:${client} / visitor:${ctx.cfg.visitorData ? 'yes' : 'no'}]`
+        `Chat Replay API: HTTP ${res.status} ${res.statusText} [token:${tokenSource} / SafariAccount:${ctx.pageSessionIndex ?? 'unknown'} / sentAccount:${sessionIndex} / client:${client}]`
       );
       err.status = res.status;
       throw err;
@@ -828,7 +852,7 @@
       phase: 'auth',
       count: 0,
       requests: 0,
-      detail: `認証:${ctx.auth.hasBaseSecret ? 'OK' : 'なし'} / アカウント:${ctx.cfg.SESSION_INDEX ?? 0} / token:${ctx.continuation.source} / client:${ctx.cfg.INNERTUBE_CONTEXT?.client?.clientName || ctx.cfg.clientName || '?'} / visitor:${ctx.cfg.visitorData ? '有' : '無'}`,
+      detail: `認証:${ctx.auth.hasBaseSecret ? 'OK' : 'なし'} / Safariアカウント:${ctx.pageSessionIndex ?? '不明'} / 送信:${ctx.cfg.SESSION_INDEX ?? '不明'} / token:${ctx.continuation.source} / client:${ctx.cfg.INNERTUBE_CONTEXT?.client?.clientName || ctx.cfg.clientName || '?'}`,
     });
 
     if (!ctx.auth.header) {
@@ -1154,7 +1178,7 @@
         console.error('[Member Chat Search]', e);
         let extra = '';
         if (/HTTP 400/.test(String(e?.message))) {
-          extra = '／認証アカウント不一致、またはOriginを書き換える拡張機能の干渉が考えられます。';
+          extra = '／認証セッション不一致の可能性があります。赤字内のSafariAccountとsentAccountを確認します。';
         } else if (/HTTP 403/.test(String(e?.message))) {
           extra = '／このアカウントに視聴権限があるか確認してください。';
         }
