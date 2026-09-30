@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.2
+// @version      0.1.3
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -17,7 +17,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.2';
+  const VERSION = '0.1.3';
 
   const state = {
     videoId: null,
@@ -189,6 +189,13 @@
           'DELEGATED_SESSION_ID',
           'VISITOR_DATA',
           'DATASYNC_ID',
+          'ID_TOKEN',
+          'DEVICE',
+          'PAGE_CL',
+          'PAGE_BUILD_LABEL',
+          'VARIANTS_CHECKSUM',
+          'XSRF_TOKEN',
+          'GOOGLE_FEEDBACK_PRODUCT_DATA',
           'HL',
         ];
         for (const key of keys) {
@@ -262,6 +269,110 @@
     }
 
     return null;
+  }
+
+
+  function stripJsonSecurityPrefix(text) {
+    const prefix = ")]}'\n";
+    return text.startsWith(prefix) ? text.slice(prefix.length) : text;
+  }
+
+  function bootstrapHeaders(cfg, auth, origin, contentType = false) {
+    const tempCtx = { cfg, auth, origin };
+    const h = buildHeaders(tempCtx);
+    if (!contentType) delete h['content-type'];
+    if (cfg.ID_TOKEN) h['x-youtube-identity-token'] = String(cfg.ID_TOKEN);
+    if (cfg.DEVICE) h['x-youtube-device'] = String(cfg.DEVICE);
+    if (cfg.PAGE_CL) h['x-youtube-page-cl'] = String(cfg.PAGE_CL);
+    if (cfg.PAGE_BUILD_LABEL) h['x-youtube-page-label'] = String(cfg.PAGE_BUILD_LABEL);
+    if (cfg.VARIANTS_CHECKSUM) h['x-youtube-variants-checksum'] = String(cfg.VARIANTS_CHECKSUM);
+    h['x-youtube-time-zone'] = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    h['x-youtube-utc-offset'] = String(Math.abs(new Date().getTimezoneOffset()));
+    return h;
+  }
+
+  async function fetchPbjInitialData(videoId, cfg, auth, origin, signal) {
+    if (!videoId) return null;
+    const target = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&pbj=1`;
+    const headers = bootstrapHeaders(cfg, auth, origin, false);
+    headers['x-spf-previous'] = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+    headers['x-spf-referer'] = headers['x-spf-previous'];
+
+    try {
+      const res = await fetch(target, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers,
+        referrer: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+        referrerPolicy: 'origin-when-cross-origin',
+        signal,
+      });
+      if (!res.ok) return null;
+      const raw = stripJsonSecurityPrefix(await res.text());
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (e) {
+      console.warn('[Member Chat Search] PBJ fallback failed', e);
+      return null;
+    }
+  }
+
+  async function fetchDesktopWatchData(videoId, signal) {
+    if (!videoId) return null;
+    const target = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&app=desktop`;
+    try {
+      const res = await fetch(target, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        signal,
+      });
+      if (!res.ok) return null;
+      const html = await res.text();
+      const initialData =
+        parseJsonAfterMarker(html, 'var ytInitialData = ') ||
+        parseJsonAfterMarker(html, 'ytInitialData = ') ||
+        parseJsonAfterMarker(html, 'window["ytInitialData"] = ');
+      const cfg = parseAllYtcfgSets(html);
+      return { initialData, cfg };
+    } catch (e) {
+      console.warn('[Member Chat Search] desktop HTML fallback failed', e);
+      return null;
+    }
+  }
+
+  async function fetchNextInitialData(videoId, cfg, auth, origin, signal) {
+    if (!videoId || !cfg?.INNERTUBE_CONTEXT?.client) return null;
+    const qs = new URLSearchParams();
+    if (cfg.INNERTUBE_API_KEY) qs.set('key', String(cfg.INNERTUBE_API_KEY));
+    qs.set('prettyPrint', 'false');
+    const endpoint = `https://www.youtube.com/youtubei/v1/next?${qs.toString()}`;
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        mode: 'cors',
+        referrer: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+        referrerPolicy: 'origin-when-cross-origin',
+        headers: bootstrapHeaders(cfg, auth, origin, true),
+        body: JSON.stringify({
+          context: cfg.INNERTUBE_CONTEXT,
+          videoId,
+        }),
+        signal,
+      });
+      if (!res.ok) {
+        console.warn('[Member Chat Search] next fallback HTTP', res.status);
+        return null;
+      }
+      return res.json();
+    } catch (e) {
+      console.warn('[Member Chat Search] next fallback failed', e);
+      return null;
+    }
   }
 
   function readCookie(name) {
@@ -346,26 +457,68 @@
     const pageData = await fetchPageData(signal);
     if (!pageData.initialData) throw new Error('ytInitialDataを取得できませんでした。');
 
-    const cfg = normalizeCfg(pageData.cfg || {});
+    let cfg = normalizeCfg(pageData.cfg || {});
     if (!cfg.INNERTUBE_CONTEXT?.client) {
       throw new Error('YouTubeのInnertube設定を取得できませんでした。');
     }
 
-    const continuation = extractInitialContinuation(pageData.initialData);
-    if (!continuation?.continuation) {
-      throw new Error('チャットリプレイの開始トークンが見つかりません。チャットリプレイが無効・削除済みの可能性があります。');
+    const videoId = getVideoId();
+    const origin = 'https://www.youtube.com';
+    let auth = await buildAuthorization(origin);
+    let initialData = pageData.initialData;
+    let continuation = extractInitialContinuation(initialData);
+    let source = pageData.source;
+
+    // 1) Safariのモバイルwatchにチャット情報が無い場合、YCSと同じPBJ経路を試す。
+    if (!continuation?.continuation && videoId) {
+      const pbj = await fetchPbjInitialData(videoId, cfg, auth, origin, signal);
+      const pbjContinuation = extractInitialContinuation(pbj);
+      if (pbjContinuation?.continuation) {
+        initialData = pbj;
+        continuation = { ...pbjContinuation, source: `pbj:${pbjContinuation.source}` };
+        source = 'pbj';
+      }
     }
 
-    const origin = location.origin;
-    const auth = await buildAuthorization(origin);
+    // 2) PBJでも無ければ、表示は変えずに裏でPC版watch HTMLを取得。
+    if (!continuation?.continuation && videoId) {
+      const desktop = await fetchDesktopWatchData(videoId, signal);
+      if (desktop) {
+        cfg = normalizeCfg({ ...cfg, ...(desktop.cfg || {}) });
+        auth = await buildAuthorization(origin);
+        const desktopContinuation = extractInitialContinuation(desktop.initialData);
+        if (desktopContinuation?.continuation) {
+          initialData = desktop.initialData;
+          continuation = { ...desktopContinuation, source: `desktop:${desktopContinuation.source}` };
+          source = 'desktop-html';
+        }
+      }
+    }
+
+    // 3) HTMLに無くても /youtubei/v1/next がconversationBarを返す場合がある。
+    if (!continuation?.continuation && videoId) {
+      const nextData = await fetchNextInitialData(videoId, cfg, auth, origin, signal);
+      const nextContinuation = extractInitialContinuation(nextData);
+      if (nextContinuation?.continuation) {
+        initialData = nextData;
+        continuation = { ...nextContinuation, source: `next:${nextContinuation.source}` };
+        source = 'next';
+      }
+    }
+
+    if (!continuation?.continuation) {
+      throw new Error(
+        'チャットリプレイの開始トークンが見つかりません。Safari表示ページ・PBJ・PC版watch・Innertube nextの4経路で確認しました。'
+      );
+    }
 
     return {
-      initialData: pageData.initialData,
+      initialData,
       cfg,
       continuation,
       origin,
       auth,
-      source: pageData.source,
+      source,
     };
   }
 
@@ -376,7 +529,7 @@
       'cache-control': 'no-store',
       'pragma': 'no-cache',
       'x-youtube-client-name': String(ctx.cfg.clientName ?? '1'),
-      'x-origin': 'https://www.youtube.com',
+      'x-origin': ctx.origin || 'https://www.youtube.com',
     };
     if (ctx.cfg.clientVersion) h['x-youtube-client-version'] = String(ctx.cfg.clientVersion);
     if (ctx.cfg.visitorData) h['x-goog-visitor-id'] = String(ctx.cfg.visitorData);
@@ -408,7 +561,7 @@
   }
 
   async function innertubeReplay(ctx, continuation, signal, offsetMs = null, legacyWithKey = false) {
-    const baseEndpoint = `${location.origin}/youtubei/v1/live_chat/get_live_chat_replay`;
+    const baseEndpoint = `https://www.youtube.com/youtubei/v1/live_chat/get_live_chat_replay`;
     const qs = new URLSearchParams();
     if (ctx.cfg.INNERTUBE_API_KEY) qs.set('key', String(ctx.cfg.INNERTUBE_API_KEY));
     qs.set('prettyPrint', 'false');
@@ -866,6 +1019,7 @@
     } finally {
       state.loading = false;
       state.abortController = null;
+      renderSearchResults();
     }
   }
 
