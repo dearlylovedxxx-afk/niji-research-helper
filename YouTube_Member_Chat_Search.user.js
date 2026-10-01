@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.8
+// @version      0.1.9
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
 // @run-at       document-idle
+// @noframes
 // @grant        GM.xmlHttpRequest
 // @grant        GM.xmlhttpRequest
 // @grant        GM_xmlhttpRequest
@@ -17,10 +18,13 @@
 (() => {
   'use strict';
 
+  // PC版YouTubeのチャットリプレイiframe内では起動しない。
+  if (window.top !== window.self) return;
+
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.8';
+  const VERSION = '0.1.9';
 
   const state = {
     videoId: null,
