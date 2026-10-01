@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.1.9
+// @version      0.2.0
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -24,7 +24,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.1.9';
+  const VERSION = '0.2.0';
 
   const state = {
     videoId: null,
@@ -148,6 +148,7 @@
       const record = {
         videoId,
         version: VERSION,
+        chatMode: 'all',
         messages,
         workers: Array.isArray(state.workerProgress) ? state.workerProgress.map((w) => ({ ...w })) : [],
         completed: Boolean(completed),
@@ -194,8 +195,14 @@
 
   async function restoreCacheForVideo(videoId, { allowAutoResume = true } = {}) {
     if (!videoId) return;
-    const record = await readCache(videoId);
+    let record = await readCache(videoId);
     if (getVideoId() !== videoId) return;
+
+    // v0.1.xまでの保存データはTop Chat由来の可能性があるため再利用しない。
+    if (record && record.chatMode !== 'all') {
+      await deleteCache(videoId);
+      record = null;
+    }
 
     state.cacheRecord = record;
     state.cacheCompleted = Boolean(record?.completed);
@@ -447,8 +454,6 @@
       initialData?.response?.contents?.singleColumnWatchNextResults?.conversationBar?.liveChatRenderer,
     ].filter(Boolean);
 
-    // Mobile/desktopの構造差に備えて、reloadContinuationData全体ではなく
-    // liveChatRendererそのものを再帰検索する。コメント欄等の別tokenを誤取得しない。
     for (const renderer of deepFindValues(initialData, 'liveChatRenderer')) {
       if (renderer && typeof renderer === 'object') candidates.push(renderer);
     }
@@ -458,22 +463,43 @@
       if (!renderer || seen.has(renderer)) continue;
       seen.add(renderer);
 
-      const direct = renderer?.continuations?.[0]?.reloadContinuationData;
-      if (direct?.continuation) return { ...direct, source: 'liveChatRenderer.continuations' };
-
+      // まずヘッダーの表示切替から「全チャット」を明示的に選ぶ。
+      // 「上位のチャットのリプレイ」はYouTube側で一部メッセージがフィルタされるため使わない。
       const submenu = renderer?.header?.liveChatHeaderRenderer?.viewSelector
         ?.sortFilterSubMenuRenderer?.subMenuItems;
-      if (Array.isArray(submenu)) {
-        // 「チャットのリプレイ」側を優先し、無ければcontinuationを持つ項目を使う。
-        const replayItem = submenu.find((item) =>
-          /replay|リプレイ/i.test(String(item?.title || item?.label || '')) &&
+
+      if (Array.isArray(submenu) && submenu.length) {
+        const withToken = submenu.filter((item) =>
           item?.continuation?.reloadContinuationData?.continuation
         );
-        const picked = replayItem || submenu.find((item) =>
-          item?.continuation?.reloadContinuationData?.continuation
-        );
-        const data = picked?.continuation?.reloadContinuationData;
-        if (data?.continuation) return { ...data, source: 'liveChatRenderer.header' };
+
+        const labelOf = (item) =>
+          [
+            textOf(item?.title),
+            textOf(item?.label),
+            String(item?.title || ''),
+            String(item?.label || ''),
+          ].filter(Boolean).join(' ');
+
+        const allChatItem =
+          withToken.find((item) => {
+            const label = labelOf(item);
+            return !/top|上位/i.test(label) &&
+              /live chat|チャットのリプレイ|すべて|all/i.test(label);
+          }) ||
+          // YouTubeのwatchページでは通常 0=Top Chat, 1=Live Chat。
+          (withToken.length >= 2 ? withToken[1] : null);
+
+        if (allChatItem) {
+          const data = allChatItem.continuation.reloadContinuationData;
+          return { ...data, source: 'liveChatRenderer.header:all' };
+        }
+      }
+
+      // ヘッダー切替が取れない環境だけ、現在表示中のcontinuationへフォールバック。
+      const direct = renderer?.continuations?.[0]?.reloadContinuationData;
+      if (direct?.continuation) {
+        return { ...direct, source: 'liveChatRenderer.continuations:fallback' };
       }
     }
 
@@ -1188,21 +1214,19 @@
   }
 
 
-  async function runSeekWorker(ctx, worker, map, onProgress, signal, initialToken = null) {
+  async function runSeekWorker(ctx, worker, map, onProgress, signal) {
     if (worker.done) return;
 
-    // playerSeek tokenは位置をbodyのplayerOffsetMsで指定するため、
-    // 初回tokenは各workerで共有し、余分な初期化APIを省く。
-    let token = initialToken;
-    if (!token) {
-      const init = await freshPlayerSeek(ctx, signal);
-      token = init.playerSeek;
-      if (!token) throw new Error('高速取得用playerSeekトークンを取得できませんでした。');
-    }
+    let init = await freshPlayerSeek(ctx, signal);
+    let token = init.playerSeek;
+    if (!token) throw new Error('高速取得用playerSeekトークンを取得できませんでした。');
 
     let offsetMs = Math.max(worker.startMs, Number(worker.offsetMs) || worker.startMs);
     let previousToken = null;
     let loops = 0;
+    let recoveries = 0;
+    worker.done = false;
+    worker.failed = false;
 
     while (token && loops < 30000) {
       loops++;
@@ -1219,7 +1243,10 @@
         offsetMs = Math.max(offsetMs, lastOffset);
         worker.offsetMs = offsetMs;
       }
-      if (offsetMs >= worker.endMs) worker.done = true;
+
+      if (offsetMs >= worker.endMs - 1000) {
+        worker.done = true;
+      }
 
       const doneCount = state.workerProgress.filter((w) => w.done).length;
       const ratios = state.workerProgress.map((w) => {
@@ -1236,10 +1263,26 @@
       });
       maybePersistSnapshot();
 
-      if (worker.done || !nextToken) break;
-      if (lastOffset === null) {
-        if (nextToken === token || nextToken === previousToken) break;
-      } else if (lastOffset <= offsetMs && nextToken === token) {
+      if (worker.done) break;
+
+      const stalled =
+        !nextToken ||
+        (lastOffset === null && (nextToken === token || nextToken === previousToken));
+
+      if (stalled) {
+        // 区間末尾より前でtokenが途切れた場合は「完了」にせず、
+        // 独立したplayerSeek tokenを取り直して少し巻き戻して再開する。
+        if (recoveries < 3) {
+          recoveries++;
+          offsetMs = Math.max(worker.startMs, offsetMs - FAST_OVERLAP_MS);
+          worker.offsetMs = offsetMs;
+          init = await freshPlayerSeek(ctx, signal);
+          token = init.playerSeek;
+          previousToken = null;
+          if (!token) break;
+          continue;
+        }
+        worker.failed = true;
         break;
       }
 
@@ -1248,9 +1291,8 @@
       if (loops % 20 === 0) await sleep(0);
     }
 
-    if (!signal.aborted) {
-      worker.done = true;
-      worker.offsetMs = Math.max(worker.offsetMs || 0, Math.min(worker.endMs, offsetMs));
+    if (!worker.done) {
+      worker.failed = true;
     }
   }
 
@@ -1299,10 +1341,16 @@
           worker,
           map,
           onProgress,
-          signal,
-          init.playerSeek
+          signal
         )
       ));
+
+      const incomplete = state.workerProgress.filter((w) => !w.done);
+      if (incomplete.length) {
+        throw new Error(
+          `取得区間を最後まで確認できませんでした（${incomplete.length}/${FAST_WORKERS}区間）。取得完了扱いにはしません。`
+        );
+      }
     } else if (init.playerSeek) {
       const old = resumeRecord?.workers?.[0];
       let token = init.playerSeek;
@@ -1539,7 +1587,7 @@
     fastLabel.append(fast, document.createTextNode('超高速取得（8並列・長時間アーカイブ向け）'));
     const help = makeEl('div', {
       className: 'mcs-help',
-      text: '検索結果をタップすると、その発言時刻へ移動します。取得途中のデータは自動保存されます。',
+      text: '全チャットを取得します。検索結果をタップすると、その発言時刻へ移動します。取得途中のデータは自動保存されます。',
     });
     controls.append(load, statusEl, fastLabel, search, help);
 
@@ -1611,7 +1659,16 @@
       state.workerProgress = [];
     }
 
-    const cache = state.cacheRecord?.videoId === videoId ? state.cacheRecord : await readCache(videoId);
+    let cache = state.cacheRecord?.videoId === videoId ? state.cacheRecord : await readCache(videoId);
+    if (cache && cache.chatMode !== 'all') {
+      await deleteCache(videoId);
+      cache = null;
+      state.cacheRecord = null;
+      state.cacheCompleted = false;
+      state.messages = [];
+      state.messageMap = new Map();
+      state.workerProgress = [];
+    }
     if (cache && !state.messages.length) {
       state.messages = cache.messages || [];
       state.messageMap = new Map();
@@ -1759,10 +1816,7 @@
     try {
       video.currentTime = Math.max(0, Number(seconds) || 0);
       status(`${formatTime(seconds)} に移動しました。`);
-      // URLにも時刻を残して、再読み込み時にも位置が分かるようにする。
-      const u = new URL(location.href);
-      u.searchParams.set('t', `${Math.floor(seconds)}s`);
-      history.replaceState(history.state, '', u.href);
+      // URLのt=は書き換えない。外部サイトやYouTube標準のタイムスタンプ移動へ干渉しない。
     } catch (e) {
       status(`時刻移動に失敗しました: ${e?.message || e}`, true);
     }
