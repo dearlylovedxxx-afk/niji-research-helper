@@ -374,8 +374,11 @@
       cloudUiStatus('⚠️ バックアップ専用トークンを入力してください。', true);
       return;
     }
+
+    let connected = false;
     state.cloudBusy = true;
     cloudUiStatus('☁️ pCloud接続を確認中…');
+
     try {
       const res = await gmRequest({
         method: 'GET',
@@ -396,14 +399,7 @@
       state.cloudStatus = '☁️ pCloud接続済み';
       await gmSetValue(CLOUD_CONFIG_KEY, { enabled: true, token });
       if (input) input.value = '';
-      updateCloudUi();
-
-      const videoId = getVideoId();
-      if (videoId && state.cacheCompleted && state.messages.length) {
-        await cloudUploadCompleted(videoId, state.messages);
-      } else if (videoId) {
-        void initializeVideoStorage(videoId, { forceCloudCheck: true });
-      }
+      connected = true;
     } catch (e) {
       state.cloudEnabled = false;
       state.cloudToken = '';
@@ -411,6 +407,16 @@
     } finally {
       state.cloudBusy = false;
       updateCloudUi();
+    }
+
+    if (!connected) return;
+
+    // 接続確認ロックを外してから、保存/復元処理を開始する。
+    const videoId = getVideoId();
+    if (videoId && state.cacheCompleted && state.messages.length) {
+      await cloudUploadCompleted(videoId, state.messages);
+    } else if (videoId) {
+      void initializeVideoStorage(videoId, { forceCloudCheck: true });
     }
   }
 
