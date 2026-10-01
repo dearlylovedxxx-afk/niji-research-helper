@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.2.1
+// @version      0.2.2
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -24,7 +24,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.2.1';
+  const VERSION = '0.2.2';
 
   const state = {
     videoId: null,
@@ -506,103 +506,6 @@
     return null;
   }
 
-
-  function extractDirectChatContinuation(initialData) {
-    const candidates = [];
-
-    const known = [
-      initialData?.contents?.liveChatRenderer,
-      initialData?.response?.contents?.liveChatRenderer,
-      initialData?.continuationContents?.liveChatContinuation,
-      initialData?.response?.continuationContents?.liveChatContinuation,
-    ].filter(Boolean);
-    candidates.push(...known);
-
-    for (const renderer of deepFindValues(initialData, 'liveChatRenderer')) {
-      if (renderer && typeof renderer === 'object') candidates.push(renderer);
-    }
-    for (const continuation of deepFindValues(initialData, 'liveChatContinuation')) {
-      if (continuation && typeof continuation === 'object') candidates.push(continuation);
-    }
-
-    const seen = new Set();
-    for (const obj of candidates) {
-      if (!obj || seen.has(obj)) continue;
-      seen.add(obj);
-
-      const list = Array.isArray(obj?.continuations) ? obj.continuations : [];
-      for (const entry of list) {
-        const reload = entry?.reloadContinuationData;
-        if (reload?.continuation) return { ...reload, source: 'liveChatReplay.bootstrap:reload' };
-
-        const replay = entry?.liveChatReplayContinuationData;
-        if (replay?.continuation) return { ...replay, source: 'liveChatReplay.bootstrap:replay' };
-
-        const seek = entry?.playerSeekContinuationData;
-        if (seek?.continuation) return { ...seek, source: 'liveChatReplay.bootstrap:seek' };
-      }
-    }
-
-    const reloads = deepFindValues(initialData, 'reloadContinuationData');
-    for (const data of reloads) {
-      if (data?.continuation) {
-        return { ...data, source: 'liveChatReplay.bootstrap:deepReload' };
-      }
-    }
-    return null;
-  }
-
-  async function bootstrapAllChatReplay(ctx, signal) {
-    if (!ctx?.continuation?.continuation) return ctx;
-
-    const url = `https://www.youtube.com/live_chat_replay?continuation=${encodeURIComponent(ctx.continuation.continuation)}`;
-    const pageFetch = getPageFetch();
-
-    const res = await pageFetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      cache: 'no-store',
-      referrer: location.href,
-      referrerPolicy: 'strict-origin-when-cross-origin',
-      signal,
-    });
-
-    if (!res.ok) {
-      const err = new Error(`全チャット初期化ページ取得失敗: HTTP ${res.status}`);
-      err.status = res.status;
-      throw err;
-    }
-
-    const html = await res.text();
-    const initialData =
-      parseJsonAfterMarker(html, 'var ytInitialData = ') ||
-      parseJsonAfterMarker(html, 'ytInitialData = ') ||
-      parseJsonAfterMarker(html, 'window["ytInitialData"] = ');
-
-    const direct = extractDirectChatContinuation(initialData);
-    if (!direct?.continuation) {
-      throw new Error('全チャット初期化ページからChat Replayトークンを取得できませんでした。');
-    }
-
-    const chatCfg = parseAllYtcfgSets(html);
-    const preservedSession = ctx.pageSessionIndex;
-    const preservedDelegated = ctx.cfg?.DELEGATED_SESSION_ID;
-
-    ctx.initialData = initialData || ctx.initialData;
-    ctx.cfg = normalizeCfg({
-      ...ctx.cfg,
-      ...chatCfg,
-      ...(preservedSession !== undefined && preservedSession !== null
-        ? { SESSION_INDEX: preservedSession }
-        : {}),
-      ...(preservedDelegated ? { DELEGATED_SESSION_ID: preservedDelegated } : {}),
-    });
-    ctx.continuation = direct;
-    ctx.source = 'live-chat-replay-bootstrap';
-    ctx.auth = await buildAuthorization('https://www.youtube.com');
-
-    return ctx;
-  }
 
 
   function stripJsonSecurityPrefix(text) {
@@ -1415,20 +1318,16 @@
       throw new Error('ログイン認証用SAPISIDを取得できません。メン限アーカイブでは認証が必要です。');
     }
 
+    // ヘッダーの「全チャット」tokenはYCSの旧API方式と同じ種類。
+    // playerOffsetMsを最初から付けて固定tokenを使う必要がある。
     if (String(ctx.continuation?.source || '').startsWith('liveChatRenderer.header:all')) {
       onProgress({
-        phase: 'all-chat-bootstrap',
+        phase: 'legacy-all',
         count: map.size,
         requests: state.requestCount,
-        detail: '全チャットへ切り替え中…',
+        detail: '全チャットを取得中…',
       });
-      await bootstrapAllChatReplay(ctx, signal);
-      onProgress({
-        phase: 'all-chat-bootstrap-done',
-        count: map.size,
-        requests: state.requestCount,
-        detail: `全チャットtoken取得済み / ${ctx.continuation.source}`,
-      });
+      return loadLegacyReplay(ctx, map, onProgress, signal, resumeRecord);
     }
 
     let init;
@@ -1545,36 +1444,73 @@
 
   async function loadLegacyReplay(ctx, map, onProgress, signal, resumeRecord = null) {
     const fixedToken = ctx.continuation.continuation;
+    const durationMs = getVideoDurationMs(ctx);
     const old = resumeRecord?.workers?.[0];
     let offsetMs = Math.max(0, Number(old?.offsetMs || 0) - FAST_OVERLAP_MS);
     let loops = 0;
-    state.workerProgress = [{ index: 0, startMs: 0, endMs: Number.MAX_SAFE_INTEGER, offsetMs, done: false }];
+    let lastProgressOffset = -1;
+
+    state.workerProgress = [{
+      index: 0,
+      startMs: 0,
+      endMs: durationMs || Number.MAX_SAFE_INTEGER,
+      offsetMs,
+      done: false,
+    }];
 
     while (loops < 30000) {
       loops++;
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
+      // 旧方式は固定token + currentPlayerState.playerOffsetMs が必須。
       const response = await innertubeReplay(ctx, fixedToken, signal, offsetMs, true);
       const actions = getActions(response);
       addActionsTracked(actions, map);
       const lastOffset = maxOffsetFromActions(actions);
 
-      if (lastOffset !== null) state.workerProgress[0].offsetMs = lastOffset;
+      if (lastOffset !== null) {
+        state.workerProgress[0].offsetMs = lastOffset;
+      }
+
       onProgress({
-        phase: 'legacy',
+        phase: 'legacy-all',
         count: map.size,
         requests: state.requestCount,
-        detail: lastOffset === null ? '旧方式で取得中…' : `${formatTime(lastOffset / 1000)} まで取得`,
+        detail: lastOffset === null
+          ? '全チャット取得中…'
+          : `${formatTime(lastOffset / 1000)} まで全チャット取得`,
       });
       maybePersistSnapshot();
 
-      if (lastOffset === null || lastOffset <= offsetMs) break;
+      if (lastOffset === null) {
+        // 応答にチャットが無ければ終端。
+        state.workerProgress[0].done = true;
+        break;
+      }
+
+      if (durationMs && lastOffset >= durationMs - 1000) {
+        state.workerProgress[0].done = true;
+        offsetMs = lastOffset;
+        break;
+      }
+
+      if (lastOffset <= offsetMs || lastOffset === lastProgressOffset) {
+        // 進捗が止まった時点を終端とみなす。
+        state.workerProgress[0].done = true;
+        offsetMs = lastOffset;
+        break;
+      }
+
+      lastProgressOffset = offsetMs;
       offsetMs = lastOffset;
+
       if (loops % 12 === 0) await sleep(0);
     }
 
-    state.workerProgress[0].done = true;
-    if (!map.size) throw new Error('旧方式でもチャットを取得できませんでした。');
+    if (!map.size) {
+      throw new Error('全チャットを取得できませんでした。');
+    }
+
     state.messageMap = map;
     return currentMessagesSorted();
   }
