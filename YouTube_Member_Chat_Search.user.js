@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.2.2
+// @version      0.2.3
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -24,7 +24,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.2.2';
+  const VERSION = '0.2.3';
 
   const state = {
     videoId: null,
@@ -446,6 +446,67 @@
     return { initialData, cfg, source: 'html' };
   }
 
+  function extractAllChatContinuationFromPbj(pbj) {
+    const renderers = [];
+
+    const known = [
+      pbj?.response?.contents?.twoColumnWatchNextResults?.conversationBar?.liveChatRenderer,
+      pbj?.response?.contents?.singleColumnWatchNextResults?.conversationBar?.liveChatRenderer,
+      Array.isArray(pbj)
+        ? pbj?.[3]?.response?.contents?.twoColumnWatchNextResults?.conversationBar?.liveChatRenderer
+        : null,
+      Array.isArray(pbj)
+        ? pbj?.[3]?.response?.contents?.singleColumnWatchNextResults?.conversationBar?.liveChatRenderer
+        : null,
+    ].filter(Boolean);
+
+    renderers.push(...known);
+
+    for (const renderer of deepFindValues(pbj, 'liveChatRenderer')) {
+      if (renderer && typeof renderer === 'object') renderers.push(renderer);
+    }
+
+    const seen = new Set();
+    for (const renderer of renderers) {
+      if (!renderer || seen.has(renderer)) continue;
+      seen.add(renderer);
+
+      const submenu = renderer?.header?.liveChatHeaderRenderer?.viewSelector
+        ?.sortFilterSubMenuRenderer?.subMenuItems;
+
+      if (!Array.isArray(submenu) || !submenu.length) continue;
+
+      const withToken = submenu.filter((item) =>
+        item?.continuation?.reloadContinuationData?.continuation
+      );
+
+      // YCSの旧API実装と同じく、全チャットは通常subMenuItems[1]。
+      const indexOne = submenu?.[1]?.continuation?.reloadContinuationData;
+      if (indexOne?.continuation) {
+        return { ...indexOne, source: 'pbj.header:all:index1' };
+      }
+
+      const labelOf = (item) =>
+        [
+          textOf(item?.title),
+          textOf(item?.label),
+          String(item?.title || ''),
+          String(item?.label || ''),
+        ].filter(Boolean).join(' ');
+
+      const allItem = withToken.find((item) => {
+        const label = labelOf(item);
+        return !/top|上位/i.test(label) &&
+          /live chat|チャットのリプレイ|すべて|all/i.test(label);
+      });
+
+      const data = allItem?.continuation?.reloadContinuationData;
+      if (data?.continuation) return { ...data, source: 'pbj.header:all:label' };
+    }
+
+    return null;
+  }
+
   function extractInitialContinuation(initialData) {
     const candidates = [
       initialData?.contents?.twoColumnWatchNextResults?.conversationBar?.liveChatRenderer,
@@ -535,7 +596,8 @@
     headers['x-spf-referer'] = headers['x-spf-previous'];
 
     try {
-      const res = await fetch(target, {
+      const pageFetch = getPageFetch();
+      const res = await pageFetch(target, {
         method: 'GET',
         credentials: 'include',
         cache: 'no-store',
@@ -815,9 +877,6 @@
       throw new Error('YouTubeのInnertube設定を取得できませんでした。');
     }
 
-    // 認証対象アカウントは「今Safariで表示しているYouTubeページ」のytcfgを優先する。
-    // PC版watchを裏取得した際のSESSION_INDEXで上書きすると、複数Googleアカウント時に
-    // メンバーシップを持たない別アカウントとして扱われHTTP 400になる。
     const pageSessionIndex =
       pageData.cfg?.SESSION_INDEX !== undefined && pageData.cfg?.SESSION_INDEX !== null
         ? pageData.cfg.SESSION_INDEX
@@ -835,17 +894,24 @@
     const origin = 'https://www.youtube.com';
     let auth = await buildAuthorization(origin);
     let initialData = pageData.initialData;
-    let continuation = extractInitialContinuation(initialData);
+    let continuation = null;
     let source = pageData.source;
 
-    if (!continuation?.continuation && videoId) {
+    // 全チャットだけは最初からPBJを見に行く。
+    // 通常watchページのheader tokenは旧API互換でない場合があるため使わない。
+    if (videoId) {
       const pbj = await fetchPbjInitialData(videoId, cfg, auth, origin, signal);
-      const pbjContinuation = extractInitialContinuation(pbj);
-      if (pbjContinuation?.continuation) {
+      const allFromPbj = extractAllChatContinuationFromPbj(pbj);
+      if (allFromPbj?.continuation) {
         initialData = pbj;
-        continuation = { ...pbjContinuation, source: `pbj:${pbjContinuation.source}` };
-        source = 'pbj';
+        continuation = allFromPbj;
+        source = 'pbj-all';
       }
+    }
+
+    // PBJから全チャットtokenが取れなかった場合のみ、通常の現在表示tokenへフォールバック。
+    if (!continuation?.continuation) {
+      continuation = extractInitialContinuation(initialData);
     }
 
     if (!continuation?.continuation && videoId) {
@@ -853,15 +919,20 @@
       if (gmDesktop) {
         cfg = normalizeCfg(applyPageAuthSession({ ...cfg, ...(gmDesktop.cfg || {}) }));
         auth = await buildAuthorization(origin);
-        const gmContinuation =
-          gmDesktop.continuation ||
-          extractInitialContinuation(gmDesktop.initialData);
+        // GM HTMLでは「現在表示」のtokenだけを使う。header:allは採用しない。
+        const directCandidates = deepFindValues(gmDesktop.initialData, 'liveChatRenderer');
+        let direct = null;
+        for (const renderer of directCandidates) {
+          const data = renderer?.continuations?.[0]?.reloadContinuationData;
+          if (data?.continuation) {
+            direct = { ...data, source: 'gm-desktop:liveChatRenderer.continuations' };
+            break;
+          }
+        }
+        const gmContinuation = direct || gmDesktop.continuation;
         if (gmContinuation?.continuation) {
           initialData = gmDesktop.initialData || initialData;
-          continuation = {
-            ...gmContinuation,
-            source: `gm-desktop:${gmContinuation.source || gmDesktop.method || 'unknown'}`,
-          };
+          continuation = gmContinuation;
           source = 'gm-desktop';
         }
       }
@@ -872,11 +943,15 @@
       if (desktop) {
         cfg = normalizeCfg(applyPageAuthSession({ ...cfg, ...(desktop.cfg || {}) }));
         auth = await buildAuthorization(origin);
-        const desktopContinuation = extractInitialContinuation(desktop.initialData);
-        if (desktopContinuation?.continuation) {
-          initialData = desktop.initialData;
-          continuation = { ...desktopContinuation, source: `desktop:${desktopContinuation.source}` };
-          source = 'desktop-html';
+        const directCandidates = deepFindValues(desktop.initialData, 'liveChatRenderer');
+        for (const renderer of directCandidates) {
+          const data = renderer?.continuations?.[0]?.reloadContinuationData;
+          if (data?.continuation) {
+            initialData = desktop.initialData;
+            continuation = { ...data, source: 'desktop:liveChatRenderer.continuations' };
+            source = 'desktop-html';
+            break;
+          }
         }
       }
     }
@@ -893,7 +968,7 @@
 
     if (!continuation?.continuation) {
       throw new Error(
-        'チャットリプレイの開始トークンが見つかりません。Safari表示ページ・PBJ・GM経由PC版watch・通常PC版watch・Innertube nextの5経路で確認しました。'
+        'チャットリプレイの開始トークンが見つかりません。PBJ・Safari表示ページ・GM経由PC版watch・通常PC版watch・Innertube nextで確認しました。'
       );
     }
 
@@ -1320,7 +1395,10 @@
 
     // ヘッダーの「全チャット」tokenはYCSの旧API方式と同じ種類。
     // playerOffsetMsを最初から付けて固定tokenを使う必要がある。
-    if (String(ctx.continuation?.source || '').startsWith('liveChatRenderer.header:all')) {
+    if (
+      String(ctx.continuation?.source || '').startsWith('liveChatRenderer.header:all') ||
+      String(ctx.continuation?.source || '').startsWith('pbj.header:all')
+    ) {
       onProgress({
         phase: 'legacy-all',
         count: map.size,
