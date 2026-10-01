@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.3.1
+// @version      0.3.2
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.3.1';
+  const VERSION = '0.3.2';
 
   const state = {
     videoId: null,
@@ -93,9 +93,11 @@
   }
 
   function cloudDevice(videoId) {
-    // Worker: /^[a-z0-9_.:-]{1,96}$/ only. YouTube IDの「-」は許可されないので
-    // Video IDでは使われない「.」へ可逆変換して保存キーにする。
-    return `ytchat_${String(videoId || '').replace(/-/g, '.')}`;
+    // WorkerのDEVICE_REは /^[a-z0-9_.:-]{1,96}$/。
+    // YouTube videoIdは大文字を含み得るため、そのままではinvalid_deviceになる。
+    // 大文字A-Zだけを :a ～ :z に可逆エスケープし、大小文字の区別も維持する。
+    const encoded = String(videoId || '').replace(/[A-Z]/g, (ch) => `:${ch.toLowerCase()}`);
+    return `ytchat_${encoded}`;
   }
 
   function cloudUiStatus(text, isError = false) {
