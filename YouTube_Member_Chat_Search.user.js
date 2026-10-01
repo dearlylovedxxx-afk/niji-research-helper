@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.2.6
+// @version      0.3.0
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -9,10 +9,13 @@
 // @match        https://m.youtube.com/*
 // @run-at       document-idle
 // @noframes
+// @grant        GM.getValue
+// @grant        GM.setValue
 // @grant        GM.xmlHttpRequest
 // @grant        GM.xmlhttpRequest
 // @grant        GM_xmlhttpRequest
 // @connect      www.youtube.com
+// @connect      niji-research-backup.dearlylovedxxx.workers.dev
 // ==/UserScript==
 
 (() => {
@@ -24,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.2.6';
+  const VERSION = '0.3.0';
 
   const state = {
     videoId: null,
@@ -47,6 +50,15 @@
     rateLimitUntil: 0,
     autoResumeStartedFor: null,
     lastAppliedTimestampUrl: null,
+    autoStartStartedFor: null,
+    initSerial: 0,
+    cloudEnabled: false,
+    cloudToken: '',
+    cloudBusy: false,
+    cloudStatus: '未接続',
+    cloudLastBackupId: '',
+    cloudLastError: '',
+
   };
 
   const CACHE_DB_NAME = 'MarinaMemberChatSearchDB';
@@ -54,9 +66,363 @@
   const CACHE_STORE = 'videoCache';
   const FAST_WORKERS = 8;
   const FAST_OVERLAP_MS = 60 * 1000;
+  const CLOUD_URL = 'https://niji-research-backup.dearlylovedxxx.workers.dev';
+  const CLOUD_CONFIG_KEY = 'mcs_pcloud_config_v1';
+  const CLOUD_SCHEMA_VERSION = 1;
+  const CLOUD_ORIGIN = 'https://www.youtube.com';
+  const CLOUD_DEVICE_PREFIX = 'yt-chat-';
   let cacheDbPromise = null;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function gmGetValue(key, fallback) {
+    try {
+      if (typeof GM !== 'undefined' && typeof GM.getValue === 'function') {
+        const value = await GM.getValue(key, fallback);
+        return value ?? fallback;
+      }
+    } catch (e) {
+      console.warn('[Member Chat Search] GM.getValue failed', e);
+    }
+    return fallback;
+  }
+
+  async function gmSetValue(key, value) {
+    if (typeof GM !== 'undefined' && typeof GM.setValue === 'function') {
+      return GM.setValue(key, value);
+    }
+    throw new Error('MacaqueのGM.setValueが利用できません。');
+  }
+
+  function cloudDevice(videoId) {
+    return `${CLOUD_DEVICE_PREFIX}${videoId}`;
+  }
+
+  function cloudUiStatus(text, isError = false) {
+    state.cloudStatus = text;
+    state.cloudLastError = isError ? text : '';
+    const el = document.querySelector(`#${PANEL_ID} .mcs-cloud-status`);
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = isError ? '#d93025' : '';
+  }
+
+  function updateCloudUi() {
+    const wrap = document.querySelector(`#${PANEL_ID} .mcs-cloud-wrap`);
+    if (!wrap) return;
+    const input = wrap.querySelector('.mcs-cloud-token');
+    const connect = wrap.querySelector('.mcs-cloud-connect');
+    const disconnect = wrap.querySelector('.mcs-cloud-disconnect');
+    const restore = wrap.querySelector('.mcs-cloud-restore');
+    if (input) input.style.display = state.cloudEnabled ? 'none' : '';
+    if (connect) connect.style.display = state.cloudEnabled ? 'none' : '';
+    if (disconnect) disconnect.style.display = state.cloudEnabled ? '' : 'none';
+    if (restore) restore.disabled = !state.cloudEnabled || state.cloudBusy;
+    cloudUiStatus(
+      state.cloudEnabled
+        ? (state.cloudStatus || '☁️ pCloud接続済み')
+        : '☁️ pCloud未接続（初回のみバックアップ専用トークンを入力）',
+      Boolean(state.cloudLastError)
+    );
+  }
+
+  async function cloudSha(bytes) {
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function cloudList(videoId, token = state.cloudToken) {
+    if (!token || !videoId) return [];
+    const res = await gmRequest({
+      method: 'GET',
+      url: `${CLOUD_URL}/v1/backups?device=${encodeURIComponent(cloudDevice(videoId))}`,
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      responseType: 'text',
+      timeout: 45000,
+    });
+    let body = {};
+    try { body = JSON.parse(res.responseText || res.response || '{}'); }
+    catch { throw new Error('pCloud中継Workerの応答を読み取れません。'); }
+    if (res.status < 200 || res.status >= 300 || !body.ok) {
+      throw new Error(`pCloud一覧 HTTP ${res.status}: ${body.error || '取得失敗'}`);
+    }
+    return (Array.isArray(body.backups) ? body.backups : [])
+      .slice()
+      .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
+  }
+
+  async function cloudFetchBackup(item, videoId, token = state.cloudToken) {
+    if (!item?.id || !item?.sha256) throw new Error('pCloudバックアップ情報が不正です。');
+
+    const res = await gmRequest({
+      method: 'GET',
+      url: `${CLOUD_URL}/v1/backups/${encodeURIComponent(item.id)}`,
+      headers: { authorization: `Bearer ${token}` },
+      responseType: 'arraybuffer',
+      timeout: 45000,
+    });
+    if (res.status !== 200) throw new Error(`pCloud読込 HTTP ${res.status}`);
+
+    const raw =
+      res.response instanceof ArrayBuffer
+        ? new Uint8Array(res.response)
+        : ArrayBuffer.isView(res.response)
+          ? new Uint8Array(res.response.buffer, res.response.byteOffset, res.response.byteLength)
+          : new TextEncoder().encode(res.responseText || String(res.response || ''));
+
+    if (Number(item.size || 0) && raw.byteLength !== Number(item.size)) {
+      throw new Error('pCloudバックアップのサイズが一致しません。');
+    }
+    if (await cloudSha(raw) !== item.sha256) {
+      throw new Error('pCloudバックアップのSHA-256が一致しません。');
+    }
+
+    let data;
+    try {
+      data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
+    } catch {
+      throw new Error('pCloudバックアップJSONが不正です。');
+    }
+
+    if (
+      data?.app !== 'YouTube Member Chat Search' ||
+      Number(data?.schemaVersion) !== CLOUD_SCHEMA_VERSION ||
+      data?.videoId !== videoId ||
+      data?.completed !== true ||
+      !Array.isArray(data?.messages)
+    ) {
+      throw new Error('pCloudバックアップの形式が違います。');
+    }
+
+    return data;
+  }
+
+  function currentVideoMetadata(videoId) {
+    let title = '';
+    let channel = '';
+    try {
+      title =
+        document.querySelector('h1 yt-formatted-string')?.textContent?.trim() ||
+        document.querySelector('h1')?.textContent?.trim() ||
+        document.title.replace(/\s*-\s*YouTube\s*$/i, '').trim();
+      channel =
+        document.querySelector('ytd-channel-name a')?.textContent?.trim() ||
+        document.querySelector('#owner-name a')?.textContent?.trim() ||
+        '';
+    } catch { /* ignore */ }
+
+    return { videoId, title, channel };
+  }
+
+  function cloudPayload(videoId, messages) {
+    const meta = currentVideoMetadata(videoId);
+    return {
+      app: 'YouTube Member Chat Search',
+      schemaVersion: CLOUD_SCHEMA_VERSION,
+      version: VERSION,
+      exportedAt: new Date().toISOString(),
+      sourceOrigin: CLOUD_ORIGIN,
+      device: cloudDevice(videoId),
+      videoId,
+      title: meta.title,
+      channel: meta.channel,
+      chatMode: 'all-v2',
+      completed: true,
+      count: messages.length,
+      messages,
+    };
+  }
+
+  async function cloudUploadCompleted(videoId, messages, { silent = false } = {}) {
+    if (!state.cloudEnabled || !state.cloudToken || !videoId || !messages?.length) return null;
+    if (state.cloudBusy) return null;
+
+    state.cloudBusy = true;
+    if (!silent) cloudUiStatus('☁️ pCloudへ保存中…');
+    try {
+      const payload = cloudPayload(videoId, messages);
+      const textPayload = JSON.stringify(payload);
+      const bytes = new TextEncoder().encode(textPayload);
+      const sha = await cloudSha(bytes);
+
+      const res = await gmRequest({
+        method: 'POST',
+        url: `${CLOUD_URL}/v1/backups`,
+        headers: {
+          authorization: `Bearer ${state.cloudToken}`,
+          accept: 'application/json',
+          'content-type': 'application/json',
+          'x-nrh-device': cloudDevice(videoId),
+          'x-nrh-origin': CLOUD_ORIGIN,
+          'x-nrh-sha256': sha,
+          'x-nrh-version': VERSION,
+        },
+        data: textPayload,
+        responseType: 'text',
+        timeout: 60000,
+      });
+
+      let body = {};
+      try { body = JSON.parse(res.responseText || res.response || '{}'); }
+      catch { throw new Error('pCloud保存応答を読み取れません。'); }
+
+      if (res.status < 200 || res.status >= 300 || !body.ok) {
+        throw new Error(`pCloud保存 HTTP ${res.status}: ${body.error || '保存失敗'}`);
+      }
+
+      const list = await cloudList(videoId);
+      const match =
+        (body.backup?.id ? list.find((x) => x.id === body.backup.id) : null) ||
+        list.find((x) => x.sha256 === sha && Number(x.size || 0) === bytes.byteLength);
+
+      if (!match) throw new Error('pCloud保存後の世代確認に失敗しました。');
+
+      const verify = await cloudFetchBackup(match, videoId);
+      if (verify.count !== messages.length) {
+        throw new Error('pCloud保存後の件数照合に失敗しました。');
+      }
+
+      state.cloudLastBackupId = String(match.id || '');
+      state.cloudLastError = '';
+      cloudUiStatus(`☁️ pCloud保存済み：${messages.length.toLocaleString()}件`);
+      return match;
+    } catch (e) {
+      const msg = `⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 120)}`;
+      cloudUiStatus(msg, true);
+      console.warn('[Member Chat Search] cloud upload failed', e);
+      return null;
+    } finally {
+      state.cloudBusy = false;
+      updateCloudUi();
+    }
+  }
+
+  async function cloudRestoreLatest(videoId, { silent = false } = {}) {
+    if (!state.cloudEnabled || !state.cloudToken || !videoId || state.cloudBusy) return false;
+    state.cloudBusy = true;
+    if (!silent) cloudUiStatus('☁️ pCloudを確認中…');
+
+    try {
+      const list = await cloudList(videoId);
+      for (const item of list.slice(0, 5)) {
+        try {
+          const data = await cloudFetchBackup(item, videoId);
+          const record = {
+            videoId,
+            version: VERSION,
+            chatMode: 'all-v2',
+            messages: data.messages,
+            workers: [],
+            completed: true,
+            inProgress: false,
+            fastMode: true,
+            updatedAt: Date.parse(data.exportedAt || '') || Date.now(),
+            requestCount: 0,
+            cloudBackupId: String(item.id || ''),
+          };
+
+          await writeCache(record);
+          state.cacheRecord = record;
+          state.cacheCompleted = true;
+          state.messageMap = new Map();
+          for (const msg of record.messages) {
+            const key = msg.id || `${msg.offsetMs}|${msg.author}|${msg.message}`;
+            state.messageMap.set(key, msg);
+          }
+          state.messages = currentMessagesSorted();
+          state.workerProgress = [];
+          state.loadedVideoId = videoId;
+          state.cloudLastBackupId = String(item.id || '');
+          state.cloudLastError = '';
+
+          status(`☁️ pCloudから読込：${state.messages.length.toLocaleString()}件（YouTube再取得なし）`);
+          setLoadButton('再取得', false);
+          renderSearchResults();
+          cloudUiStatus(`☁️ pCloudから読込済み：${state.messages.length.toLocaleString()}件`);
+          return true;
+        } catch (e) {
+          console.warn('[Member Chat Search] cloud generation skipped', item?.id, e);
+        }
+      }
+
+      cloudUiStatus('☁️ この動画のpCloud保存データはありません。');
+      return false;
+    } catch (e) {
+      const msg = `⚠️ pCloud読込失敗：${String(e?.message || e).slice(0, 120)}`;
+      cloudUiStatus(msg, true);
+      console.warn('[Member Chat Search] cloud restore failed', e);
+      return false;
+    } finally {
+      state.cloudBusy = false;
+      updateCloudUi();
+    }
+  }
+
+  async function initializeCloudConfig() {
+    const cfg = await gmGetValue(CLOUD_CONFIG_KEY, { enabled: false, token: '' });
+    state.cloudEnabled = cfg?.enabled === true && typeof cfg?.token === 'string' && cfg.token.trim().length >= 24;
+    state.cloudToken = state.cloudEnabled ? cfg.token.trim() : '';
+    state.cloudStatus = state.cloudEnabled ? '☁️ pCloud接続済み' : '未接続';
+    state.cloudLastError = '';
+    updateCloudUi();
+  }
+
+  async function connectCloudFromUi() {
+    const input = document.querySelector(`#${PANEL_ID} .mcs-cloud-token`);
+    const token = String(input?.value || '').trim();
+    if (token.length < 24) {
+      cloudUiStatus('⚠️ バックアップ専用トークンを入力してください。', true);
+      return;
+    }
+    state.cloudBusy = true;
+    cloudUiStatus('☁️ pCloud接続を確認中…');
+    try {
+      const res = await gmRequest({
+        method: 'GET',
+        url: `${CLOUD_URL}/v1/status`,
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+        responseType: 'text',
+        timeout: 45000,
+      });
+      let body = {};
+      try { body = JSON.parse(res.responseText || res.response || '{}'); } catch {}
+      if (res.status < 200 || res.status >= 300 || !body.connected || !body.remoteOk) {
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+
+      state.cloudEnabled = true;
+      state.cloudToken = token;
+      state.cloudLastError = '';
+      state.cloudStatus = '☁️ pCloud接続済み';
+      await gmSetValue(CLOUD_CONFIG_KEY, { enabled: true, token });
+      if (input) input.value = '';
+      updateCloudUi();
+
+      const videoId = getVideoId();
+      if (videoId && state.cacheCompleted && state.messages.length) {
+        await cloudUploadCompleted(videoId, state.messages);
+      } else if (videoId) {
+        void initializeVideoStorage(videoId, { forceCloudCheck: true });
+      }
+    } catch (e) {
+      state.cloudEnabled = false;
+      state.cloudToken = '';
+      cloudUiStatus(`⚠️ pCloud接続失敗：${String(e?.message || e).slice(0, 120)}`, true);
+    } finally {
+      state.cloudBusy = false;
+      updateCloudUi();
+    }
+  }
+
+  async function disconnectCloud() {
+    state.cloudEnabled = false;
+    state.cloudToken = '';
+    state.cloudLastBackupId = '';
+    state.cloudLastError = '';
+    state.cloudStatus = '未接続';
+    await gmSetValue(CLOUD_CONFIG_KEY, { enabled: false, token: '' });
+    updateCloudUi();
+  }
 
   function openCacheDb() {
     if (cacheDbPromise) return cacheDbPromise;
@@ -1685,6 +2051,12 @@
       #${PANEL_ID} .mcs-help { font-size:11px; color:#777; }
       #${PANEL_ID} .mcs-fast-label { display:flex; align-items:center; gap:7px; font-size:12px; color:#555; }
       #${PANEL_ID} .mcs-fast { width:18px; height:18px; }
+      #${PANEL_ID} .mcs-cloud-wrap { border:1px solid #e1e1e1; border-radius:10px; padding:8px; display:grid; gap:7px; }
+      #${PANEL_ID} .mcs-cloud-title { font-size:12px; font-weight:700; }
+      #${PANEL_ID} .mcs-cloud-status { font-size:11px; color:#666; overflow-wrap:anywhere; }
+      #${PANEL_ID} .mcs-cloud-token { width:100%; box-sizing:border-box; border:1px solid #bbb; border-radius:8px; padding:8px 9px; font:inherit; }
+      #${PANEL_ID} .mcs-cloud-actions { display:flex; gap:6px; flex-wrap:wrap; }
+      #${PANEL_ID} .mcs-cloud-actions button { border:0; border-radius:8px; background:#eee; padding:7px 9px; cursor:pointer; font-size:11px; }
       #${PANEL_ID} .mcs-results { overflow:auto; border-top:1px solid #e5e5e5; min-height:90px; -webkit-overflow-scrolling:touch; }
       #${PANEL_ID} .mcs-empty { padding:18px 14px; color:#777; text-align:center; }
       #${PANEL_ID} .mcs-row { display:block; width:100%; text-align:left; border:0; border-bottom:1px solid #eee; background:#fff; padding:10px 12px; cursor:pointer; color:#111; }
@@ -1772,11 +2144,27 @@
     fast.checked = true;
     const fastLabel = makeEl('label', { className: 'mcs-fast-label' });
     fastLabel.append(fast, document.createTextNode('超高速取得（8並列・長時間アーカイブ向け）'));
+    const cloudWrap = makeEl('div', { className: 'mcs-cloud-wrap' });
+    const cloudTitle = makeEl('div', { className: 'mcs-cloud-title', text: '☁️ pCloud保存' });
+    const cloudStatusEl = makeEl('div', { className: 'mcs-cloud-status', text: '接続状態を確認中…' });
+    const cloudToken = makeEl('input', {
+      className: 'mcs-cloud-token',
+      type: 'password',
+      placeholder: 'バックアップ専用トークン（初回のみ）',
+      autocomplete: 'off',
+    });
+    const cloudActions = makeEl('div', { className: 'mcs-cloud-actions' });
+    const cloudConnect = makeEl('button', { className: 'mcs-cloud-connect', type: 'button', text: '接続' });
+    const cloudRestore = makeEl('button', { className: 'mcs-cloud-restore', type: 'button', text: 'pCloudから再読込' });
+    const cloudDisconnect = makeEl('button', { className: 'mcs-cloud-disconnect', type: 'button', text: '切断' });
+    cloudActions.append(cloudConnect, cloudRestore, cloudDisconnect);
+    cloudWrap.append(cloudTitle, cloudStatusEl, cloudToken, cloudActions);
+
     const help = makeEl('div', {
       className: 'mcs-help',
-      text: 'Top Chatから全チャットへ自動切替して取得します。検索結果をタップすると、その発言時刻へ移動します。取得途中のデータは自動保存されます。',
+      text: '保存済みがあればローカル→pCloudの順で即読込し、無い配信アーカイブだけ自動取得します。取得完了後はpCloudへ自動保存します。',
     });
-    controls.append(load, statusEl, fastLabel, search, help);
+    controls.append(load, statusEl, fastLabel, cloudWrap, search, help);
 
     const results = makeEl('div', { className: 'mcs-results' });
     results.appendChild(makeEl('div', { className: 'mcs-empty', text: 'まだ取得していません。' }));
@@ -1807,7 +2195,14 @@
       setPanelOpen(false);
     });
     load.addEventListener('click', () => void handleLoadClick(false));
+    cloudConnect.addEventListener('click', () => void connectCloudFromUi());
+    cloudRestore.addEventListener('click', () => {
+      const videoId = getVideoId();
+      if (videoId) void cloudRestoreLatest(videoId);
+    });
+    cloudDisconnect.addEventListener('click', () => void disconnectCloud());
     search.addEventListener('input', renderSearchResults);
+    updateCloudUi();
   }
 
   function status(text, isError = false) {
@@ -1903,6 +2298,17 @@
       status(`取得完了：${messages.length.toLocaleString()}件（API ${state.requestCount}回）`);
       setLoadButton('再取得', false);
       renderSearchResults();
+
+      if (state.cloudEnabled && state.cloudToken) {
+        status(`取得完了：${messages.length.toLocaleString()}件。pCloudへ保存中…`);
+        const saved = await cloudUploadCompleted(videoId, messages);
+        status(
+          saved
+            ? `取得完了：${messages.length.toLocaleString()}件／☁️ pCloud保存済み`
+            : `取得完了：${messages.length.toLocaleString()}件／pCloud保存は失敗（ローカル保存済み）`,
+          !saved
+        );
+      }
     } catch (e) {
       if (e?.name === 'AbortError') {
         await persistSnapshot({
@@ -1932,6 +2338,103 @@
       state.messages = currentMessagesSorted();
       renderSearchResults();
     }
+  }
+
+  async function detectChatReplayAvailable(videoId) {
+    if (!videoId) return false;
+
+    try {
+      let page = window;
+      if (typeof unsafeWindow !== 'undefined') page = unsafeWindow;
+      const player = page?.ytInitialPlayerResponse;
+      if (player?.videoDetails?.isLiveContent === true) return true;
+
+      const data = page?.ytInitialData;
+      if (data && deepFindValues(data, 'liveChatRenderer', 20).length) return true;
+    } catch { /* ignore */ }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20000);
+      const desktop = await fetchDesktopWatchDataViaGM(videoId, controller.signal);
+      clearTimeout(timer);
+      if (desktop?.continuation?.continuation) return true;
+      if (desktop?.initialData && deepFindValues(desktop.initialData, 'liveChatRenderer', 20).length) return true;
+    } catch (e) {
+      if (e?.name !== 'AbortError') console.warn('[Member Chat Search] replay detection failed', e);
+    }
+
+    return false;
+  }
+
+  async function ensureCloudBackupForLocal(videoId, record) {
+    if (!state.cloudEnabled || !state.cloudToken || !record?.completed || !record?.messages?.length) return;
+    try {
+      const list = await cloudList(videoId);
+      if (list.length) {
+        state.cloudLastBackupId = String(list[0]?.id || '');
+        cloudUiStatus(`☁️ pCloud保存あり：${record.messages.length.toLocaleString()}件`);
+        return;
+      }
+      await cloudUploadCompleted(videoId, record.messages, { silent: true });
+    } catch (e) {
+      console.warn('[Member Chat Search] cloud ensure failed', e);
+    }
+  }
+
+  async function initializeVideoStorage(videoId, { forceCloudCheck = false } = {}) {
+    if (!videoId) return;
+    const serial = ++state.initSerial;
+
+    // 1) ローカルを最優先。完成版なら即検索可能にしてYouTube APIは叩かない。
+    await restoreCacheForVideo(videoId, { allowAutoResume: false });
+    if (serial !== state.initSerial || getVideoId() !== videoId) return;
+
+    if (state.cacheRecord?.completed && state.messages.length) {
+      status(`保存済み：${state.messages.length.toLocaleString()}件（YouTube再取得なし）`);
+      setLoadButton('再取得', false);
+      if (state.cloudEnabled) {
+        void ensureCloudBackupForLocal(videoId, state.cacheRecord);
+      }
+      return;
+    }
+
+    // 2) ローカル完成版が無ければpCloudを確認。別端末で取得済みならここで終了。
+    if (state.cloudEnabled && state.cloudToken) {
+      const restored = await cloudRestoreLatest(videoId, { silent: !forceCloudCheck });
+      if (serial !== state.initSerial || getVideoId() !== videoId) return;
+      if (restored) return;
+    }
+
+    // 3) 途中ローカルがあれば続きから自動再開。
+    if (state.cacheRecord?.inProgress && state.cacheRecord?.messages?.length) {
+      if (!state.loading && state.autoResumeStartedFor !== videoId) {
+        state.autoResumeStartedFor = videoId;
+        status('保存済みの続きから自動再開します…');
+        setTimeout(() => {
+          if (getVideoId() === videoId && !state.loading) void handleLoadClick(true);
+        }, 500);
+      }
+      return;
+    }
+
+    // 4) 何も無ければチャットリプレイ付きアーカイブだけ自動取得。
+    if (state.autoStartStartedFor === videoId || state.loading) return;
+    status('保存データなし。チャットリプレイを確認中…');
+
+    const available = await detectChatReplayAvailable(videoId);
+    if (serial !== state.initSerial || getVideoId() !== videoId) return;
+
+    if (!available) {
+      status('この動画ではチャットリプレイを検出しませんでした。');
+      return;
+    }
+
+    state.autoStartStartedFor = videoId;
+    status('チャットリプレイを検出。自動取得を開始します…');
+    setTimeout(() => {
+      if (getVideoId() === videoId && !state.loading) void handleLoadClick(true);
+    }, 350);
   }
 
   function matchesQuery(msg, raw) {
@@ -2105,13 +2608,14 @@
     state.cacheRecord = null;
     state.cacheCompleted = false;
     state.autoResumeStartedFor = null;
+    state.autoStartStartedFor = null;
     state.lastAppliedTimestampUrl = null;
     const input = document.querySelector(`#${PANEL_ID} .mcs-search`);
     if (input) input.value = '';
     status('アーカイブを開いて「チャットを取得」を押してください。');
     setLoadButton('チャットを取得', false);
     renderSearchResults();
-    if (id) void restoreCacheForVideo(id, { allowAutoResume: true });
+    if (id) void initializeVideoStorage(id);
     applyUrlTimestampOnce();
   }
 
@@ -2128,7 +2632,7 @@
       if (document.hidden && state.loading) {
         void persistSnapshot({ completed: false, inProgress: true, force: true });
       } else if (!document.hidden && state.videoId && !state.loading) {
-        void restoreCacheForVideo(state.videoId, { allowAutoResume: true });
+        void initializeVideoStorage(state.videoId);
         applyUrlTimestampOnce();
       }
     });
@@ -2137,7 +2641,9 @@
       if (state.loading) void persistSnapshot({ completed: false, inProgress: true, force: true });
     });
 
-    if (state.videoId) void restoreCacheForVideo(state.videoId, { allowAutoResume: true });
+    void initializeCloudConfig().then(() => {
+      if (state.videoId) void initializeVideoStorage(state.videoId);
+    });
 
     setInterval(() => {
       if (!document.getElementById(BUTTON_ID) || !document.getElementById(PANEL_ID)) createUi();
