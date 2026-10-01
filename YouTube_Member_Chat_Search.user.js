@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.3.0
+// @version      0.3.1
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.3.0';
+  const VERSION = '0.3.1';
 
   const state = {
     videoId: null,
@@ -69,8 +69,6 @@
   const CLOUD_URL = 'https://niji-research-backup.dearlylovedxxx.workers.dev';
   const CLOUD_CONFIG_KEY = 'mcs_pcloud_config_v1';
   const CLOUD_SCHEMA_VERSION = 1;
-  const CLOUD_ORIGIN = 'https://www.youtube.com';
-  const CLOUD_DEVICE_PREFIX = 'yt-chat-';
   let cacheDbPromise = null;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -95,7 +93,9 @@
   }
 
   function cloudDevice(videoId) {
-    return `${CLOUD_DEVICE_PREFIX}${videoId}`;
+    // Worker: /^[a-z0-9_.:-]{1,96}$/ only. YouTube IDの「-」は許可されないので
+    // Video IDでは使われない「.」へ可逆変換して保存キーにする。
+    return `ytchat_${String(videoId || '').replace(/-/g, '.')}`;
   }
 
   function cloudUiStatus(text, isError = false) {
@@ -184,17 +184,31 @@
       throw new Error('pCloudバックアップJSONが不正です。');
     }
 
+    const chat = data?.preferences?.chatArchive;
     if (
-      data?.app !== 'YouTube Member Chat Search' ||
-      Number(data?.schemaVersion) !== CLOUD_SCHEMA_VERSION ||
-      data?.videoId !== videoId ||
-      data?.completed !== true ||
-      !Array.isArray(data?.messages)
+      data?.app !== 'Niji Research Helper' ||
+      Number(data?.dbVersion) !== 1 ||
+      data?.device !== cloudDevice(videoId) ||
+      !data?.stores ||
+      !Array.isArray(data.stores.videos) ||
+      !Array.isArray(data.stores.channels) ||
+      !Array.isArray(data.stores.wiki) ||
+      !Array.isArray(data.stores.pairs) ||
+      chat?.app !== 'YouTube Member Chat Search' ||
+      Number(chat?.schemaVersion) !== CLOUD_SCHEMA_VERSION ||
+      chat?.videoId !== videoId ||
+      chat?.completed !== true ||
+      !Array.isArray(chat?.messages)
     ) {
       throw new Error('pCloudバックアップの形式が違います。');
     }
 
-    return data;
+    return {
+      ...chat,
+      exportedAt: data.exportedAt,
+      sourceOrigin: data.sourceOrigin,
+      device: data.device,
+    };
   }
 
   function currentVideoMetadata(videoId) {
@@ -216,20 +230,37 @@
 
   function cloudPayload(videoId, messages) {
     const meta = currentVideoMetadata(videoId);
+    const device = cloudDevice(videoId);
+    const origin = location.origin;
+
+    // 既存Niji backup gatewayはNiji Research Helper形式だけを受け付ける。
+    // チャット本体はpreferences.chatArchiveに隔離し、NRHのDB storesは空配列で満たす。
     return {
-      app: 'YouTube Member Chat Search',
-      schemaVersion: CLOUD_SCHEMA_VERSION,
+      app: 'Niji Research Helper',
       version: VERSION,
+      dbVersion: 1,
       exportedAt: new Date().toISOString(),
-      sourceOrigin: CLOUD_ORIGIN,
-      device: cloudDevice(videoId),
-      videoId,
-      title: meta.title,
-      channel: meta.channel,
-      chatMode: 'all-v2',
-      completed: true,
-      count: messages.length,
-      messages,
+      sourceOrigin: origin,
+      device,
+      stores: {
+        videos: [],
+        channels: [],
+        wiki: [],
+        pairs: [],
+      },
+      preferences: {
+        chatArchive: {
+          app: 'YouTube Member Chat Search',
+          schemaVersion: CLOUD_SCHEMA_VERSION,
+          videoId,
+          title: meta.title,
+          channel: meta.channel,
+          chatMode: 'all-v2',
+          completed: true,
+          count: messages.length,
+          messages,
+        },
+      },
     };
   }
 
@@ -243,6 +274,9 @@
       const payload = cloudPayload(videoId, messages);
       const textPayload = JSON.stringify(payload);
       const bytes = new TextEncoder().encode(textPayload);
+      if (bytes.byteLength > 20 * 1024 * 1024) {
+        throw new Error('チャット保存データが20MBを超えています。');
+      }
       const sha = await cloudSha(bytes);
 
       const res = await gmRequest({
@@ -253,7 +287,7 @@
           accept: 'application/json',
           'content-type': 'application/json',
           'x-nrh-device': cloudDevice(videoId),
-          'x-nrh-origin': CLOUD_ORIGIN,
+          'x-nrh-origin': location.origin,
           'x-nrh-sha256': sha,
           'x-nrh-version': VERSION,
         },
@@ -287,7 +321,7 @@
       cloudUiStatus(`☁️ pCloud保存済み：${messages.length.toLocaleString()}件`);
       return match;
     } catch (e) {
-      const msg = `⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 120)}`;
+      const msg = `⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 120)} [${cloudDevice(videoId)}]`;
       cloudUiStatus(msg, true);
       console.warn('[Member Chat Search] cloud upload failed', e);
       return null;
