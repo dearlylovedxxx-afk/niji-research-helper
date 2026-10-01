@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.2.3
+// @version      0.2.4
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -24,7 +24,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.2.3';
+  const VERSION = '0.2.4';
 
   const state = {
     videoId: null,
@@ -868,6 +868,78 @@
     };
   }
 
+  async function applyLiveChatReplayConfig(ctx, signal) {
+    const token = ctx?.continuation?.continuation;
+    if (!token) return ctx;
+
+    const url = `https://www.youtube.com/live_chat_replay?continuation=${encodeURIComponent(token)}&is_popout=1`;
+    let html = '';
+
+    // まずページ本体と同じ認証セッションで取得。
+    try {
+      const pageFetch = getPageFetch();
+      const res = await pageFetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        referrer: location.href,
+        referrerPolicy: 'strict-origin-when-cross-origin',
+        signal,
+      });
+      if (res.ok) html = await res.text();
+    } catch (e) {
+      console.warn('[Member Chat Search] live_chat_replay config fetch failed', e);
+    }
+
+    // Safariでモバイル版HTMLしか返らない場合はGM経由PC UAも試す。
+    if (!html || !html.includes('INNERTUBE_CONTEXT')) {
+      try {
+        const response = await gmRequest({
+          method: 'GET',
+          url,
+          timeout: 30000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+          },
+        }, signal);
+        if (Number(response?.status) === 200) {
+          html = String(response.responseText || response.response || html || '');
+        }
+      } catch (e) {
+        if (e?.name === 'AbortError') throw e;
+        console.warn('[Member Chat Search] GM live_chat_replay config fetch failed', e);
+      }
+    }
+
+    if (!html) return ctx;
+
+    const chatCfg = parseAllYtcfgSets(html);
+    if (!chatCfg?.INNERTUBE_CONTEXT?.client) {
+      console.warn('[Member Chat Search] live_chat_replay ytcfg not found');
+      return ctx;
+    }
+
+    const sessionIndex = ctx.pageSessionIndex;
+    const delegatedSessionId = ctx.cfg?.DELEGATED_SESSION_ID;
+
+    ctx.cfg = normalizeCfg({
+      ...ctx.cfg,
+      ...chatCfg,
+      ...(sessionIndex !== undefined && sessionIndex !== null ? { SESSION_INDEX: sessionIndex } : {}),
+      ...(delegatedSessionId ? { DELEGATED_SESSION_ID: delegatedSessionId } : {}),
+    });
+
+    ctx.auth = await buildAuthorization('https://www.youtube.com');
+    ctx.continuation = {
+      ...ctx.continuation,
+      source: `${ctx.continuation.source}:chatcfg`,
+    };
+    ctx.chatReplayUrl = url;
+    return ctx;
+  }
+
   async function makeRequestContext(signal) {
     const pageData = await fetchPageData(signal);
     if (!pageData.initialData) throw new Error('ytInitialDataを取得できませんでした。');
@@ -1045,7 +1117,7 @@
       credentials: 'include',
       cache: 'no-store',
       mode: 'cors',
-      referrer: location.href,
+      referrer: ctx.chatReplayUrl || location.href,
       referrerPolicy: 'origin-when-cross-origin',
       headers: buildHeaders(ctx),
       body: JSON.stringify(buildBody(ctx, continuation, offsetMs)),
@@ -1058,8 +1130,9 @@
       const tokenSource = ctx.continuation?.source || 'unknown';
       const sessionIndex = ctx.cfg.SESSION_INDEX ?? 'unknown';
       const client = ctx.cfg.INNERTUBE_CONTEXT?.client?.clientName || ctx.cfg.clientName || '?';
+      const version = ctx.cfg.clientVersion || ctx.cfg.INNERTUBE_CONTEXT?.client?.clientVersion || '?';
       const err = new Error(
-        `Chat Replay API: HTTP ${res.status} ${res.statusText} [token:${tokenSource} / SafariAccount:${ctx.pageSessionIndex ?? 'unknown'} / sentAccount:${sessionIndex} / client:${client}]`
+        `Chat Replay API: HTTP ${res.status} ${res.statusText} [token:${tokenSource} / SafariAccount:${ctx.pageSessionIndex ?? 'unknown'} / sentAccount:${sessionIndex} / client:${client} / version:${version}]`
       );
       err.status = res.status;
       throw err;
@@ -1400,10 +1473,19 @@
       String(ctx.continuation?.source || '').startsWith('pbj.header:all')
     ) {
       onProgress({
+        phase: 'legacy-all-config',
+        count: map.size,
+        requests: state.requestCount,
+        detail: '全チャット用クライアント設定を取得中…',
+      });
+
+      await applyLiveChatReplayConfig(ctx, signal);
+
+      onProgress({
         phase: 'legacy-all',
         count: map.size,
         requests: state.requestCount,
-        detail: '全チャットを取得中…',
+        detail: `全チャット取得中… client:${ctx.cfg.INNERTUBE_CONTEXT?.client?.clientName || ctx.cfg.clientName || '?'} ${ctx.cfg.clientVersion || ''}`,
       });
       return loadLegacyReplay(ctx, map, onProgress, signal, resumeRecord);
     }
