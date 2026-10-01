@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.2.5
+// @version      0.2.6
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -24,7 +24,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.2.5';
+  const VERSION = '0.2.6';
 
   const state = {
     videoId: null,
@@ -46,6 +46,7 @@
     lastProgressUiAt: 0,
     rateLimitUntil: 0,
     autoResumeStartedFor: null,
+    lastAppliedTimestampUrl: null,
   };
 
   const CACHE_DB_NAME = 'MarinaMemberChatSearchDB';
@@ -2010,9 +2011,88 @@
     }
   }
 
+  function parseYouTubeTimestamp(value) {
+    if (value == null) return null;
+    const raw = String(value).trim().toLowerCase();
+    if (!raw) return null;
+
+    if (/^\d+(?:\.\d+)?$/.test(raw)) {
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    const plain = raw.match(/^(\d+(?:\.\d+)?)s$/);
+    if (plain) return Number(plain[1]);
+
+    const h = Number(raw.match(/(\d+)h/)?.[1] || 0);
+    const m = Number(raw.match(/(\d+)m/)?.[1] || 0);
+    const s = Number(raw.match(/(\d+(?:\.\d+)?)s/)?.[1] || 0);
+    if (h || m || s) return h * 3600 + m * 60 + s;
+
+    return null;
+  }
+
+  function getTimestampFromCurrentUrl() {
+    try {
+      const u = new URL(location.href);
+      const raw =
+        u.searchParams.get('t') ??
+        u.searchParams.get('start') ??
+        (u.hash.startsWith('#t=') ? u.hash.slice(3) : null);
+      return parseYouTubeTimestamp(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  function applyUrlTimestampOnce() {
+    const seconds = getTimestampFromCurrentUrl();
+    if (seconds === null) return;
+
+    const key = location.href;
+    if (state.lastAppliedTimestampUrl === key) return;
+    state.lastAppliedTimestampUrl = key;
+
+    let tries = 0;
+    const trySeek = () => {
+      tries++;
+      const video = document.querySelector('video');
+      if (!video) {
+        if (tries < 20) setTimeout(trySeek, 250);
+        return;
+      }
+
+      try {
+        const target = Math.max(0, Number(seconds) || 0);
+        if (Math.abs(video.currentTime - target) > 1.5) {
+          video.currentTime = target;
+        }
+
+        // YouTube側が直後に視聴履歴位置へ戻すことがあるため、短時間だけ再確認。
+        if (tries < 6) {
+          setTimeout(() => {
+            if (Math.abs(video.currentTime - target) > 2) {
+              trySeek();
+            }
+          }, 350);
+        }
+      } catch {
+        if (tries < 20) setTimeout(trySeek, 250);
+      }
+    };
+
+    setTimeout(trySeek, 80);
+  }
+
   function resetForNavigation() {
     const id = getVideoId();
-    if (id === state.videoId) return;
+
+    // 同じ動画でt=だけ変わった場合も、外部リンクの指定時刻を優先する。
+    if (id === state.videoId) {
+      applyUrlTimestampOnce();
+      return;
+    }
+
     if (state.loading) {
       void persistSnapshot({ completed: false, inProgress: true, force: true });
       state.abortController?.abort();
@@ -2025,18 +2105,21 @@
     state.cacheRecord = null;
     state.cacheCompleted = false;
     state.autoResumeStartedFor = null;
+    state.lastAppliedTimestampUrl = null;
     const input = document.querySelector(`#${PANEL_ID} .mcs-search`);
     if (input) input.value = '';
     status('アーカイブを開いて「チャットを取得」を押してください。');
     setLoadButton('チャットを取得', false);
     renderSearchResults();
     if (id) void restoreCacheForVideo(id, { allowAutoResume: true });
+    applyUrlTimestampOnce();
   }
 
   function boot() {
     if (!document.body) return;
     createUi();
     state.videoId = getVideoId();
+    applyUrlTimestampOnce();
 
     document.addEventListener('yt-navigate-finish', resetForNavigation, true);
     window.addEventListener('popstate', resetForNavigation);
@@ -2046,6 +2129,7 @@
         void persistSnapshot({ completed: false, inProgress: true, force: true });
       } else if (!document.hidden && state.videoId && !state.loading) {
         void restoreCacheForVideo(state.videoId, { allowAutoResume: true });
+        applyUrlTimestampOnce();
       }
     });
 
