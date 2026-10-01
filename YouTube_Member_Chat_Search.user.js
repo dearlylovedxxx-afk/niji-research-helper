@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.2.4
+// @version      0.2.5
 // @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -24,7 +24,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.2.4';
+  const VERSION = '0.2.5';
 
   const state = {
     videoId: null,
@@ -148,7 +148,7 @@
       const record = {
         videoId,
         version: VERSION,
-        chatMode: 'all',
+        chatMode: 'all-v2',
         messages,
         workers: Array.isArray(state.workerProgress) ? state.workerProgress.map((w) => ({ ...w })) : [],
         completed: Boolean(completed),
@@ -199,7 +199,7 @@
     if (getVideoId() !== videoId) return;
 
     // v0.1.xまでの保存データはTop Chat由来の可能性があるため再利用しない。
-    if (record && record.chatMode !== 'all') {
+    if (record && record.chatMode !== 'all-v2') {
       await deleteCache(videoId);
       record = null;
     }
@@ -444,6 +444,40 @@
 
     cfg = { ...parseAllYtcfgSets(html), ...cfg };
     return { initialData, cfg, source: 'html' };
+  }
+
+  function extractAllChatContinuationFromReplayResponse(response) {
+    const liveCont = response?.continuationContents?.liveChatContinuation;
+    const submenu = liveCont?.header?.liveChatHeaderRenderer?.viewSelector
+      ?.sortFilterSubMenuRenderer?.subMenuItems;
+
+    if (!Array.isArray(submenu) || !submenu.length) return null;
+
+    const labelOf = (item) =>
+      [
+        textOf(item?.title),
+        textOf(item?.label),
+        String(item?.title || ''),
+        String(item?.label || ''),
+      ].filter(Boolean).join(' ');
+
+    // selected:false かつTop Chatではない項目を優先。
+    const allItem =
+      submenu.find((item) => {
+        if (item?.selected) return false;
+        const data = item?.continuation?.reloadContinuationData;
+        if (!data?.continuation) return false;
+        const label = labelOf(item);
+        return !/top|上位/i.test(label);
+      }) ||
+      submenu.find((item) =>
+        !item?.selected && item?.continuation?.reloadContinuationData?.continuation
+      );
+
+    const data = allItem?.continuation?.reloadContinuationData;
+    return data?.continuation
+      ? { ...data, source: 'replay-response.header:all' }
+      : null;
   }
 
   function extractAllChatContinuationFromPbj(pbj) {
@@ -868,77 +902,6 @@
     };
   }
 
-  async function applyLiveChatReplayConfig(ctx, signal) {
-    const token = ctx?.continuation?.continuation;
-    if (!token) return ctx;
-
-    const url = `https://www.youtube.com/live_chat_replay?continuation=${encodeURIComponent(token)}&is_popout=1`;
-    let html = '';
-
-    // まずページ本体と同じ認証セッションで取得。
-    try {
-      const pageFetch = getPageFetch();
-      const res = await pageFetch(url, {
-        method: 'GET',
-        credentials: 'include',
-        cache: 'no-store',
-        referrer: location.href,
-        referrerPolicy: 'strict-origin-when-cross-origin',
-        signal,
-      });
-      if (res.ok) html = await res.text();
-    } catch (e) {
-      console.warn('[Member Chat Search] live_chat_replay config fetch failed', e);
-    }
-
-    // Safariでモバイル版HTMLしか返らない場合はGM経由PC UAも試す。
-    if (!html || !html.includes('INNERTUBE_CONTEXT')) {
-      try {
-        const response = await gmRequest({
-          method: 'GET',
-          url,
-          timeout: 30000,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
-          },
-        }, signal);
-        if (Number(response?.status) === 200) {
-          html = String(response.responseText || response.response || html || '');
-        }
-      } catch (e) {
-        if (e?.name === 'AbortError') throw e;
-        console.warn('[Member Chat Search] GM live_chat_replay config fetch failed', e);
-      }
-    }
-
-    if (!html) return ctx;
-
-    const chatCfg = parseAllYtcfgSets(html);
-    if (!chatCfg?.INNERTUBE_CONTEXT?.client) {
-      console.warn('[Member Chat Search] live_chat_replay ytcfg not found');
-      return ctx;
-    }
-
-    const sessionIndex = ctx.pageSessionIndex;
-    const delegatedSessionId = ctx.cfg?.DELEGATED_SESSION_ID;
-
-    ctx.cfg = normalizeCfg({
-      ...ctx.cfg,
-      ...chatCfg,
-      ...(sessionIndex !== undefined && sessionIndex !== null ? { SESSION_INDEX: sessionIndex } : {}),
-      ...(delegatedSessionId ? { DELEGATED_SESSION_ID: delegatedSessionId } : {}),
-    });
-
-    ctx.auth = await buildAuthorization('https://www.youtube.com');
-    ctx.continuation = {
-      ...ctx.continuation,
-      source: `${ctx.continuation.source}:chatcfg`,
-    };
-    ctx.chatReplayUrl = url;
-    return ctx;
-  }
 
   async function makeRequestContext(signal) {
     const pageData = await fetchPageData(signal);
@@ -969,21 +932,29 @@
     let continuation = null;
     let source = pageData.source;
 
-    // 全チャットだけは最初からPBJを見に行く。
-    // 通常watchページのheader tokenは旧API互換でない場合があるため使わない。
-    if (videoId) {
-      const pbj = await fetchPbjInitialData(videoId, cfg, auth, origin, signal);
-      const allFromPbj = extractAllChatContinuationFromPbj(pbj);
-      if (allFromPbj?.continuation) {
-        initialData = pbj;
-        continuation = allFromPbj;
-        source = 'pbj-all';
+    // まず現在表示中のChat Replay tokenを使う。
+    // これはv0.1.xで実際に200を返していた経路。
+    const currentRenderers = deepFindValues(initialData, 'liveChatRenderer');
+    for (const renderer of currentRenderers) {
+      const data = renderer?.continuations?.[0]?.reloadContinuationData;
+      if (data?.continuation) {
+        continuation = { ...data, source: 'page:liveChatRenderer.continuations' };
+        break;
       }
     }
 
-    // PBJから全チャットtokenが取れなかった場合のみ、通常の現在表示tokenへフォールバック。
-    if (!continuation?.continuation) {
-      continuation = extractInitialContinuation(initialData);
+    if (!continuation?.continuation && videoId) {
+      const pbj = await fetchPbjInitialData(videoId, cfg, auth, origin, signal);
+      const renderers = deepFindValues(pbj, 'liveChatRenderer');
+      for (const renderer of renderers) {
+        const data = renderer?.continuations?.[0]?.reloadContinuationData;
+        if (data?.continuation) {
+          initialData = pbj;
+          continuation = { ...data, source: 'pbj:liveChatRenderer.continuations' };
+          source = 'pbj';
+          break;
+        }
+      }
     }
 
     if (!continuation?.continuation && videoId) {
@@ -991,21 +962,15 @@
       if (gmDesktop) {
         cfg = normalizeCfg(applyPageAuthSession({ ...cfg, ...(gmDesktop.cfg || {}) }));
         auth = await buildAuthorization(origin);
-        // GM HTMLでは「現在表示」のtokenだけを使う。header:allは採用しない。
-        const directCandidates = deepFindValues(gmDesktop.initialData, 'liveChatRenderer');
-        let direct = null;
-        for (const renderer of directCandidates) {
+        const renderers = deepFindValues(gmDesktop.initialData, 'liveChatRenderer');
+        for (const renderer of renderers) {
           const data = renderer?.continuations?.[0]?.reloadContinuationData;
           if (data?.continuation) {
-            direct = { ...data, source: 'gm-desktop:liveChatRenderer.continuations' };
+            initialData = gmDesktop.initialData || initialData;
+            continuation = { ...data, source: 'gm-desktop:liveChatRenderer.continuations' };
+            source = 'gm-desktop';
             break;
           }
-        }
-        const gmContinuation = direct || gmDesktop.continuation;
-        if (gmContinuation?.continuation) {
-          initialData = gmDesktop.initialData || initialData;
-          continuation = gmContinuation;
-          source = 'gm-desktop';
         }
       }
     }
@@ -1015,8 +980,8 @@
       if (desktop) {
         cfg = normalizeCfg(applyPageAuthSession({ ...cfg, ...(desktop.cfg || {}) }));
         auth = await buildAuthorization(origin);
-        const directCandidates = deepFindValues(desktop.initialData, 'liveChatRenderer');
-        for (const renderer of directCandidates) {
+        const renderers = deepFindValues(desktop.initialData, 'liveChatRenderer');
+        for (const renderer of renderers) {
           const data = renderer?.continuations?.[0]?.reloadContinuationData;
           if (data?.continuation) {
             initialData = desktop.initialData;
@@ -1030,17 +995,21 @@
 
     if (!continuation?.continuation && videoId) {
       const nextData = await fetchNextInitialData(videoId, cfg, auth, origin, signal);
-      const nextContinuation = extractInitialContinuation(nextData);
-      if (nextContinuation?.continuation) {
-        initialData = nextData;
-        continuation = { ...nextContinuation, source: `next:${nextContinuation.source}` };
-        source = 'next';
+      const renderers = deepFindValues(nextData, 'liveChatRenderer');
+      for (const renderer of renderers) {
+        const data = renderer?.continuations?.[0]?.reloadContinuationData;
+        if (data?.continuation) {
+          initialData = nextData;
+          continuation = { ...data, source: 'next:liveChatRenderer.continuations' };
+          source = 'next';
+          break;
+        }
       }
     }
 
     if (!continuation?.continuation) {
       throw new Error(
-        'チャットリプレイの開始トークンが見つかりません。PBJ・Safari表示ページ・GM経由PC版watch・通常PC版watch・Innertube nextで確認しました。'
+        'チャットリプレイの開始トークンが見つかりません。Safari表示ページ・PBJ・GM経由PC版watch・通常PC版watch・Innertube nextで確認しました。'
       );
     }
 
@@ -1466,33 +1435,40 @@
       throw new Error('ログイン認証用SAPISIDを取得できません。メン限アーカイブでは認証が必要です。');
     }
 
-    // ヘッダーの「全チャット」tokenはYCSの旧API方式と同じ種類。
-    // playerOffsetMsを最初から付けて固定tokenを使う必要がある。
-    if (
-      String(ctx.continuation?.source || '').startsWith('liveChatRenderer.header:all') ||
-      String(ctx.continuation?.source || '').startsWith('pbj.header:all')
-    ) {
-      onProgress({
-        phase: 'legacy-all-config',
-        count: map.size,
-        requests: state.requestCount,
-        detail: '全チャット用クライアント設定を取得中…',
-      });
-
-      await applyLiveChatReplayConfig(ctx, signal);
-
-      onProgress({
-        phase: 'legacy-all',
-        count: map.size,
-        requests: state.requestCount,
-        detail: `全チャット取得中… client:${ctx.cfg.INNERTUBE_CONTEXT?.client?.clientName || ctx.cfg.clientName || '?'} ${ctx.cfg.clientVersion || ''}`,
-      });
-      return loadLegacyReplay(ctx, map, onProgress, signal, resumeRecord);
-    }
-
     let init;
     try {
+      // まず現在選択中（通常Top Chat）のtokenで1回だけ正常なレスポンスを得る。
       init = await freshPlayerSeek(ctx, signal);
+
+      // そのレスポンスのヘッダーから「全チャット」tokenへ切り替える。
+      const allChat = extractAllChatContinuationFromReplayResponse(init.response);
+      if (allChat?.continuation) {
+        onProgress({
+          phase: 'switch-all-chat',
+          count: map.size,
+          requests: state.requestCount,
+          detail: 'Top Chatから全チャットへ切り替え中…',
+        });
+
+        ctx.continuation = allChat;
+
+        // 全チャットtokenで改めて初期playerSeek tokenを取得。
+        init = await freshPlayerSeek(ctx, signal);
+
+        onProgress({
+          phase: 'switch-all-chat-done',
+          count: map.size,
+          requests: state.requestCount,
+          detail: '全チャットへ切り替えました。',
+        });
+      } else {
+        onProgress({
+          phase: 'switch-all-chat-missing',
+          count: map.size,
+          requests: state.requestCount,
+          detail: '全チャット切替tokenが見つからず、現在のチャット表示を取得します。',
+        });
+      }
     } catch (e) {
       if ((e?.status === 400 || e?.status === 404) && ctx.cfg.INNERTUBE_API_KEY) {
         onProgress({ phase: 'legacy', count: map.size, requests: state.requestCount, detail: '現行方式が失敗。旧方式を試します…' });
@@ -1797,7 +1773,7 @@
     fastLabel.append(fast, document.createTextNode('超高速取得（8並列・長時間アーカイブ向け）'));
     const help = makeEl('div', {
       className: 'mcs-help',
-      text: '全チャットを取得します。検索結果をタップすると、その発言時刻へ移動します。取得途中のデータは自動保存されます。',
+      text: 'Top Chatから全チャットへ自動切替して取得します。検索結果をタップすると、その発言時刻へ移動します。取得途中のデータは自動保存されます。',
     });
     controls.append(load, statusEl, fastLabel, search, help);
 
@@ -1870,7 +1846,7 @@
     }
 
     let cache = state.cacheRecord?.videoId === videoId ? state.cacheRecord : await readCache(videoId);
-    if (cache && cache.chatMode !== 'all') {
+    if (cache && cache.chatMode !== 'all-v2') {
       await deleteCache(videoId);
       cache = null;
       state.cacheRecord = null;
