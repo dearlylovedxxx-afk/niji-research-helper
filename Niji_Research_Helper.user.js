@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.55';
+  const VERSION = '1.0.56';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
