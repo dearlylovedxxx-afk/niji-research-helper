@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.56
+// @version      1.0.57
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.56';
+  const VERSION = '1.0.57';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -918,6 +918,136 @@
         settings:state.settings, syncPoints:state.syncPoints, calibration:state.calibration } };
   }
 
+  function cloudRowKey(storeName, row) {
+    if (!row || typeof row !== 'object') return '';
+    return String(storeName === 'videos' || storeName === 'channels' ? (row.id || '') : (row.key || ''));
+  }
+
+  function cloudRowStamp(row) {
+    return Math.max(
+      Number(row?.updatedAt || 0),
+      Number(row?.holodexFetchedAt || 0),
+      Number(row?.wikiFetchedAt || 0),
+      Number(row?.fetchedAt || 0)
+    );
+  }
+
+  function cloudMergeStoreRows(storeName, ...groups) {
+    const map = new Map();
+    for (const rows of groups) {
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const key = cloudRowKey(storeName, row);
+        if (!key) continue;
+        const prev = map.get(key);
+        if (!prev) {
+          map.set(key, row);
+          continue;
+        }
+        const rowNewer = cloudRowStamp(row) >= cloudRowStamp(prev);
+        // Preserve fields from both copies; the newer copy wins on overlaps.
+        map.set(key, rowNewer ? { ...prev, ...row } : { ...row, ...prev });
+      }
+    }
+    return [...map.values()];
+  }
+
+  function cloudMergeUnique(localRows, remoteRows, keyFn) {
+    const out = [], map = new Map();
+    for (const row of [...(Array.isArray(remoteRows) ? remoteRows : []), ...(Array.isArray(localRows) ? localRows : [])]) {
+      const key = String(keyFn(row) || '');
+      if (!key) continue;
+      map.set(key, row);
+    }
+    for (const row of map.values()) out.push(row);
+    return out;
+  }
+
+  function cloudMergePreferences(local = {}, remote = {}) {
+    return {
+      ...remote,
+      ...local,
+      favoriteBundleVersion: Math.max(Number(remote.favoriteBundleVersion || 0), Number(local.favoriteBundleVersion || 0), 2),
+      favorites: cloudMergeUnique(local.favorites, remote.favorites, x => x?.id || x?.name),
+      favoriteRevision: Math.max(Number(remote.favoriteRevision || 0), Number(local.favoriteRevision || 0)),
+      liverFavorites: cloudMergeUnique(local.liverFavorites, remote.liverFavorites, x => x?.value || x?.name),
+      liverFavoriteRevision: Math.max(Number(remote.liverFavoriteRevision || 0), Number(local.liverFavoriteRevision || 0)),
+      settings: { ...(remote.settings || {}), ...(local.settings || {}) },
+      syncPoints: { ...(remote.syncPoints || {}), ...(local.syncPoints || {}) },
+      calibration: { ...(remote.calibration || {}), ...(local.calibration || {}) },
+      backupMode: 'complete-merged-v1',
+    };
+  }
+
+  async function cloudFetchResearchSnapshot(item) {
+    const res = await gmRequest({
+      method:'GET',
+      url:CLOUD_URL + '/v1/backups/' + encodeURIComponent(item.id),
+      headers:{ authorization:`Bearer ${cloud.token}` },
+      responseType:'arraybuffer',
+      timeout:45000
+    });
+    if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+    const raw = res.response instanceof ArrayBuffer ? new Uint8Array(res.response)
+      : ArrayBuffer.isView(res.response) ? new Uint8Array(res.response.buffer, res.response.byteOffset, res.response.byteLength)
+        : new TextEncoder().encode(res.responseText || String(res.response || ''));
+    if (Number(item.size || 0) && raw.byteLength !== Number(item.size))
+      throw new Error('既存バックアップのサイズが一致しません');
+    const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', raw))]
+      .map(x => x.toString(16).padStart(2,'0')).join('');
+    if (item.sha256 && sha !== item.sha256) throw new Error('既存バックアップのチェックサムが一致しません');
+    const data = JSON.parse(new TextDecoder('utf-8', { fatal:true }).decode(raw));
+    if (data?.app !== 'Niji Research Helper' || data?.dbVersion !== NRH_DB_VERSION ||
+        CLOUD_STORES.some(name => !Array.isArray(data?.stores?.[name])) ||
+        data?.preferences?.chatArchive) {
+      throw new Error('既存バックアップの形式が違います');
+    }
+    return data;
+  }
+
+  async function cloudBuildCompleteSnapshot(localPayload) {
+    const listed = await cloudRequest('GET', '/v1/backups');
+    const candidates = (Array.isArray(listed.backups) ? listed.backups : [])
+      .filter(isResearchCloudBackupItem)
+      .sort((a, b) => (Number(b.size || 0) - Number(a.size || 0)) ||
+        (Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0)))
+      .slice(0, 5);
+
+    let merged = {
+      ...localPayload,
+      stores: Object.fromEntries(CLOUD_STORES.map(name => [name, [...(localPayload.stores?.[name] || [])]])),
+      preferences: { ...(localPayload.preferences || {}) },
+    };
+
+    if (candidates.length) {
+      let validCount = 0;
+      for (const item of candidates) {
+        try {
+          const remote = await cloudFetchResearchSnapshot(item);
+          validCount++;
+          for (const name of CLOUD_STORES) {
+            merged.stores[name] = cloudMergeStoreRows(name, remote.stores?.[name], merged.stores?.[name]);
+          }
+          merged.preferences = cloudMergePreferences(merged.preferences, remote.preferences || {});
+        } catch (e) {
+          console.warn('[NRH][cloud complete merge] skipped backup', item?.id, e);
+        }
+      }
+      if (!validCount) throw new Error('既存の研究DBバックアップを確認できないため、完全版の上書きを中止しました');
+    }
+
+    merged.app = 'Niji Research Helper';
+    merged.version = VERSION;
+    merged.dbVersion = NRH_DB_VERSION;
+    merged.exportedAt = new Date().toISOString();
+    merged.sourceOrigin = location.origin;
+    merged.device = cloudDevice();
+    merged.preferences = cloudMergePreferences(merged.preferences, {});
+    merged.preferences.researchBackupSummary = Object.fromEntries(
+      CLOUD_STORES.map(name => [name, merged.stores[name]?.length || 0])
+    );
+    return merged;
+  }
+
   async function cloudBackup(force = false) {
     if (cloud.busy || !cloud.enabled || !cloud.token || !nrhDbEnabled()) return;
     if (!force && (!cloud.dirty || Date.now() < cloud.nextRetryAt)) return;
@@ -928,7 +1058,8 @@
     let uploadSize = 0;
     cloud.status = '☁️ バックアップを作成中…'; cloudUpdateUi();
     try {
-      const payload = await cloudSnapshot();
+      cloud.status = '☁️ 既存DBと統合して完全版を作成中…'; cloudUpdateUi();
+      const payload = await cloudBuildCompleteSnapshot(await cloudSnapshot());
       const populated = CLOUD_STORES.some(name => payload.stores[name].length)
         || payload.preferences.favorites?.length || payload.preferences.liverFavorites?.length
         || Object.keys(payload.preferences.syncPoints || {}).length;
@@ -946,13 +1077,13 @@
         'x-nrh-origin':location.origin, 'x-nrh-sha256':sha, 'x-nrh-version':VERSION,
       });
       cloud.lastSavedAt = Date.now(); cloud.nextRetryAt = 0;
-      cloud.status = `☁️ ${new Date().toLocaleString('ja-JP')} 保存済み${result.cleanupPending ? '（古い世代の削除が保留中）' : ''}`;
+      cloud.status = `☁️ ${new Date().toLocaleString('ja-JP')} 完全版を保存済み${result.cleanupPending ? '（古い世代の削除が保留中）' : ''}`;
       if (initialWrites === cloud.writes) {
         cloud.dirty = false; cloud.writes = 0;
         await GM.setValue(CLOUD_PENDING_KEY, false);
       }
       await GM.setValue(CLOUD_CONFIG_KEY, { enabled:true, token:cloud.token, lastSavedAt:cloud.lastSavedAt });
-      if (force) toast('☁️ pCloudへのバックアップが完了しました');
+      if (force) toast('☁️ pCloudへ最新の完全版DBを保存しました');
     } catch (e) {
   // A Macaque POST error may arrive after the Worker has stored the data.
   // Confirm the exact SHA and stored bytes before retrying or claiming failure.
