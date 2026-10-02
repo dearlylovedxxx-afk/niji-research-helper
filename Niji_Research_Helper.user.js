@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.55
+// @version      1.0.56
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -713,7 +713,7 @@
     try { body=JSON.parse(res.responseText||res.response||'{}'); } catch {}
     if (res.status<200 || res.status>=300 || !body.ok) return {items:[],source:''};
     const rows=(Array.isArray(body.backups)?body.backups:[])
-      .filter(x=>x.device!==FAV_CLOUD_DEVICE)
+      .filter(isResearchCloudBackupItem)
       .sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0))
       .slice(0,6);
     for (const row of rows) {
@@ -852,6 +852,15 @@
     const platform = /iPhone|iPod/i.test(ua) ? 'iphone' : /iPad/i.test(ua) ? 'ipad'
       : /Android/i.test(ua) ? 'android' : 'desktop';
     return `${platform}-${location.hostname.replace(/[^a-z0-9.-]/gi, '-')}`.slice(0, 96);
+  }
+
+  function isResearchCloudBackupItem(item) {
+    const device = String(item?.device || '');
+    if (!device || device === FAV_CLOUD_DEVICE) return false;
+    // YouTubeメン限チャット検索は同じNRHバックアップゲートウェイを使うが、
+    // 研究DBとは別データなのでNRH本体の復元一覧から除外する。
+    if (device.startsWith('ytchat_')) return false;
+    return true;
   }
 
   function cloudMarkChanged() {
@@ -1039,6 +1048,12 @@
   }
 
   async function cloudRestore(backup) {
+    if (!isResearchCloudBackupItem(backup)) {
+      cloud.status = '⚠️ これはNiji Research Helper本体DBのバックアップではありません';
+      cloudUpdateUi();
+      toast(cloud.status);
+      return;
+    }
     if (!confirm(`${backup.device} / ${new Date(backup.createdAt).toLocaleString('ja-JP')} のバックアップを\nこのブラウザのDBに統合しますか？\n\n既存データは削除せず、日時が新しいレコードを優先します。APIキーは復元されません。`)) return;
     cloud.status = '📥 クラウドから読み込み中…'; cloudUpdateUi();
     try {
@@ -1170,7 +1185,12 @@
       const result = await cloudRequest('GET', '/v1/backups');
       list.replaceChildren();
       if (!result.backups?.length) { list.textContent = 'まだクラウドバックアップがありません'; return; }
-      for (const item of result.backups.filter(x => x.device !== FAV_CLOUD_DEVICE)) {
+      const researchBackups = result.backups.filter(isResearchCloudBackupItem);
+      if (!researchBackups.length) {
+        list.textContent = 'Niji Research Helper本体DBのバックアップはまだありません';
+        return;
+      }
+      for (const item of researchBackups) {
         const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'npf-r-btn';
         btn.style.cssText = 'display:block;width:100%;text-align:left;margin:6px 0;white-space:normal;';
         btn.textContent = `📥 ${item.device} / ${new Date(item.createdAt).toLocaleString('ja-JP')} (${(item.size/1024/1024).toFixed(1)} MB)`;
