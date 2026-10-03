@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.8
+// @version      0.4.9
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.8';
+  const VERSION = '0.4.9';
 
   const state = {
     videoId: null,
@@ -479,7 +479,7 @@
         'ytd-watch-metadata .badge-style-type-members-only,' +
         ' ytd-video-primary-info-renderer .badge-style-type-members-only,' +
         ' #above-the-fold .badge-style-type-members-only,' +
-        ' [class*="badge-style-type-members-only"]'
+        ' ytm-slim-video-metadata-section .badge-style-type-members-only'
       );
       if (hit) return true;
     } catch { /* ignore */ }
@@ -497,7 +497,7 @@
         let page = window;
         if (typeof unsafeWindow !== 'undefined') page = unsafeWindow;
         const pageResult = memberOnlyFromInitialData(page?.ytInitialData);
-        if (pageResult !== null) return pageResult;
+        if (pageResult === true) return true;
       } catch { /* ignore */ }
     }
 
