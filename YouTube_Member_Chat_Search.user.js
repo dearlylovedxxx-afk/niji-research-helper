@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.5.3
+// @version      0.5.4
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.5.3';
+  const VERSION = '0.5.4';
 
   const state = {
     videoId: null,
@@ -1194,7 +1194,7 @@
           return;
         }
         for (const msg of Array.isArray(archive.messages) ? archive.messages : []) {
-          if (!matchesQuery(msg, q)) continue;
+          if (!matchesMessageOnly(msg, q)) continue;
           matches.push({
             videoId: archive.videoId,
             title: archive.title || archive.videoId,
@@ -3295,7 +3295,7 @@
     const input = doc.createElement('input');
     input.className = 'mcsx-input';
     input.type = 'search';
-    input.placeholder = '本文・投稿者を検索（A | B でOR）';
+    input.placeholder = 'チャット本文を検索（A | B でOR）';
     input.value = String(initialQuery || '');
     const sync = doc.createElement('button');
     sync.className = 'mcsx-sync';
@@ -3484,7 +3484,7 @@
     if (crossTools) crossTools.hidden = !isGlobal;
     if (input) {
       input.placeholder = isGlobal
-        ? 'メン限アーカイブのみ本文・投稿者を検索（A | B でOR）'
+        ? 'メン限アーカイブのチャット本文を検索（A | B でOR）'
         : '本文・投稿者を検索（A | B でOR）';
     }
     if (help) {
@@ -3521,7 +3521,7 @@
     };
 
     if (!q) {
-      showEmpty('検索語を入力すると、保存済みメン限アーカイブ全体を検索します。');
+      showEmpty('検索語を入力すると、保存済みメン限アーカイブのチャット本文だけを検索します。');
       return;
     }
 
@@ -3895,6 +3895,14 @@
     const q = raw.trim().toLocaleLowerCase();
     if (!q) return true;
     const hay = `${msg.author}\n${msg.message}`.toLocaleLowerCase();
+    const ors = q.split('|').map((x) => x.trim()).filter(Boolean);
+    return ors.some((term) => hay.includes(term));
+  }
+
+  function matchesMessageOnly(msg, raw) {
+    const q = String(raw || '').trim().toLocaleLowerCase();
+    if (!q) return true;
+    const hay = String(msg?.message || '').toLocaleLowerCase();
     const ors = q.split('|').map((x) => x.trim()).filter(Boolean);
     return ors.some((term) => hay.includes(term));
   }
