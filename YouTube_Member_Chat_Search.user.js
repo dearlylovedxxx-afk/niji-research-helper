@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.5.0
+// @version      0.5.1
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.5.0';
+  const VERSION = '0.5.1';
 
   const state = {
     videoId: null,
@@ -447,6 +447,59 @@
     ).trim();
   }
 
+  function normalizePublishedDateCandidate(value) {
+    let raw = '';
+    if (typeof value === 'string' || typeof value === 'number') {
+      raw = String(value);
+    } else if (value && typeof value === 'object') {
+      try { raw = textOf(value) || value?.simpleText || ''; } catch { raw = value?.simpleText || ''; }
+      if (!raw) {
+        try { raw = JSON.stringify(value); } catch { raw = ''; }
+      }
+    }
+    raw = String(raw || '').trim();
+    if (!raw) return '';
+
+    // YouTube日本語UI: 「2024/6/8 に配信済み」「2024年6月8日」など。
+    let m = raw.match(/(20\d{2})[年\/\.\-](\d{1,2})[月\/\.\-](\d{1,2})日?/);
+    if (m) {
+      return `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
+    }
+
+    // ISO-ish values such as 2024-06-08T12:34:56Z / 2024-06-08.
+    m = raw.match(/(20\d{2}-\d{2}-\d{2})(?:[T\s][^\s"'}]+)?/);
+    if (m) return m[1];
+
+    // English UI: "Streamed live on Jun 8, 2024" etc.
+    const cleaned = raw
+      .replace(/^(?:streamed live on|premiered|published on|uploaded on)\s+/i, '')
+      .trim();
+    const d = new Date(cleaned);
+    if (!Number.isNaN(d.getTime()) && d.getFullYear() >= 2005 && d.getFullYear() <= 2100) {
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+    return '';
+  }
+
+  function publishedAtFromInitialData(initialData) {
+    if (!initialData || typeof initialData !== 'object') return '';
+
+    const directKeys = ['dateText', 'publishDate', 'uploadDate', 'startTimestamp'];
+    for (const key of directKeys) {
+      for (const value of deepFindValues(initialData, key, 80)) {
+        const parsed = normalizePublishedDateCandidate(value);
+        if (parsed) return parsed;
+      }
+    }
+
+    // 最後にvideoPrimaryInfoRenderer全体も見る。YouTube側のキー変更への保険。
+    for (const row of deepFindValues(initialData, 'videoPrimaryInfoRenderer', 20)) {
+      const parsed = normalizePublishedDateCandidate(row?.dateText || row);
+      if (parsed) return parsed;
+    }
+    return '';
+  }
+
   function currentVideoMetadata(videoId) {
     let title = '';
     let channel = '';
@@ -463,6 +516,7 @@
       let page = window;
       if (typeof unsafeWindow !== 'undefined') page = unsafeWindow;
       publishedAt = publishedAtFromPlayerResponse(page?.ytInitialPlayerResponse);
+      publishedAt ||= publishedAtFromInitialData(page?.ytInitialData);
       publishedAt ||= document.querySelector('meta[itemprop="datePublished"]')?.content || '';
       publishedAt ||= document.querySelector('meta[itemprop="uploadDate"]')?.content || '';
     } catch { /* ignore */ }
@@ -532,6 +586,7 @@
         const pageResult = memberOnlyFromInitialData(page?.ytInitialData);
         if (pageResult === true) memberOnly = true;
         publishedAt = publishedAtFromPlayerResponse(page?.ytInitialPlayerResponse) || '';
+        publishedAt ||= publishedAtFromInitialData(page?.ytInitialData);
         publishedAt ||= document.querySelector('meta[itemprop="datePublished"]')?.content || '';
         publishedAt ||= document.querySelector('meta[itemprop="uploadDate"]')?.content || '';
       } catch { /* ignore */ }
@@ -545,6 +600,23 @@
       const freshMember = memberOnlyFromInitialData(desktop?.initialData);
       if (freshMember !== null) memberOnly = freshMember;
       publishedAt ||= String(desktop?.publishedAt || '').trim();
+      publishedAt ||= publishedAtFromInitialData(desktop?.initialData);
+
+      // メン限watch HTMLではplayerResponseの日付が省かれることがある。
+      // その場合は同じログインセッションでInnertube nextを叩き、dateTextを補完する。
+      if (!publishedAt && desktop?.cfg) {
+        try {
+          const origin = 'https://www.youtube.com';
+          const cfg = normalizeCfg(desktop.cfg || {});
+          const auth = await buildAuthorization(origin);
+          if (cfg?.INNERTUBE_CONTEXT?.client) {
+            const nextData = await fetchNextInitialData(videoId, cfg, auth, origin, controller.signal);
+            publishedAt = publishedAtFromInitialData(nextData);
+          }
+        } catch (nextErr) {
+          console.warn('[Member Chat Search] date next fallback failed', videoId, nextErr);
+        }
+      }
     } catch (e) {
       if (e?.name !== 'AbortError') console.warn('[Member Chat Search] archive facts detection failed', videoId, e);
     }
@@ -1203,6 +1275,8 @@
       let memberOnlyCount = 0;
       let publicCount = 0;
       let unknownCount = 0;
+      let datedCount = 0;
+      let dateUnknownCount = 0;
       let nextIndex = 0;
 
       const worker = async () => {
@@ -1301,9 +1375,11 @@
             failed++;
             console.warn('[Member Chat Search] cross archive sync skipped', videoId, e);
           } finally {
+            if (entry?.publishedAt) datedCount++;
+            else dateUnknownCount++;
             done++;
             await updateCrossStats(
-              `メン限横断DB同期中：${done}/${entries.length}本（メン限${memberOnlyCount} / 通常${publicCount} / 判定不明${unknownCount} / 失敗${failed}）`
+              `メン限横断DB同期中：${done}/${entries.length}本（メン限${memberOnlyCount} / 日付取得${datedCount} / 日付不明${dateUnknownCount} / 通常${publicCount} / 失敗${failed}）`
             );
           }
         }
@@ -1316,7 +1392,7 @@
 
       const stats = await archiveIndexStats();
       await updateCrossStats(
-        `同期完了：メン限 ${stats.archives.toLocaleString()}本 / ${stats.messages.toLocaleString()}コメント（通常公開${publicCount}本は横断検索から除外・判定不明${unknownCount}・失敗${failed}）`
+        `同期完了：メン限 ${stats.archives.toLocaleString()}本 / ${stats.messages.toLocaleString()}コメント（日付取得${datedCount}・日付不明${dateUnknownCount}・通常公開${publicCount}本除外・判定不明${unknownCount}・失敗${failed}）`
       );
       if (state.searchScope === 'global') scheduleCrossSearchRender(true);
     } catch (e) {
@@ -1993,10 +2069,15 @@
         initialData: parsed?.initialData || null,
         playerResponse: parsed?.playerResponse || null,
         publishedAt: publishedAtFromPlayerResponse(parsed?.playerResponse) ||
+          publishedAtFromInitialData(parsed?.initialData) ||
           (html.match(/itemprop=["']datePublished["'][^>]*content=["']([^"']+)/i)?.[1] || '') ||
+          (html.match(/content=["']([^"']+)["'][^>]*itemprop=["']datePublished["']/i)?.[1] || '') ||
           (html.match(/itemprop=["']uploadDate["'][^>]*content=["']([^"']+)/i)?.[1] || '') ||
+          (html.match(/content=["']([^"']+)["'][^>]*itemprop=["']uploadDate["']/i)?.[1] || '') ||
           (html.match(/"startTimestamp"\s*:\s*"([^"]+)"/)?.[1] || '') ||
-          (html.match(/"publishDate"\s*:\s*"([^"]+)"/)?.[1] || ''),
+          (html.match(/"publishDate"\s*:\s*"([^"]+)"/)?.[1] || '') ||
+          (html.match(/"uploadDate"\s*:\s*"([^"]+)"/)?.[1] || '') ||
+          normalizePublishedDateCandidate(html.match(/"dateText"\s*:\s*\{"simpleText"\s*:\s*"([^"]+)"/)?.[1] || ''),
         cfg: parseAllYtcfgSets(html),
         continuation: parsed?.continuation || null,
         method: parsed?.method || 'none',
