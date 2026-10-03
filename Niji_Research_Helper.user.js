@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.57
+// @version      1.0.58
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.57';
+  const VERSION = '1.0.58';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -1316,18 +1316,57 @@
       const result = await cloudRequest('GET', '/v1/backups');
       list.replaceChildren();
       if (!result.backups?.length) { list.textContent = 'まだクラウドバックアップがありません'; return; }
-      const researchBackups = result.backups.filter(isResearchCloudBackupItem);
+
+      const researchBackups = result.backups
+        .filter(isResearchCloudBackupItem)
+        .slice()
+        .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
+
       if (!researchBackups.length) {
         list.textContent = 'Niji Research Helper本体DBのバックアップはまだありません';
         return;
       }
-      for (const item of researchBackups) {
-        const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'npf-r-btn';
-        btn.style.cssText = 'display:block;width:100%;text-align:left;margin:6px 0;white-space:normal;';
-        btn.textContent = `📥 ${item.device} / ${new Date(item.createdAt).toLocaleString('ja-JP')} (${(item.size/1024/1024).toFixed(1)} MB)`;
-        btn.addEventListener('click', () => void cloudRestore(item)); list.appendChild(btn);
+
+      const guide = document.createElement('div');
+      guide.className = 'npf-r-note';
+      guide.style.cssText = 'margin:8px 0;padding:8px;border:1px solid #7b8fb9;border-radius:8px;line-height:1.5;';
+      guide.textContent = '迷ったら一番上の「✅ おすすめ：最新の完全版を復元」を選べばOKです。下の項目は過去世代です。';
+      list.appendChild(guide);
+
+      const latest = researchBackups[0];
+      try {
+        const data = await cloudFetchResearchSnapshot(latest);
+        const summary = data?.preferences?.researchBackupSummary || {};
+        const detail = document.createElement('div');
+        detail.className = 'npf-r-note';
+        detail.style.cssText = 'margin:6px 0 10px 0;line-height:1.5;';
+        detail.textContent =
+          `最新バックアップの中身：動画 ${Number(summary.videos ?? data?.stores?.videos?.length ?? 0).toLocaleString()}件 / ` +
+          `チャンネル ${Number(summary.channels ?? data?.stores?.channels?.length ?? 0).toLocaleString()}件 / ` +
+          `Wiki ${Number(summary.wiki ?? data?.stores?.wiki?.length ?? 0).toLocaleString()}件 / ` +
+          `コラボ組 ${Number(summary.pairs ?? data?.stores?.pairs?.length ?? 0).toLocaleString()}件`;
+        list.appendChild(detail);
+      } catch (e) {
+        console.warn('[NRH][cloud list latest inspect]', e);
       }
-    } catch (e) { list.textContent = `一覧取得失敗：${String(e?.message || e).slice(0, 110)}`; }
+
+      researchBackups.forEach((item, index) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'npf-r-btn';
+        btn.style.cssText = 'display:block;width:100%;text-align:left;margin:6px 0;white-space:normal;line-height:1.45;';
+        const when = new Date(item.createdAt).toLocaleString('ja-JP');
+        const size = (Number(item.size || 0) / 1024 / 1024).toFixed(1);
+        btn.textContent = index === 0
+          ? `✅ おすすめ：最新の完全版を復元\n${when} / ${size} MB`
+          : `🕘 過去世代 ${index}\n${when} / ${size} MB`;
+        btn.title = `保存元: ${item.device || '不明'}`;
+        btn.addEventListener('click', () => void cloudRestore(item));
+        list.appendChild(btn);
+      });
+    } catch (e) {
+      list.textContent = `一覧取得失敗：${String(e?.message || e).slice(0, 110)}`;
+    }
   }
 
   function createCloudBackupUi() {
