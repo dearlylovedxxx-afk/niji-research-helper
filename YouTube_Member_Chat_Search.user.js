@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.2
+// @version      0.4.3
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.2';
+  const VERSION = '0.4.3';
 
   const state = {
     videoId: null,
@@ -94,6 +94,14 @@
     });
   }
 
+  async function waitForCloudIdle(maxMs = 60000) {
+    const started = Date.now();
+    while (state.cloudBusy && Date.now() - started < maxMs) {
+      await sleep(250);
+    }
+    if (state.cloudBusy) throw new Error('別のpCloud処理が終わらないため保存を開始できませんでした');
+  }
+
   async function gmGetValue(key, fallback) {
     try {
       if (typeof GM !== 'undefined' && typeof GM.getValue === 'function') {
@@ -147,11 +155,13 @@
     const connect = wrap.querySelector('.mcs-cloud-connect');
     const disconnect = wrap.querySelector('.mcs-cloud-disconnect');
     const restore = wrap.querySelector('.mcs-cloud-restore');
+    const retry = wrap.querySelector('.mcs-cloud-retry-save');
     const crossSync = document.querySelector(`#${PANEL_ID} .mcs-cross-sync`);
     if (input) input.style.display = state.cloudEnabled ? 'none' : '';
     if (connect) connect.style.display = state.cloudEnabled ? 'none' : '';
     if (disconnect) disconnect.style.display = state.cloudEnabled ? '' : 'none';
     if (restore) restore.disabled = !state.cloudEnabled || state.cloudBusy;
+    if (retry) retry.disabled = !state.cloudEnabled || state.cloudBusy || !state.messages.length;
     if (crossSync) crossSync.disabled = !state.cloudEnabled || state.crossSyncBusy;
     cloudUiStatus(
       state.cloudEnabled
@@ -476,7 +486,15 @@
 
   async function cloudUploadCompleted(videoId, messages, { silent = false } = {}) {
     if (!state.cloudEnabled || !state.cloudToken || !videoId || !messages?.length) return null;
-    if (state.cloudBusy) return null;
+    if (state.cloudBusy) {
+      if (!silent) cloudUiStatus('☁️ 他のpCloud処理の完了待ち…');
+      try { await waitForCloudIdle(); }
+      catch (e) {
+        const msg = `⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 120)} [${cloudDevice(videoId)}]`;
+        cloudUiStatus(msg, true);
+        return null;
+      }
+    }
 
     state.cloudBusy = true;
     if (!silent) cloudUiStatus('☁️ pCloudへ保存中…');
@@ -2743,8 +2761,9 @@
     const cloudActions = makeEl('div', { className: 'mcs-cloud-actions' });
     const cloudConnect = makeEl('button', { className: 'mcs-cloud-connect', type: 'button', text: '接続' });
     const cloudRestore = makeEl('button', { className: 'mcs-cloud-restore', type: 'button', text: 'pCloudから再読込' });
+    const cloudRetrySave = makeEl('button', { className: 'mcs-cloud-retry-save', type: 'button', text: '☁️ pCloudへ再保存' });
     const cloudDisconnect = makeEl('button', { className: 'mcs-cloud-disconnect', type: 'button', text: '切断' });
-    cloudActions.append(cloudConnect, cloudRestore, cloudDisconnect);
+    cloudActions.append(cloudConnect, cloudRestore, cloudRetrySave, cloudDisconnect);
     cloudWrap.append(cloudTitle, cloudStatusEl, cloudToken, cloudActions);
 
     const crossTools = makeEl('div', { className: 'mcs-cross-tools' });
@@ -2792,6 +2811,17 @@
     cloudRestore.addEventListener('click', () => {
       const videoId = getVideoId();
       if (videoId) void cloudRestoreLatest(videoId);
+    });
+    cloudRetrySave.addEventListener('click', async () => {
+      const videoId = getVideoId();
+      if (!videoId || !state.messages.length) {
+        cloudUiStatus('⚠️ 再保存できるローカルチャットがありません。', true);
+        return;
+      }
+      const saved = await cloudUploadCompleted(videoId, state.messages);
+      if (saved) {
+        status(`取得済み：${state.messages.length.toLocaleString()}件／☁️ pCloud再保存済み`);
+      }
     });
     cloudDisconnect.addEventListener('click', () => void disconnectCloud());
     crossSync.addEventListener('click', () => void cloudSyncArchiveIndex());
@@ -3053,7 +3083,7 @@
         status(
           saved
             ? `取得完了：${messages.length.toLocaleString()}件／☁️ pCloud保存済み`
-            : `取得完了：${messages.length.toLocaleString()}件／pCloud保存は失敗（ローカル保存済み）`,
+            : `取得完了：${messages.length.toLocaleString()}件／pCloud保存は失敗（ローカル保存済み・「pCloudへ再保存」で再試行できます）`,
           !saved
         );
       }
