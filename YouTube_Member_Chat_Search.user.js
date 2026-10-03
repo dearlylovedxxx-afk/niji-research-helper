@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.7
+// @version      0.4.8
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.7';
+  const VERSION = '0.4.8';
 
   const state = {
     videoId: null,
@@ -59,6 +59,7 @@
     cloudLastBackupId: '',
     cloudLastError: '',
     cloudUploadPromise: null,
+    memberOnly: null,
     searchScope: 'current',
     crossSyncBusy: false,
     crossSearchSerial: 0,
@@ -382,6 +383,7 @@
         title: String(row?.title || ''),
         channel: String(row?.channel || ''),
         count: Math.max(0, Number(row?.count || 0)),
+        memberOnly: row?.memberOnly === true ? true : row?.memberOnly === false ? false : null,
         backupId: String(row?.backupId || ''),
         backupSha: String(row?.backupSha || ''),
         backupSize: Math.max(0, Number(row?.backupSize || 0)),
@@ -420,6 +422,7 @@
         title: chat.title || '',
         channel: chat.channel || '',
         count: Array.isArray(chat.messages) ? chat.messages.length : Number(chat.count || 0),
+        memberOnly: chat.memberOnly === true ? true : chat.memberOnly === false ? false : null,
         backupId: String(item.id || ''),
         backupSha: String(item.sha256 || ''),
         backupSize: Number(item.size || 0),
@@ -447,6 +450,68 @@
     } catch { /* ignore */ }
 
     return { videoId, title, channel };
+  }
+
+  function memberOnlyFromInitialData(initialData) {
+    if (!initialData || typeof initialData !== 'object') return null;
+    const primaryRows = deepFindValues(initialData, 'videoPrimaryInfoRenderer', 12);
+    if (!primaryRows.length) return null;
+
+    for (const primary of primaryRows) {
+      const badges = Array.isArray(primary?.badges) ? primary.badges : [];
+      for (const badge of badges) {
+        let raw = '';
+        try { raw = JSON.stringify(badge); } catch { raw = String(badge || ''); }
+        if (
+          /BADGE_STYLE_TYPE_MEMBERS_ONLY/i.test(raw) ||
+          /"label"\s*:\s*"Members only"/i.test(raw) ||
+          /"label"\s*:\s*"メンバー限定"/i.test(raw)
+        ) return true;
+      }
+    }
+    return false;
+  }
+
+  function memberOnlyFromDom(videoId) {
+    if (!videoId || getVideoId() !== videoId) return null;
+    try {
+      const hit = document.querySelector(
+        'ytd-watch-metadata .badge-style-type-members-only,' +
+        ' ytd-video-primary-info-renderer .badge-style-type-members-only,' +
+        ' #above-the-fold .badge-style-type-members-only,' +
+        ' [class*="badge-style-type-members-only"]'
+      );
+      if (hit) return true;
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  async function detectMemberOnlyVideo(videoId, { allowDom = true } = {}) {
+    if (!videoId) return null;
+
+    if (allowDom) {
+      const dom = memberOnlyFromDom(videoId);
+      if (dom === true) return true;
+
+      try {
+        let page = window;
+        if (typeof unsafeWindow !== 'undefined') page = unsafeWindow;
+        const pageResult = memberOnlyFromInitialData(page?.ytInitialData);
+        if (pageResult !== null) return pageResult;
+      } catch { /* ignore */ }
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 25000);
+      const desktop = await fetchDesktopWatchDataViaGM(videoId, controller.signal);
+      clearTimeout(timer);
+      const result = memberOnlyFromInitialData(desktop?.initialData);
+      if (result !== null) return result;
+    } catch (e) {
+      if (e?.name !== 'AbortError') console.warn('[Member Chat Search] member-only detection failed', videoId, e);
+    }
+    return null;
   }
 
   function cloudPayload(videoId, messages) {
@@ -478,6 +543,7 @@
           channel: meta.channel,
           chatMode: 'all-v2',
           completed: true,
+          memberOnly: state.memberOnly === true ? true : state.memberOnly === false ? false : null,
           count: messages.length,
           messages,
         },
@@ -643,10 +709,16 @@
       for (const item of list.slice(0, 8)) {
         try {
           const data = await cloudFetchBackup(item, videoId);
+          let memberOnly = data?.memberOnly === true ? true : data?.memberOnly === false ? false : null;
+          if (memberOnly === null) {
+            memberOnly = await detectMemberOnlyVideo(videoId);
+            data.memberOnly = memberOnly;
+          }
           const record = {
             videoId,
             version: VERSION,
             chatMode: 'all-v2',
+            memberOnly,
             messages: data.messages,
             workers: [],
             completed: true,
@@ -662,6 +734,7 @@
           // 復元成功の必須条件にはしない。
           state.cacheRecord = record;
           state.cacheCompleted = true;
+          state.memberOnly = memberOnly;
           state.messageMap = new Map();
           for (const msg of record.messages) {
             const key = msg.id || `${msg.offsetMs}|${msg.author}|${msg.message}`;
@@ -685,6 +758,7 @@
             .catch((e) => console.warn('[Member Chat Search] cloud restore local cache write skipped', e));
           void withTimeout(writeArchiveIndexFromChat(data, item), 60000, '横断検索DBへの保存')
             .catch((e) => console.warn('[Member Chat Search] cross index restore write skipped', e));
+          if (typeof memberOnly === 'boolean') void cloudUpsertArchiveManifest(data, item);
 
           return true;
         } catch (e) {
@@ -908,6 +982,11 @@
           channel: String(chat.channel || prev.channel || ''),
           count: chat.messages.length,
           messages: chat.messages,
+          memberOnly: chat.memberOnly === true
+            ? true
+            : chat.memberOnly === false
+              ? false
+              : (prev.memberOnly === true ? true : prev.memberOnly === false ? false : null),
           exportedAt: String(chat.exportedAt || prev.exportedAt || ''),
           backupId: item?.id ? String(item.id) : String(prev.backupId || ''),
           backupSha: item?.sha256 ? String(item.sha256) : String(prev.backupSha || ''),
@@ -938,8 +1017,10 @@
           resolve({ archives, messages });
           return;
         }
-        archives++;
-        messages += Number(cursor.value?.count || cursor.value?.messages?.length || 0);
+        if (cursor.value?.memberOnly === true) {
+          archives++;
+          messages += Number(cursor.value?.count || cursor.value?.messages?.length || 0);
+        }
         cursor.continue();
       };
       req.onerror = () => reject(req.error || new Error('横断検索DBの集計に失敗しました。'));
@@ -951,7 +1032,7 @@
     if (!el) return;
     try {
       const stats = await archiveIndexStats();
-      el.textContent = note || `横断DB：${stats.archives.toLocaleString()}本 / ${stats.messages.toLocaleString()}コメント`;
+      el.textContent = note || `メン限横断DB：${stats.archives.toLocaleString()}本 / ${stats.messages.toLocaleString()}コメント`;
     } catch (e) {
       el.textContent = `横断DB確認失敗：${String(e?.message || e).slice(0, 100)}`;
     }
@@ -980,6 +1061,10 @@
           return;
         }
         const archive = cursor.value || {};
+        if (archive.memberOnly !== true) {
+          cursor.continue();
+          return;
+        }
         for (const msg of Array.isArray(archive.messages) ? archive.messages : []) {
           if (!matchesQuery(msg, q)) continue;
           matches.push({
@@ -1051,6 +1136,7 @@
           backupSha: item.sha256 || old.backupSha || '',
           backupSize: Number(item.size || old.backupSize || 0),
           backupCreatedAt: item.createdAt || old.backupCreatedAt || '',
+          memberOnly: old.memberOnly === true ? true : old.memberOnly === false ? false : null,
         });
       }
 
@@ -1064,6 +1150,9 @@
       let downloaded = 0;
       let skipped = 0;
       let failed = 0;
+      let memberOnlyCount = 0;
+      let publicCount = 0;
+      let unknownCount = 0;
       let nextIndex = 0;
 
       const worker = async () => {
@@ -1089,7 +1178,19 @@
               };
             }
 
-            if (item?.sha256 && local?.backupSha === item.sha256 && Array.isArray(local.messages) && local.messages.length) {
+            const localClass = local?.memberOnly === true ? true : local?.memberOnly === false ? false : null;
+            const manifestClass = entry?.memberOnly === true ? true : entry?.memberOnly === false ? false : null;
+
+            if (
+              item?.sha256 &&
+              local?.backupSha === item.sha256 &&
+              Array.isArray(local.messages) &&
+              local.messages.length &&
+              localClass !== null
+            ) {
+              entry.memberOnly = localClass;
+              if (localClass) memberOnlyCount++;
+              else publicCount++;
               skipped++;
             } else {
               let chat = null;
@@ -1104,15 +1205,27 @@
                 if (!usedItem) throw new Error('pCloudバックアップが見つかりません');
                 chat = await cloudFetchBackup(usedItem, videoId);
               }
+
+              let memberOnly = chat?.memberOnly === true ? true : chat?.memberOnly === false ? false : manifestClass;
+              if (memberOnly === null) {
+                memberOnly = await detectMemberOnlyVideo(videoId, { allowDom: false });
+              }
+              chat.memberOnly = memberOnly;
+
               await writeArchiveIndexFromChat(chat, usedItem);
               entry.title = chat.title || entry.title || '';
               entry.channel = chat.channel || entry.channel || '';
               entry.count = chat.messages.length;
+              entry.memberOnly = memberOnly;
               entry.backupId = String(usedItem.id || '');
               entry.backupSha = String(usedItem.sha256 || '');
               entry.backupSize = Number(usedItem.size || 0);
               entry.backupCreatedAt = String(usedItem.createdAt || '');
               entry.updatedAt = Date.now();
+
+              if (memberOnly === true) memberOnlyCount++;
+              else if (memberOnly === false) publicCount++;
+              else unknownCount++;
               downloaded++;
             }
           } catch (e) {
@@ -1120,7 +1233,9 @@
             console.warn('[Member Chat Search] cross archive sync skipped', videoId, e);
           } finally {
             done++;
-            await updateCrossStats(`横断DB同期中：${done}/${entries.length}本（更新${downloaded} / 既存${skipped} / 失敗${failed}）`);
+            await updateCrossStats(
+              `メン限横断DB同期中：${done}/${entries.length}本（メン限${memberOnlyCount} / 通常${publicCount} / 判定不明${unknownCount} / 失敗${failed}）`
+            );
           }
         }
       };
@@ -1132,14 +1247,14 @@
 
       const stats = await archiveIndexStats();
       await updateCrossStats(
-        `同期完了：${stats.archives.toLocaleString()}本 / ${stats.messages.toLocaleString()}コメント（今回更新${downloaded}、失敗${failed}）`
+        `同期完了：メン限 ${stats.archives.toLocaleString()}本 / ${stats.messages.toLocaleString()}コメント（通常公開${publicCount}本は横断検索から除外・判定不明${unknownCount}・失敗${failed}）`
       );
       if (state.searchScope === 'global') scheduleCrossSearchRender(true);
     } catch (e) {
       await updateCrossStats(`横断DB同期失敗：${String(e?.message || e).slice(0, 120)}`);
     } finally {
       state.crossSyncBusy = false;
-      if (syncBtn) syncBtn.textContent = '☁️ pCloudから横断DB同期';
+      if (syncBtn) syncBtn.textContent = '☁️ メン限横断DB同期';
       updateCloudUi();
     }
   }
@@ -1177,6 +1292,7 @@
         videoId,
         version: VERSION,
         chatMode: 'all-v2',
+        memberOnly: state.memberOnly === true ? true : state.memberOnly === false ? false : null,
         messages,
         workers: Array.isArray(state.workerProgress) ? state.workerProgress.map((w) => ({ ...w })) : [],
         completed: Boolean(completed),
@@ -1240,6 +1356,7 @@
 
     state.cacheRecord = record;
     state.cacheCompleted = Boolean(record?.completed);
+    state.memberOnly = record?.memberOnly === true ? true : record?.memberOnly === false ? false : state.memberOnly;
     state.messageMap = new Map();
     for (const msg of record?.messages || []) {
       const key = msg.id || `${msg.offsetMs}|${msg.author}|${msg.message}`;
@@ -2817,7 +2934,7 @@
     const tabs = makeEl('div', { className: 'mcs-tabs' });
     const currentTab = makeEl('button', { className: 'mcs-tab active', type: 'button', text: 'この動画' });
     currentTab.dataset.scope = 'current';
-    const globalTab = makeEl('button', { className: 'mcs-tab', type: 'button', text: '全アーカイブ横断' });
+    const globalTab = makeEl('button', { className: 'mcs-tab', type: 'button', text: 'メン限のみ横断' });
     globalTab.dataset.scope = 'global';
     tabs.append(currentTab, globalTab);
 
@@ -2859,13 +2976,13 @@
 
     const crossTools = makeEl('div', { className: 'mcs-cross-tools' });
     crossTools.hidden = true;
-    const crossSync = makeEl('button', { className: 'mcs-cross-sync', type: 'button', text: '☁️ pCloudから横断DB同期' });
-    const crossStatus = makeEl('div', { className: 'mcs-cross-status', text: '横断DBを確認中…' });
+    const crossSync = makeEl('button', { className: 'mcs-cross-sync', type: 'button', text: '☁️ メン限横断DB同期' });
+    const crossStatus = makeEl('div', { className: 'mcs-cross-status', text: 'メン限横断DBを確認中…' });
     crossTools.append(crossSync, crossStatus);
 
     const help = makeEl('div', {
       className: 'mcs-help',
-      text: '保存済みがあればローカル→pCloudの順で即読込し、無い配信アーカイブだけ自動取得します。取得完了後はpCloudへ自動保存します。',
+      text: '自動取得するのはメンバー限定アーカイブだけです。通常公開アーカイブは自動取得せず、手動取得しても横断検索には含めません。',
     });
     controls.append(tabs, load, statusEl, fastLabel, cloudWrap, crossTools, search, help);
 
@@ -2944,13 +3061,13 @@
     if (crossTools) crossTools.hidden = !isGlobal;
     if (input) {
       input.placeholder = isGlobal
-        ? '全アーカイブの本文・投稿者を検索（A | B でOR）'
+        ? 'メン限アーカイブのみ本文・投稿者を検索（A | B でOR）'
         : '本文・投稿者を検索（A | B でOR）';
     }
     if (help) {
       help.textContent = isGlobal
-        ? 'pCloudに保存したメン限アーカイブを横断検索します。初回または新しいアーカイブを保存した後に「横断DB同期」を押してください。'
-        : '保存済みがあればローカル→pCloudの順で即読込し、無い配信アーカイブだけ自動取得します。取得完了後はpCloudへ自動保存します。';
+        ? 'pCloudに保存したうち、メンバー限定と確認できたアーカイブだけを横断検索します。通常公開アーカイブは除外します。'
+        : '自動取得はメンバー限定アーカイブだけです。通常公開は自動取得せず、必要なら手動で取得できます。';
     }
     renderSearchResults();
     if (isGlobal) void updateCrossStats();
@@ -3084,6 +3201,19 @@
     status('取得準備中…');
     renderSearchResults();
 
+    if (state.memberOnly === null) {
+      const detected = await detectMemberOnlyVideo(videoId);
+      if (getVideoId() !== videoId) {
+        state.loading = false;
+        state.abortController = null;
+        return;
+      }
+      state.memberOnly = detected;
+      if (!autoResume && detected === false) {
+        status('通常公開アーカイブ：手動取得として実行します（メン限横断検索には入りません）。');
+      }
+    }
+
     let cache = null;
     try {
       if (!autoResume && state.cacheCompleted) {
@@ -3158,6 +3288,7 @@
           title: meta.title,
           channel: meta.channel,
           count: messages.length,
+          memberOnly: state.memberOnly === true ? true : state.memberOnly === false ? false : null,
           messages,
           exportedAt: new Date().toISOString(),
         });
@@ -3260,9 +3391,16 @@
     if (serial !== state.initSerial || getVideoId() !== videoId) return;
 
     if (state.cacheRecord?.completed && state.messages.length) {
+      if (state.memberOnly === null) {
+        state.memberOnly = await detectMemberOnlyVideo(videoId);
+        if (typeof state.memberOnly === 'boolean') {
+          state.cacheRecord.memberOnly = state.memberOnly;
+          void withTimeout(writeCache(state.cacheRecord), 30000, 'メン限判定のローカル保存').catch(() => {});
+        }
+      }
       status(`保存済み：${state.messages.length.toLocaleString()}件（YouTube再取得なし）`);
       setLoadButton('再取得', false);
-      if (state.cloudEnabled) {
+      if (state.cloudEnabled && state.memberOnly === true) {
         void ensureCloudBackupForLocal(videoId, state.cacheRecord);
       }
       return;
@@ -3283,7 +3421,22 @@
       // restored === false のときだけ「pCloudにも保存なし」と確定して次へ進む。
     }
 
-    // 3) 途中ローカルがあれば続きから自動再開。
+    // 3) 自動取得・自動再開はメン限アーカイブだけ。
+    if (state.memberOnly === null) {
+      status('メンバー限定アーカイブか確認中…');
+      state.memberOnly = await detectMemberOnlyVideo(videoId);
+      if (serial !== state.initSerial || getVideoId() !== videoId) return;
+    }
+
+    if (state.memberOnly !== true) {
+      status(state.memberOnly === false
+        ? '通常公開アーカイブのため自動取得しません。必要な場合だけ「チャットを取得」を押してください。'
+        : 'メン限判定を確認できなかったため自動取得しません。必要な場合だけ「チャットを取得」を押してください。');
+      setLoadButton('チャットを取得', false);
+      return;
+    }
+
+    // 4) メン限の途中ローカルがあれば続きから自動再開。
     if (state.cacheRecord?.inProgress && state.cacheRecord?.messages?.length) {
       if (!state.loading && state.autoResumeStartedFor !== videoId) {
         state.autoResumeStartedFor = videoId;
@@ -3295,9 +3448,9 @@
       return;
     }
 
-    // 4) 何も無ければチャットリプレイ付きアーカイブだけ自動取得。
+    // 5) メン限かつ保存なしならチャットリプレイを自動取得。
     if (state.autoStartStartedFor === videoId || state.loading) return;
-    status('保存データなし。チャットリプレイを確認中…');
+    status('メン限アーカイブ：チャットリプレイを確認中…');
 
     const available = await detectChatReplayAvailable(videoId);
     if (serial !== state.initSerial || getVideoId() !== videoId) return;
@@ -3308,7 +3461,7 @@
     }
 
     state.autoStartStartedFor = videoId;
-    status('チャットリプレイを検出。自動取得を開始します…');
+    status('メン限チャットリプレイを検出。自動取得を開始します…');
     setTimeout(() => {
       if (getVideoId() === videoId && !state.loading) void handleLoadClick(true);
     }, 350);
@@ -3490,6 +3643,7 @@
     state.cacheCompleted = false;
     state.autoResumeStartedFor = null;
     state.autoStartStartedFor = null;
+    state.memberOnly = null;
     state.lastAppliedTimestampUrl = null;
     const input = document.querySelector(`#${PANEL_ID} .mcs-search`);
     if (input) input.value = '';
