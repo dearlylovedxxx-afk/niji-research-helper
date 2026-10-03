@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.6
+// @version      0.4.7
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.6';
+  const VERSION = '0.4.7';
 
   const state = {
     videoId: null,
@@ -657,10 +657,9 @@
             cloudBackupId: String(item.id || ''),
           };
 
-          await withTimeout(writeCache(record), 8000, 'pCloud復元データのローカル保存');
-          try { await writeArchiveIndexFromChat(data, item); }
-          catch (e) { console.warn('[Member Chat Search] cross index restore write failed', e); }
-
+          // pCloudからの読込自体が成功した時点で、その場で検索可能にする。
+          // IndexedDBへのローカル保存は重い端末・大量コメントだと数秒以上かかるため、
+          // 復元成功の必須条件にはしない。
           state.cacheRecord = record;
           state.cacheCompleted = true;
           state.messageMap = new Map();
@@ -679,6 +678,14 @@
           renderSearchResults();
           cloudUiStatus(`☁️ pCloudから読込済み：${state.messages.length.toLocaleString()}件`);
           updateCloudUi();
+
+          // ローカルキャッシュと横断検索DBへの書き込みはバックグラウンドで行う。
+          // 失敗してもpCloud読込済みデータはそのまま利用できる。
+          void withTimeout(writeCache(record), 60000, 'pCloud復元データのローカル保存')
+            .catch((e) => console.warn('[Member Chat Search] cloud restore local cache write skipped', e));
+          void withTimeout(writeArchiveIndexFromChat(data, item), 60000, '横断検索DBへの保存')
+            .catch((e) => console.warn('[Member Chat Search] cross index restore write skipped', e));
+
           return true;
         } catch (e) {
           lastError = e;
