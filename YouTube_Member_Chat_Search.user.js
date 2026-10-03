@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.5
+// @version      0.4.6
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.5';
+  const VERSION = '0.4.6';
 
   const state = {
     videoId: null,
@@ -581,14 +581,66 @@
   }
 
   async function cloudRestoreLatest(videoId, { silent = false } = {}) {
-    if (!state.cloudEnabled || !state.cloudToken || !videoId || state.cloudBusy) return false;
-    state.cloudBusy = true;
-    updateCloudUi();
-    if (!silent) cloudUiStatus('☁️ pCloudを確認中…');
+    // true = 復元成功 / false = pCloudに保存なしを確認 / null = 確認失敗
+    // 「確認失敗」を保存なし扱いにすると、既存バックアップがあるのにYouTube再取得が始まるため区別する。
+    if (!state.cloudEnabled || !state.cloudToken || !videoId) return null;
+
+    // 直前の動画をpCloudへ保存中なら、その保存が終わるのを待ってから確認する。
+    // 読み込み確認を飛ばしてYouTube再取得へ進ませない。
+    if (state.cloudUploadPromise) {
+      if (!silent) cloudUiStatus('☁️ 保存処理の完了を待ってpCloudを確認中…');
+      try {
+        await withTimeout(state.cloudUploadPromise, 120000, '直前のpCloud保存待ち');
+      } catch (e) {
+        console.warn('[Member Chat Search] prior cloud upload wait failed', e);
+      }
+    }
+
+    if (!silent) cloudUiStatus('☁️ pCloud保存済みデータを確認中…');
 
     try {
-      const list = await cloudList(videoId);
-      for (const item of list.slice(0, 5)) {
+      let list = await cloudList(videoId);
+
+      // 端末別一覧で見つからない場合、全体一覧からvideoIdを復元して再探索する。
+      // Worker側の一覧差異や旧世代の保存を取りこぼさないためのフォールバック。
+      if (!list.length) {
+        try {
+          const all = await cloudListAll();
+          list = all
+            .filter((item) => videoIdFromCloudDevice(item?.device) === videoId)
+            .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
+        } catch (e) {
+          console.warn('[Member Chat Search] cloud all-list fallback failed', e);
+        }
+      }
+
+      // v0.4.0以降のマニフェストにも登録があれば、直接バックアップIDを使って救済する。
+      if (!list.length) {
+        try {
+          const manifest = await cloudLoadArchiveManifest();
+          const entry = manifest.find((x) => x?.videoId === videoId);
+          if (entry?.backupId && entry?.backupSha) {
+            list = [{
+              id: String(entry.backupId),
+              sha256: String(entry.backupSha),
+              size: Number(entry.backupSize || 0),
+              createdAt: String(entry.backupCreatedAt || ''),
+              device: cloudDevice(videoId),
+              origin: location.origin,
+            }];
+          }
+        } catch (e) {
+          console.warn('[Member Chat Search] cloud manifest fallback failed', e);
+        }
+      }
+
+      if (!list.length) {
+        cloudUiStatus('☁️ この動画のpCloud保存データはありません。');
+        return false;
+      }
+
+      let lastError = null;
+      for (const item of list.slice(0, 8)) {
         try {
           const data = await cloudFetchBackup(item, videoId);
           const record = {
@@ -605,9 +657,10 @@
             cloudBackupId: String(item.id || ''),
           };
 
-          await writeCache(record);
+          await withTimeout(writeCache(record), 8000, 'pCloud復元データのローカル保存');
           try { await writeArchiveIndexFromChat(data, item); }
           catch (e) { console.warn('[Member Chat Search] cross index restore write failed', e); }
+
           state.cacheRecord = record;
           state.cacheCompleted = true;
           state.messageMap = new Map();
@@ -625,21 +678,25 @@
           setLoadButton('再取得', false);
           renderSearchResults();
           cloudUiStatus(`☁️ pCloudから読込済み：${state.messages.length.toLocaleString()}件`);
+          updateCloudUi();
           return true;
         } catch (e) {
+          lastError = e;
           console.warn('[Member Chat Search] cloud generation skipped', item?.id, e);
         }
       }
 
-      cloudUiStatus('☁️ この動画のpCloud保存データはありません。');
-      return false;
+      // バックアップ一覧には存在するのに読み込めない場合は「保存なし」ではない。
+      // 自動再取得せず、ユーザーにエラーを見せる。
+      const detail = String(lastError?.message || lastError || '保存済みデータを読み込めませんでした').slice(0, 120);
+      cloudUiStatus(`⚠️ pCloud保存データは見つかりましたが読込失敗：${detail}`, true);
+      return null;
     } catch (e) {
-      const msg = `⚠️ pCloud読込失敗：${String(e?.message || e).slice(0, 120)}`;
+      const msg = `⚠️ pCloud確認失敗：${String(e?.message || e).slice(0, 120)}`;
       cloudUiStatus(msg, true);
       console.warn('[Member Chat Search] cloud restore failed', e);
-      return false;
+      return null;
     } finally {
-      state.cloudBusy = false;
       updateCloudUi();
     }
   }
@@ -3204,11 +3261,19 @@
       return;
     }
 
-    // 2) ローカル完成版が無ければpCloudを確認。別端末で取得済みならここで終了。
+    // 2) ローカル完成版が無ければ必ずpCloudを確認。別端末で取得済みならここで終了。
     if (state.cloudEnabled && state.cloudToken) {
       const restored = await cloudRestoreLatest(videoId, { silent: !forceCloudCheck });
       if (serial !== state.initSerial || getVideoId() !== videoId) return;
-      if (restored) return;
+      if (restored === true) return;
+      if (restored === null) {
+        // pCloud確認に失敗しただけで「保存なし」とは限らない。
+        // ここでYouTube再取得を始めると二重取得になるので自動開始しない。
+        status('pCloudの保存有無を確認できなかったため、自動再取得は開始しません。pCloud欄のエラーを確認してください。', true);
+        setLoadButton(state.cacheRecord?.messages?.length ? '続きから取得' : 'チャットを取得', false);
+        return;
+      }
+      // restored === false のときだけ「pCloudにも保存なし」と確定して次へ進む。
     }
 
     // 3) 途中ローカルがあれば続きから自動再開。
