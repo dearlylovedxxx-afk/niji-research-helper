@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.5.2
+// @version      0.5.3
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.5.2';
+  const VERSION = '0.5.3';
 
   const state = {
     videoId: null,
@@ -50,6 +50,7 @@
     rateLimitUntil: 0,
     autoResumeStartedFor: null,
     lastAppliedTimestampUrl: null,
+    timestampGuardSerial: 0,
     autoStartStartedFor: null,
     initSerial: 0,
     cloudEnabled: false,
@@ -4013,35 +4014,47 @@
     if (state.lastAppliedTimestampUrl === key) return;
     state.lastAppliedTimestampUrl = key;
 
-    let tries = 0;
-    const trySeek = () => {
-      tries++;
+    const videoId = getVideoId();
+    const target = Math.max(0, Number(seconds) || 0);
+    const serial = ++state.timestampGuardSerial;
+    const startedAt = Date.now();
+
+    // YouTubeはURLのt=を一度反映したあと、数秒遅れて「前回の続き」を
+    // 上書きすることがある。v0.5.2以前は最初の位置が合っていると監視を
+    // すぐ終了していたため、後から飛ばされるケースを拾えなかった。
+    const delays = [80, 300, 700, 1300, 2200, 3500, 5200, 7500, 10000, 13000];
+
+    const guardSeek = () => {
+      if (serial !== state.timestampGuardSerial) return;
+      if (videoId && getVideoId() !== videoId) return;
+
       const video = document.querySelector('video');
-      if (!video) {
-        if (tries < 20) setTimeout(trySeek, 250);
-        return;
-      }
+      if (!video || video.readyState < 1) return;
 
       try {
-        const target = Math.max(0, Number(seconds) || 0);
-        if (Math.abs(video.currentTime - target) > 1.5) {
-          video.currentTime = target;
-        }
+        const current = Number(video.currentTime);
+        if (!Number.isFinite(current)) return;
 
-        // YouTube側が直後に視聴履歴位置へ戻すことがあるため、短時間だけ再確認。
-        if (tries < 6) {
-          setTimeout(() => {
-            if (Math.abs(video.currentTime - target) > 2) {
-              trySeek();
-            }
-          }, 350);
+        const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
+        const rate = Number.isFinite(Number(video.playbackRate)) ? Number(video.playbackRate) : 1;
+        const expected = target + (video.paused ? 0 : elapsed * rate);
+
+        // 指定位置から普通に再生が進んでいる場合は触らない。
+        // 前回視聴位置へ大きく飛ばされた時だけ、指定時刻へ戻す。
+        const nearTarget = Math.abs(current - target) <= 6;
+        const nearExpected = Math.abs(current - expected) <= 8;
+        if (!nearTarget && !nearExpected) {
+          video.currentTime = target;
+          console.info('[Member Chat Search] YouTube resume position overridden', {
+            videoId, target, previous: current,
+          });
         }
-      } catch {
-        if (tries < 20) setTimeout(trySeek, 250);
+      } catch (e) {
+        console.debug('[Member Chat Search] timestamp guard failed', e);
       }
     };
 
-    setTimeout(trySeek, 80);
+    for (const delay of delays) setTimeout(guardSeek, delay);
   }
 
   function resetForNavigation() {
@@ -4068,6 +4081,7 @@
     state.autoStartStartedFor = null;
     state.memberOnly = null;
     state.lastAppliedTimestampUrl = null;
+    state.timestampGuardSerial++;
     const input = document.querySelector(`#${PANEL_ID} .mcs-search`);
     if (input) input.value = '';
     status('アーカイブを開いて「チャットを取得」を押してください。');
