@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.3.2
-// @description  YouTubeの視聴権限がある配信アーカイブからChat Replayを取得し、本文・投稿者を検索します。
+// @version      0.4.0
+// @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @match        https://www.youtube.com/*
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.3.2';
+  const VERSION = '0.4.0';
 
   const state = {
     videoId: null,
@@ -58,12 +58,19 @@
     cloudStatus: '未接続',
     cloudLastBackupId: '',
     cloudLastError: '',
+    searchScope: 'current',
+    crossSyncBusy: false,
+    crossSearchSerial: 0,
+    crossSearchTimer: null,
 
   };
 
   const CACHE_DB_NAME = 'MarinaMemberChatSearchDB';
-  const CACHE_DB_VERSION = 1;
+  const CACHE_DB_VERSION = 2;
   const CACHE_STORE = 'videoCache';
+  const ARCHIVE_STORE = 'archiveIndex';
+  const CHAT_MANIFEST_DEVICE = 'ytchat_manifest_v1';
+  const CROSS_RESULT_LIMIT = 1000;
   const FAST_WORKERS = 8;
   const FAST_OVERLAP_MS = 60 * 1000;
   const CLOUD_URL = 'https://niji-research-backup.dearlylovedxxx.workers.dev';
@@ -100,6 +107,16 @@
     return `ytchat_${encoded}`;
   }
 
+  function videoIdFromCloudDevice(device) {
+    const value = String(device || '');
+    if (!value.startsWith('ytchat_') || value === CHAT_MANIFEST_DEVICE) return '';
+    return value.slice('ytchat_'.length).replace(/:([a-z])/g, (_, ch) => ch.toUpperCase());
+  }
+
+  function isChatArchiveDevice(device) {
+    return Boolean(videoIdFromCloudDevice(device));
+  }
+
   function cloudUiStatus(text, isError = false) {
     state.cloudStatus = text;
     state.cloudLastError = isError ? text : '';
@@ -116,10 +133,12 @@
     const connect = wrap.querySelector('.mcs-cloud-connect');
     const disconnect = wrap.querySelector('.mcs-cloud-disconnect');
     const restore = wrap.querySelector('.mcs-cloud-restore');
+    const crossSync = document.querySelector(`#${PANEL_ID} .mcs-cross-sync`);
     if (input) input.style.display = state.cloudEnabled ? 'none' : '';
     if (connect) connect.style.display = state.cloudEnabled ? 'none' : '';
     if (disconnect) disconnect.style.display = state.cloudEnabled ? '' : 'none';
     if (restore) restore.disabled = !state.cloudEnabled || state.cloudBusy;
+    if (crossSync) crossSync.disabled = !state.cloudEnabled || state.crossSyncBusy;
     cloudUiStatus(
       state.cloudEnabled
         ? (state.cloudStatus || '☁️ pCloud接続済み')
@@ -211,6 +230,181 @@
       sourceOrigin: data.sourceOrigin,
       device: data.device,
     };
+  }
+
+
+  async function cloudListDevice(device, token = state.cloudToken) {
+    if (!token || !device) return [];
+    const res = await gmRequest({
+      method: 'GET',
+      url: `${CLOUD_URL}/v1/backups?device=${encodeURIComponent(device)}`,
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      responseType: 'text',
+      timeout: 45000,
+    });
+    let body = {};
+    try { body = JSON.parse(res.responseText || res.response || '{}'); }
+    catch { throw new Error('pCloud中継Workerの応答を読み取れません。'); }
+    if (res.status < 200 || res.status >= 300 || !body.ok) {
+      throw new Error(`pCloud一覧 HTTP ${res.status}: ${body.error || '取得失敗'}`);
+    }
+    return (Array.isArray(body.backups) ? body.backups : [])
+      .slice()
+      .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
+  }
+
+  async function cloudListAll(token = state.cloudToken) {
+    if (!token) return [];
+    const res = await gmRequest({
+      method: 'GET',
+      url: `${CLOUD_URL}/v1/backups`,
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      responseType: 'text',
+      timeout: 45000,
+    });
+    let body = {};
+    try { body = JSON.parse(res.responseText || res.response || '{}'); }
+    catch { throw new Error('pCloud中継Workerの応答を読み取れません。'); }
+    if (res.status < 200 || res.status >= 300 || !body.ok) {
+      throw new Error(`pCloud一覧 HTTP ${res.status}: ${body.error || '取得失敗'}`);
+    }
+    return Array.isArray(body.backups) ? body.backups : [];
+  }
+
+  async function cloudFetchJson(item, token = state.cloudToken) {
+    if (!item?.id || !item?.sha256) throw new Error('pCloudバックアップ情報が不正です。');
+    const res = await gmRequest({
+      method: 'GET',
+      url: `${CLOUD_URL}/v1/backups/${encodeURIComponent(item.id)}`,
+      headers: { authorization: `Bearer ${token}` },
+      responseType: 'arraybuffer',
+      timeout: 45000,
+    });
+    if (res.status !== 200) throw new Error(`pCloud読込 HTTP ${res.status}`);
+    const raw =
+      res.response instanceof ArrayBuffer
+        ? new Uint8Array(res.response)
+        : ArrayBuffer.isView(res.response)
+          ? new Uint8Array(res.response.buffer, res.response.byteOffset, res.response.byteLength)
+          : new TextEncoder().encode(res.responseText || String(res.response || ''));
+    if (Number(item.size || 0) && raw.byteLength !== Number(item.size)) {
+      throw new Error('pCloudバックアップのサイズが一致しません。');
+    }
+    if (await cloudSha(raw) !== item.sha256) {
+      throw new Error('pCloudバックアップのSHA-256が一致しません。');
+    }
+    try {
+      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
+    } catch {
+      throw new Error('pCloudバックアップJSONが不正です。');
+    }
+  }
+
+  async function cloudWriteJson(device, payload, token = state.cloudToken) {
+    const textPayload = JSON.stringify(payload);
+    const bytes = new TextEncoder().encode(textPayload);
+    if (bytes.byteLength > 20 * 1024 * 1024) throw new Error('pCloud保存データが20MBを超えています。');
+    const sha = await cloudSha(bytes);
+    const res = await gmRequest({
+      method: 'POST',
+      url: `${CLOUD_URL}/v1/backups`,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-nrh-device': device,
+        'x-nrh-origin': location.origin,
+        'x-nrh-sha256': sha,
+        'x-nrh-version': VERSION,
+      },
+      data: textPayload,
+      responseType: 'text',
+      timeout: 60000,
+    });
+    let body = {};
+    try { body = JSON.parse(res.responseText || res.response || '{}'); }
+    catch { throw new Error('pCloud保存応答を読み取れません。'); }
+    if (res.status < 200 || res.status >= 300 || !body.ok) {
+      throw new Error(`pCloud保存 HTTP ${res.status}: ${body.error || '保存失敗'}`);
+    }
+    return body;
+  }
+
+  async function cloudLoadArchiveManifest(token = state.cloudToken) {
+    try {
+      const list = await cloudListDevice(CHAT_MANIFEST_DEVICE, token);
+      if (!list.length) return [];
+      const data = await cloudFetchJson(list[0], token);
+      const manifest = data?.preferences?.chatArchiveManifest;
+      if (Number(manifest?.schemaVersion) !== 1 || !Array.isArray(manifest?.entries)) return [];
+      return manifest.entries.filter((x) => x && typeof x.videoId === 'string' && x.videoId);
+    } catch (e) {
+      console.warn('[Member Chat Search] manifest load failed', e);
+      return [];
+    }
+  }
+
+  async function cloudWriteArchiveManifest(entries, token = state.cloudToken) {
+    if (!token) return false;
+    const clean = [];
+    const seen = new Set();
+    for (const row of Array.isArray(entries) ? entries : []) {
+      const videoId = String(row?.videoId || '');
+      if (!videoId || seen.has(videoId)) continue;
+      seen.add(videoId);
+      clean.push({
+        videoId,
+        title: String(row?.title || ''),
+        channel: String(row?.channel || ''),
+        count: Math.max(0, Number(row?.count || 0)),
+        backupId: String(row?.backupId || ''),
+        backupSha: String(row?.backupSha || ''),
+        backupSize: Math.max(0, Number(row?.backupSize || 0)),
+        backupCreatedAt: String(row?.backupCreatedAt || ''),
+        updatedAt: Number(row?.updatedAt || Date.now()),
+      });
+    }
+    const payload = {
+      app: 'Niji Research Helper',
+      version: VERSION,
+      dbVersion: 1,
+      exportedAt: new Date().toISOString(),
+      sourceOrigin: location.origin,
+      device: CHAT_MANIFEST_DEVICE,
+      stores: { videos: [], channels: [], wiki: [], pairs: [] },
+      preferences: {
+        chatArchiveManifest: {
+          app: 'YouTube Member Chat Search',
+          schemaVersion: 1,
+          entries: clean,
+        },
+      },
+    };
+    await cloudWriteJson(CHAT_MANIFEST_DEVICE, payload, token);
+    return true;
+  }
+
+  async function cloudUpsertArchiveManifest(chat, item) {
+    if (!state.cloudToken || !chat?.videoId || !item?.id) return;
+    try {
+      const entries = await cloudLoadArchiveManifest();
+      const map = new Map(entries.map((x) => [x.videoId, x]));
+      map.set(chat.videoId, {
+        ...(map.get(chat.videoId) || {}),
+        videoId: chat.videoId,
+        title: chat.title || '',
+        channel: chat.channel || '',
+        count: Array.isArray(chat.messages) ? chat.messages.length : Number(chat.count || 0),
+        backupId: String(item.id || ''),
+        backupSha: String(item.sha256 || ''),
+        backupSize: Number(item.size || 0),
+        backupCreatedAt: String(item.createdAt || ''),
+        updatedAt: Date.now(),
+      });
+      await cloudWriteArchiveManifest([...map.values()]);
+    } catch (e) {
+      console.warn('[Member Chat Search] manifest update failed', e);
+    }
   }
 
   function currentVideoMetadata(videoId) {
@@ -321,6 +515,12 @@
       state.cloudLastBackupId = String(match.id || '');
       state.cloudLastError = '';
       cloudUiStatus(`☁️ pCloud保存済み：${messages.length.toLocaleString()}件`);
+      try {
+        await writeArchiveIndexFromChat(verify, match);
+      } catch (e) {
+        console.warn('[Member Chat Search] cross index local write failed', e);
+      }
+      void cloudUpsertArchiveManifest(verify, match);
       return match;
     } catch (e) {
       const msg = `⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 120)} [${cloudDevice(videoId)}]`;
@@ -358,6 +558,8 @@
           };
 
           await writeCache(record);
+          try { await writeArchiveIndexFromChat(data, item); }
+          catch (e) { console.warn('[Member Chat Search] cross index restore write failed', e); }
           state.cacheRecord = record;
           state.cacheCompleted = true;
           state.messageMap = new Map();
@@ -475,6 +677,9 @@
         if (!db.objectStoreNames.contains(CACHE_STORE)) {
           db.createObjectStore(CACHE_STORE, { keyPath: 'videoId' });
         }
+        if (!db.objectStoreNames.contains(ARCHIVE_STORE)) {
+          db.createObjectStore(ARCHIVE_STORE, { keyPath: 'videoId' });
+        }
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error || new Error('キャッシュDBを開けませんでした。'));
@@ -522,6 +727,270 @@
       });
     } catch (e) {
       console.warn('[Member Chat Search] cache delete failed', e);
+    }
+  }
+
+
+  async function readArchiveIndex(videoId) {
+    if (!videoId || typeof indexedDB === 'undefined') return null;
+    const db = await openCacheDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(ARCHIVE_STORE, 'readonly');
+      const req = tx.objectStore(ARCHIVE_STORE).get(videoId);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error || new Error('横断検索DBを読み込めませんでした。'));
+    });
+  }
+
+  async function writeArchiveIndexFromChat(chat, item = null) {
+    if (!chat?.videoId || !Array.isArray(chat?.messages) || typeof indexedDB === 'undefined') return;
+    const db = await openCacheDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(ARCHIVE_STORE, 'readwrite');
+      const store = tx.objectStore(ARCHIVE_STORE);
+      const get = store.get(chat.videoId);
+      get.onsuccess = () => {
+        const prev = get.result || {};
+        store.put({
+          ...prev,
+          videoId: chat.videoId,
+          title: String(chat.title || prev.title || ''),
+          channel: String(chat.channel || prev.channel || ''),
+          count: chat.messages.length,
+          messages: chat.messages,
+          exportedAt: String(chat.exportedAt || prev.exportedAt || ''),
+          backupId: item?.id ? String(item.id) : String(prev.backupId || ''),
+          backupSha: item?.sha256 ? String(item.sha256) : String(prev.backupSha || ''),
+          backupSize: item?.size ? Number(item.size) : Number(prev.backupSize || 0),
+          backupCreatedAt: item?.createdAt ? String(item.createdAt) : String(prev.backupCreatedAt || ''),
+          updatedAt: Date.now(),
+        });
+      };
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error || new Error('横断検索DBの保存に失敗しました。'));
+      tx.onabort = () => reject(tx.error || new Error('横断検索DBの保存が中断されました。'));
+    });
+    void updateCrossStats();
+  }
+
+  async function archiveIndexStats() {
+    if (typeof indexedDB === 'undefined') return { archives: 0, messages: 0 };
+    const db = await openCacheDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(ARCHIVE_STORE, 'readonly');
+      const store = tx.objectStore(ARCHIVE_STORE);
+      let archives = 0;
+      let messages = 0;
+      const req = store.openCursor();
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve({ archives, messages });
+          return;
+        }
+        archives++;
+        messages += Number(cursor.value?.count || cursor.value?.messages?.length || 0);
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error || new Error('横断検索DBの集計に失敗しました。'));
+    });
+  }
+
+  async function updateCrossStats(note = '') {
+    const el = document.querySelector(`#${PANEL_ID} .mcs-cross-status`);
+    if (!el) return;
+    try {
+      const stats = await archiveIndexStats();
+      el.textContent = note || `横断DB：${stats.archives.toLocaleString()}本 / ${stats.messages.toLocaleString()}コメント`;
+    } catch (e) {
+      el.textContent = `横断DB確認失敗：${String(e?.message || e).slice(0, 100)}`;
+    }
+  }
+
+  async function searchArchiveIndex(raw, limit = CROSS_RESULT_LIMIT) {
+    const q = String(raw || '').trim();
+    if (!q) return { matches: [], truncated: false };
+    const db = await openCacheDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(ARCHIVE_STORE, 'readonly');
+      const store = tx.objectStore(ARCHIVE_STORE);
+      const req = store.openCursor();
+      const matches = [];
+      let finished = false;
+      const finish = (truncated = false) => {
+        if (finished) return;
+        finished = true;
+        resolve({ matches, truncated });
+      };
+      req.onsuccess = () => {
+        if (finished) return;
+        const cursor = req.result;
+        if (!cursor) {
+          finish(false);
+          return;
+        }
+        const archive = cursor.value || {};
+        for (const msg of Array.isArray(archive.messages) ? archive.messages : []) {
+          if (!matchesQuery(msg, q)) continue;
+          matches.push({
+            videoId: archive.videoId,
+            title: archive.title || archive.videoId,
+            channel: archive.channel || '',
+            archiveCreatedAt: archive.backupCreatedAt || archive.exportedAt || '',
+            msg,
+          });
+          if (matches.length >= limit) {
+            finish(true);
+            return;
+          }
+        }
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error || new Error('横断検索に失敗しました。'));
+    });
+  }
+
+  function archiveTimestampUrl(videoId, seconds) {
+    const u = new URL('/watch', location.origin);
+    u.searchParams.set('v', videoId);
+    u.searchParams.set('t', `${Math.max(0, Math.floor(Number(seconds) || 0))}s`);
+    return u.href;
+  }
+
+  function openArchiveTimestamp(videoId, seconds) {
+    if (getVideoId() === videoId) {
+      seekTo(seconds);
+      return;
+    }
+    location.assign(archiveTimestampUrl(videoId, seconds));
+  }
+
+  async function cloudSyncArchiveIndex() {
+    if (state.crossSyncBusy) return;
+    if (!state.cloudEnabled || !state.cloudToken) {
+      await updateCrossStats('pCloudに接続してから横断DBを同期してください。');
+      return;
+    }
+    state.crossSyncBusy = true;
+    updateCloudUi();
+    const syncBtn = document.querySelector(`#${PANEL_ID} .mcs-cross-sync`);
+    if (syncBtn) syncBtn.textContent = '同期中…';
+    try {
+      await updateCrossStats('pCloudのアーカイブ一覧を確認中…');
+
+      const manifestEntries = await cloudLoadArchiveManifest();
+      const manifestMap = new Map(manifestEntries.map((x) => [x.videoId, { ...x }]));
+
+      const all = await cloudListAll();
+      const newestByVideo = new Map();
+      for (const item of all) {
+        if (!isChatArchiveDevice(item?.device)) continue;
+        const videoId = videoIdFromCloudDevice(item.device);
+        const prev = newestByVideo.get(videoId);
+        if (!prev || Date.parse(item.createdAt || 0) > Date.parse(prev.createdAt || 0)) {
+          newestByVideo.set(videoId, item);
+        }
+      }
+
+      for (const [videoId, item] of newestByVideo) {
+        const old = manifestMap.get(videoId) || {};
+        manifestMap.set(videoId, {
+          ...old,
+          videoId,
+          backupId: item.id || old.backupId || '',
+          backupSha: item.sha256 || old.backupSha || '',
+          backupSize: Number(item.size || old.backupSize || 0),
+          backupCreatedAt: item.createdAt || old.backupCreatedAt || '',
+        });
+      }
+
+      const entries = [...manifestMap.values()];
+      if (!entries.length) {
+        await updateCrossStats('pCloudに保存済みのメン限チャットが見つかりませんでした。');
+        return;
+      }
+
+      let done = 0;
+      let downloaded = 0;
+      let skipped = 0;
+      let failed = 0;
+      let nextIndex = 0;
+
+      const worker = async () => {
+        while (true) {
+          const index = nextIndex++;
+          if (index >= entries.length) return;
+          const entry = entries[index];
+          const videoId = entry.videoId;
+          try {
+            const local = await readArchiveIndex(videoId);
+            let item = null;
+
+            const direct = newestByVideo.get(videoId);
+            if (direct) {
+              item = direct;
+            } else if (entry.backupId && entry.backupSha) {
+              item = {
+                id: entry.backupId,
+                sha256: entry.backupSha,
+                size: Number(entry.backupSize || 0),
+                createdAt: entry.backupCreatedAt || '',
+                device: cloudDevice(videoId),
+              };
+            }
+
+            if (item?.sha256 && local?.backupSha === item.sha256 && Array.isArray(local.messages) && local.messages.length) {
+              skipped++;
+            } else {
+              let chat = null;
+              let usedItem = item;
+              if (usedItem) {
+                try { chat = await cloudFetchBackup(usedItem, videoId); }
+                catch { chat = null; }
+              }
+              if (!chat) {
+                const list = await cloudList(videoId);
+                usedItem = list[0] || null;
+                if (!usedItem) throw new Error('pCloudバックアップが見つかりません');
+                chat = await cloudFetchBackup(usedItem, videoId);
+              }
+              await writeArchiveIndexFromChat(chat, usedItem);
+              entry.title = chat.title || entry.title || '';
+              entry.channel = chat.channel || entry.channel || '';
+              entry.count = chat.messages.length;
+              entry.backupId = String(usedItem.id || '');
+              entry.backupSha = String(usedItem.sha256 || '');
+              entry.backupSize = Number(usedItem.size || 0);
+              entry.backupCreatedAt = String(usedItem.createdAt || '');
+              entry.updatedAt = Date.now();
+              downloaded++;
+            }
+          } catch (e) {
+            failed++;
+            console.warn('[Member Chat Search] cross archive sync skipped', videoId, e);
+          } finally {
+            done++;
+            await updateCrossStats(`横断DB同期中：${done}/${entries.length}本（更新${downloaded} / 既存${skipped} / 失敗${failed}）`);
+          }
+        }
+      };
+
+      await Promise.all([worker(), worker(), worker()]);
+
+      try { await cloudWriteArchiveManifest(entries); }
+      catch (e) { console.warn('[Member Chat Search] manifest backfill failed', e); }
+
+      const stats = await archiveIndexStats();
+      await updateCrossStats(
+        `同期完了：${stats.archives.toLocaleString()}本 / ${stats.messages.toLocaleString()}コメント（今回更新${downloaded}、失敗${failed}）`
+      );
+      if (state.searchScope === 'global') scheduleCrossSearchRender(true);
+    } catch (e) {
+      await updateCrossStats(`横断DB同期失敗：${String(e?.message || e).slice(0, 120)}`);
+    } finally {
+      state.crossSyncBusy = false;
+      if (syncBtn) syncBtn.textContent = '☁️ pCloudから横断DB同期';
+      updateCloudUi();
     }
   }
 
@@ -2099,6 +2568,15 @@
       #${PANEL_ID} .mcs-cloud-token { width:100%; box-sizing:border-box; border:1px solid #bbb; border-radius:8px; padding:8px 9px; font:inherit; }
       #${PANEL_ID} .mcs-cloud-actions { display:flex; gap:6px; flex-wrap:wrap; }
       #${PANEL_ID} .mcs-cloud-actions button { border:0; border-radius:8px; background:#eee; padding:7px 9px; cursor:pointer; font-size:11px; }
+      #${PANEL_ID} .mcs-tabs { display:flex; gap:6px; }
+      #${PANEL_ID} .mcs-tab { flex:1; border:1px solid #ccc; border-radius:9px; background:#f4f4f4; color:#222; padding:8px 9px; font-weight:700; cursor:pointer; }
+      #${PANEL_ID} .mcs-tab.active { background:#0f0f0f; color:#fff; border-color:#0f0f0f; }
+      #${PANEL_ID} .mcs-cross-tools { display:grid; gap:6px; border:1px solid #e1e1e1; border-radius:10px; padding:8px; }
+      #${PANEL_ID} .mcs-cross-sync { border:0; border-radius:9px; background:#065fd4; color:#fff; padding:9px 10px; font-weight:700; cursor:pointer; }
+      #${PANEL_ID} .mcs-cross-sync[disabled] { opacity:.55; cursor:default; }
+      #${PANEL_ID} .mcs-cross-status { font-size:11px; color:#666; overflow-wrap:anywhere; }
+      #${PANEL_ID} .mcs-cross-video { padding:10px 12px 6px; background:#f7f7f7; border-bottom:1px solid #e5e5e5; font-weight:750; }
+      #${PANEL_ID} .mcs-cross-video small { display:block; margin-top:2px; color:#777; font-weight:500; }
       #${PANEL_ID} .mcs-results { overflow:auto; border-top:1px solid #e5e5e5; min-height:90px; -webkit-overflow-scrolling:touch; }
       #${PANEL_ID} .mcs-empty { padding:18px 14px; color:#777; text-align:center; }
       #${PANEL_ID} .mcs-row { display:block; width:100%; text-align:left; border:0; border-bottom:1px solid #eee; background:#fff; padding:10px 12px; cursor:pointer; color:#111; }
@@ -2116,6 +2594,9 @@
       html[dark] #${PANEL_ID} .mcs-row, ytd-app[dark] #${PANEL_ID} .mcs-row { background:#181818; color:#f1f1f1; border-color:#333; }
       html[dark] #${PANEL_ID} .mcs-results, ytd-app[dark] #${PANEL_ID} .mcs-results { border-color:#333; }
       html[dark] #${PANEL_ID} .mcs-close, ytd-app[dark] #${PANEL_ID} .mcs-close { background:#333; color:#fff; }
+      html[dark] #${PANEL_ID} .mcs-tab, ytd-app[dark] #${PANEL_ID} .mcs-tab { background:#292929; color:#f1f1f1; border-color:#555; }
+      html[dark] #${PANEL_ID} .mcs-tab.active, ytd-app[dark] #${PANEL_ID} .mcs-tab.active { background:#f1f1f1; color:#111; border-color:#f1f1f1; }
+      html[dark] #${PANEL_ID} .mcs-cross-video, ytd-app[dark] #${PANEL_ID} .mcs-cross-video { background:#222; border-color:#333; }
     `;
     document.documentElement.appendChild(style);
   }
@@ -2167,6 +2648,13 @@
     head.append(title, close);
 
     const controls = makeEl('div', { className: 'mcs-controls' });
+    const tabs = makeEl('div', { className: 'mcs-tabs' });
+    const currentTab = makeEl('button', { className: 'mcs-tab active', type: 'button', text: 'この動画' });
+    currentTab.dataset.scope = 'current';
+    const globalTab = makeEl('button', { className: 'mcs-tab', type: 'button', text: '全アーカイブ横断' });
+    globalTab.dataset.scope = 'global';
+    tabs.append(currentTab, globalTab);
+
     const load = makeEl('button', {
       className: 'mcs-load',
       type: 'button',
@@ -2202,11 +2690,17 @@
     cloudActions.append(cloudConnect, cloudRestore, cloudDisconnect);
     cloudWrap.append(cloudTitle, cloudStatusEl, cloudToken, cloudActions);
 
+    const crossTools = makeEl('div', { className: 'mcs-cross-tools' });
+    crossTools.hidden = true;
+    const crossSync = makeEl('button', { className: 'mcs-cross-sync', type: 'button', text: '☁️ pCloudから横断DB同期' });
+    const crossStatus = makeEl('div', { className: 'mcs-cross-status', text: '横断DBを確認中…' });
+    crossTools.append(crossSync, crossStatus);
+
     const help = makeEl('div', {
       className: 'mcs-help',
       text: '保存済みがあればローカル→pCloudの順で即読込し、無い配信アーカイブだけ自動取得します。取得完了後はpCloudへ自動保存します。',
     });
-    controls.append(load, statusEl, fastLabel, cloudWrap, search, help);
+    controls.append(tabs, load, statusEl, fastLabel, cloudWrap, crossTools, search, help);
 
     const results = makeEl('div', { className: 'mcs-results' });
     results.appendChild(makeEl('div', { className: 'mcs-empty', text: 'まだ取得していません。' }));
@@ -2243,8 +2737,136 @@
       if (videoId) void cloudRestoreLatest(videoId);
     });
     cloudDisconnect.addEventListener('click', () => void disconnectCloud());
+    crossSync.addEventListener('click', () => void cloudSyncArchiveIndex());
+    currentTab.addEventListener('click', () => setSearchScope('current'));
+    globalTab.addEventListener('click', () => setSearchScope('global'));
     search.addEventListener('input', renderSearchResults);
     updateCloudUi();
+    void updateCrossStats();
+  }
+
+
+  function setSearchScope(scope) {
+    state.searchScope = scope === 'global' ? 'global' : 'current';
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    for (const tab of panel.querySelectorAll('.mcs-tab')) {
+      tab.classList.toggle('active', tab.dataset.scope === state.searchScope);
+    }
+    const isGlobal = state.searchScope === 'global';
+    const load = panel.querySelector('.mcs-load');
+    const statusEl = panel.querySelector('.mcs-status');
+    const fastLabel = panel.querySelector('.mcs-fast-label');
+    const crossTools = panel.querySelector('.mcs-cross-tools');
+    const input = panel.querySelector('.mcs-search');
+    const help = panel.querySelector('.mcs-help');
+    if (load) load.hidden = isGlobal;
+    if (statusEl) statusEl.hidden = isGlobal;
+    if (fastLabel) fastLabel.hidden = isGlobal;
+    if (crossTools) crossTools.hidden = !isGlobal;
+    if (input) {
+      input.placeholder = isGlobal
+        ? '全アーカイブの本文・投稿者を検索（A | B でOR）'
+        : '本文・投稿者を検索（A | B でOR）';
+    }
+    if (help) {
+      help.textContent = isGlobal
+        ? 'pCloudに保存したメン限アーカイブを横断検索します。初回または新しいアーカイブを保存した後に「横断DB同期」を押してください。'
+        : '保存済みがあればローカル→pCloudの順で即読込し、無い配信アーカイブだけ自動取得します。取得完了後はpCloudへ自動保存します。';
+    }
+    renderSearchResults();
+    if (isGlobal) void updateCrossStats();
+  }
+
+  function scheduleCrossSearchRender(immediate = false) {
+    clearTimeout(state.crossSearchTimer);
+    state.crossSearchTimer = setTimeout(() => void renderCrossSearchResults(), immediate ? 0 : 140);
+  }
+
+  async function renderCrossSearchResults() {
+    if (state.searchScope !== 'global') return;
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    const results = panel.querySelector('.mcs-results');
+    const input = panel.querySelector('.mcs-search');
+    if (!results || !input) return;
+
+    const serial = ++state.crossSearchSerial;
+    const q = String(input.value || '').trim();
+
+    const clearResults = () => {
+      while (results.firstChild) results.removeChild(results.firstChild);
+    };
+    const showEmpty = (text) => {
+      clearResults();
+      results.appendChild(makeEl('div', { className: 'mcs-empty', text }));
+    };
+
+    if (!q) {
+      showEmpty('検索語を入力すると、保存済みメン限アーカイブ全体を検索します。');
+      return;
+    }
+
+    showEmpty('横断検索中…');
+
+    try {
+      const { matches, truncated } = await searchArchiveIndex(q);
+      if (serial !== state.crossSearchSerial || state.searchScope !== 'global') return;
+      if (!matches.length) {
+        showEmpty('該当するチャットはありません。');
+        return;
+      }
+
+      const groups = new Map();
+      for (const hit of matches) {
+        let group = groups.get(hit.videoId);
+        if (!group) {
+          group = {
+            videoId: hit.videoId,
+            title: hit.title || hit.videoId,
+            channel: hit.channel || '',
+            createdAt: hit.archiveCreatedAt || '',
+            rows: [],
+          };
+          groups.set(hit.videoId, group);
+        }
+        group.rows.push(hit.msg);
+      }
+
+      const ordered = [...groups.values()].sort((a, b) =>
+        Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0)
+      );
+
+      clearResults();
+      let rendered = 0;
+      for (const group of ordered) {
+        const heading = makeEl('div', { className: 'mcs-cross-video' });
+        heading.appendChild(document.createTextNode(`${group.title}（${group.rows.length}件）`));
+        if (group.channel) heading.appendChild(makeEl('small', { text: group.channel }));
+        results.appendChild(heading);
+
+        for (const m of group.rows) {
+          rendered++;
+          const row = makeEl('button', { className: 'mcs-row', type: 'button' });
+          const meta = makeEl('div', { className: 'mcs-meta' });
+          meta.appendChild(makeEl('span', { className: 'mcs-time', text: formatTime(m.seconds) }));
+          meta.appendChild(makeEl('span', { className: 'mcs-author', text: m.author || '（投稿者不明）' }));
+          if (rendered === 1) {
+            meta.appendChild(makeEl('span', {
+              className: 'mcs-count',
+              text: truncated ? `${CROSS_RESULT_LIMIT.toLocaleString()}件以上` : `${matches.length.toLocaleString()}件`,
+            }));
+          }
+          row.appendChild(meta);
+          row.appendChild(makeEl('div', { className: 'mcs-msg', text: m.message }));
+          row.addEventListener('click', () => openArchiveTimestamp(group.videoId, m.seconds));
+          results.appendChild(row);
+        }
+      }
+    } catch (e) {
+      if (serial !== state.crossSearchSerial) return;
+      showEmpty(`横断検索失敗：${String(e?.message || e).slice(0, 120)}`);
+    }
   }
 
   function status(text, isError = false) {
@@ -2337,6 +2959,19 @@
       ]));
       state.loadedVideoId = videoId;
       await persistSnapshot({ completed: true, inProgress: false, force: true });
+      try {
+        const meta = currentVideoMetadata(videoId);
+        await writeArchiveIndexFromChat({
+          videoId,
+          title: meta.title,
+          channel: meta.channel,
+          count: messages.length,
+          messages,
+          exportedAt: new Date().toISOString(),
+        });
+      } catch (e) {
+        console.warn('[Member Chat Search] cross index local completion write failed', e);
+      }
       status(`取得完了：${messages.length.toLocaleString()}件（API ${state.requestCount}回）`);
       setLoadButton('再取得', false);
       renderSearchResults();
@@ -2488,6 +3123,10 @@
   }
 
   function renderSearchResults() {
+    if (state.searchScope === 'global') {
+      scheduleCrossSearchRender();
+      return;
+    }
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
     const results = panel.querySelector('.mcs-results');
@@ -2685,6 +3324,7 @@
 
     void initializeCloudConfig().then(() => {
       if (state.videoId) void initializeVideoStorage(state.videoId);
+      void updateCrossStats();
     });
 
     setInterval(() => {
