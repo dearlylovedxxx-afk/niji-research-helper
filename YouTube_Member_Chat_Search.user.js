@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.0
+// @version      0.4.1
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.0';
+  const VERSION = '0.4.1';
 
   const state = {
     videoId: null,
@@ -66,8 +66,9 @@
   };
 
   const CACHE_DB_NAME = 'MarinaMemberChatSearchDB';
-  const CACHE_DB_VERSION = 2;
   const CACHE_STORE = 'videoCache';
+  const ARCHIVE_DB_NAME = 'MarinaMemberChatCrossSearchDB';
+  const ARCHIVE_DB_VERSION = 1;
   const ARCHIVE_STORE = 'archiveIndex';
   const CHAT_MANIFEST_DEVICE = 'ytchat_manifest_v1';
   const CROSS_RESULT_LIMIT = 1000;
@@ -77,6 +78,7 @@
   const CLOUD_CONFIG_KEY = 'mcs_pcloud_config_v1';
   const CLOUD_SCHEMA_VERSION = 1;
   let cacheDbPromise = null;
+  let archiveDbPromise = null;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -671,20 +673,57 @@
   function openCacheDb() {
     if (cacheDbPromise) return cacheDbPromise;
     cacheDbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(CACHE_DB_NAME, CACHE_DB_VERSION);
+      // 既存の動画キャッシュDBはバージョンを上げない。
+      // 他のYouTubeタブが旧版DBを開いたままでも取得開始をブロックしないため。
+      const req = indexedDB.open(CACHE_DB_NAME);
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains(CACHE_STORE)) {
           db.createObjectStore(CACHE_STORE, { keyPath: 'videoId' });
         }
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
+      req.onerror = () => {
+        cacheDbPromise = null;
+        reject(req.error || new Error('キャッシュDBを開けませんでした。'));
+      };
+      req.onblocked = () => {
+        cacheDbPromise = null;
+        reject(new Error('キャッシュDBが別タブで使用中です。YouTubeの古いタブを再読み込みしてください。'));
+      };
+    });
+    return cacheDbPromise;
+  }
+
+  function openArchiveDb() {
+    if (archiveDbPromise) return archiveDbPromise;
+    archiveDbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(ARCHIVE_DB_NAME, ARCHIVE_DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
         if (!db.objectStoreNames.contains(ARCHIVE_STORE)) {
           db.createObjectStore(ARCHIVE_STORE, { keyPath: 'videoId' });
         }
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || new Error('キャッシュDBを開けませんでした。'));
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
+      req.onerror = () => {
+        archiveDbPromise = null;
+        reject(req.error || new Error('横断検索DBを開けませんでした。'));
+      };
+      req.onblocked = () => {
+        archiveDbPromise = null;
+        reject(new Error('横断検索DBが別タブで使用中です。'));
+      };
     });
-    return cacheDbPromise;
+    return archiveDbPromise;
   }
 
   async function readCache(videoId) {
@@ -733,7 +772,7 @@
 
   async function readArchiveIndex(videoId) {
     if (!videoId || typeof indexedDB === 'undefined') return null;
-    const db = await openCacheDb();
+    const db = await openArchiveDb();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(ARCHIVE_STORE, 'readonly');
       const req = tx.objectStore(ARCHIVE_STORE).get(videoId);
@@ -744,7 +783,7 @@
 
   async function writeArchiveIndexFromChat(chat, item = null) {
     if (!chat?.videoId || !Array.isArray(chat?.messages) || typeof indexedDB === 'undefined') return;
-    const db = await openCacheDb();
+    const db = await openArchiveDb();
     await new Promise((resolve, reject) => {
       const tx = db.transaction(ARCHIVE_STORE, 'readwrite');
       const store = tx.objectStore(ARCHIVE_STORE);
@@ -775,7 +814,7 @@
 
   async function archiveIndexStats() {
     if (typeof indexedDB === 'undefined') return { archives: 0, messages: 0 };
-    const db = await openCacheDb();
+    const db = await openArchiveDb();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(ARCHIVE_STORE, 'readonly');
       const store = tx.objectStore(ARCHIVE_STORE);
@@ -810,7 +849,7 @@
   async function searchArchiveIndex(raw, limit = CROSS_RESULT_LIMIT) {
     const q = String(raw || '').trim();
     if (!q) return { matches: [], truncated: false };
-    const db = await openCacheDb();
+    const db = await openArchiveDb();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(ARCHIVE_STORE, 'readonly');
       const store = tx.objectStore(ARCHIVE_STORE);
