@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.5.4
+// @version      0.5.5
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.5.4';
+  const VERSION = '0.5.5';
 
   const state = {
     videoId: null,
@@ -79,6 +79,7 @@
   const FAST_OVERLAP_MS = 60 * 1000;
   const CLOUD_URL = 'https://niji-research-backup.dearlylovedxxx.workers.dev';
   const CLOUD_CONFIG_KEY = 'mcs_pcloud_config_v1';
+  const TIMESTAMP_HANDOFF_KEY = 'mcs_timestamp_handoff_v1';
   const CLOUD_SCHEMA_VERSION = 1;
   let cacheDbPromise = null;
   let archiveDbPromise = null;
@@ -122,6 +123,35 @@
       return GM.setValue(key, value);
     }
     throw new Error('MacaqueのGM.setValueが利用できません。');
+  }
+
+  async function saveTimestampHandoff(videoId, seconds) {
+    const id = String(videoId || '').trim();
+    const target = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (!id) return;
+    await gmSetValue(TIMESTAMP_HANDOFF_KEY, {
+      videoId: id,
+      seconds: target,
+      createdAt: Date.now(),
+      source: 'member-cross-search',
+    });
+  }
+
+  async function consumeTimestampHandoff() {
+    const id = getVideoId();
+    if (!id) return null;
+    const handoff = await gmGetValue(TIMESTAMP_HANDOFF_KEY, null);
+    if (!handoff || String(handoff.videoId || '') !== id) return null;
+
+    const age = Date.now() - Number(handoff.createdAt || 0);
+    const seconds = Number(handoff.seconds);
+    if (!Number.isFinite(seconds) || age < 0 || age > 2 * 60 * 1000) {
+      await gmSetValue(TIMESTAMP_HANDOFF_KEY, null).catch(() => {});
+      return null;
+    }
+
+    await gmSetValue(TIMESTAMP_HANDOFF_KEY, null).catch(() => {});
+    return Math.max(0, seconds);
   }
 
   function cloudDevice(videoId) {
@@ -3404,6 +3434,25 @@
             row.href = archiveTimestampUrl(group.videoId, msg.seconds);
             row.target = '_blank';
             row.rel = 'noopener';
+            row.addEventListener('click', (event) => {
+              // URLのt=だけではYouTubeの「前回の続き」に負けることがあるため、
+              // クリックした正確な時刻をGM領域でも渡す。
+              event.preventDefault();
+              const href = row.href;
+              const targetWin = win.open('about:blank', '_blank');
+              void saveTimestampHandoff(group.videoId, msg.seconds)
+                .catch((e) => console.debug('[Member Chat Search] timestamp handoff save failed', e))
+                .finally(() => {
+                  if (targetWin && !targetWin.closed) {
+                    try {
+                      targetWin.opener = null;
+                      targetWin.location.replace(href);
+                      return;
+                    } catch { /* fallback below */ }
+                  }
+                  win.location.href = href;
+                });
+            });
 
             const time = doc.createElement('span');
             time.className = 'mcsx-time';
@@ -4014,6 +4063,107 @@
     }
   }
 
+  function startTimestampGuard(videoId, seconds, source = 'url') {
+    const target = Math.max(0, Number(seconds) || 0);
+    const serial = ++state.timestampGuardSerial;
+    const guardStartedAt = Date.now();
+    const guardUntil = guardStartedAt + 35_000;
+
+    let reachedTarget = false;
+    let anchorWallAt = 0;
+    let anchorVideoAt = target;
+    let correctionBusy = false;
+    let intervalId = null;
+
+    const currentVideo = () => {
+      if (serial !== state.timestampGuardSerial) return null;
+      if (videoId && getVideoId() !== videoId) return null;
+      return document.querySelector('video');
+    };
+
+    const expectedNow = (video) => {
+      if (!reachedTarget || !anchorWallAt) return target;
+      if (video.paused) return anchorVideoAt;
+      const elapsed = Math.max(0, (Date.now() - anchorWallAt) / 1000);
+      const rate = Number.isFinite(Number(video.playbackRate)) ? Number(video.playbackRate) : 1;
+      return anchorVideoAt + elapsed * rate;
+    };
+
+    const markReached = (video) => {
+      reachedTarget = true;
+      anchorWallAt = Date.now();
+      anchorVideoAt = Number(video.currentTime) || target;
+    };
+
+    const hardSeek = (video, to, reason) => {
+      try {
+        video.currentTime = Math.max(0, to);
+        console.info('[Member Chat Search] timestamp corrected', {
+          videoId, target, to, source, reason,
+        });
+      } catch (e) {
+        console.debug('[Member Chat Search] timestamp correction failed', e);
+      }
+    };
+
+    const check = () => {
+      if (Date.now() > guardUntil || serial !== state.timestampGuardSerial) {
+        if (intervalId) clearInterval(intervalId);
+        return;
+      }
+
+      const video = currentVideo();
+      if (!video || video.readyState < 1) return;
+
+      const current = Number(video.currentTime);
+      if (!Number.isFinite(current)) return;
+
+      if (!reachedTarget) {
+        if (Math.abs(current - target) <= 7) {
+          markReached(video);
+          return;
+        }
+
+        // 最初のURL指定自体がYouTubeの復元位置に負けていたら、まず指定時刻へ合わせる。
+        hardSeek(video, target, 'initial timestamp');
+        setTimeout(() => {
+          const v = currentVideo();
+          if (v && Math.abs(Number(v.currentTime) - target) <= 8) markReached(v);
+        }, 180);
+        return;
+      }
+
+      const expected = expectedNow(video);
+      const diff = Math.abs(current - expected);
+
+      // いったん指定時刻で再生できた後、YouTubeの「前回の続き」で大きく飛ばされたら
+      // その“飛ばされた後”を検出してから戻す。小さなズレや通常再生には干渉しない。
+      if (diff >= 12 && !correctionBusy) {
+        correctionBusy = true;
+        setTimeout(() => {
+          correctionBusy = false;
+          const v = currentVideo();
+          if (!v || v.readyState < 1) return;
+          const now = Number(v.currentTime);
+          if (!Number.isFinite(now)) return;
+          const want = expectedNow(v);
+          if (Math.abs(now - want) >= 12) {
+            hardSeek(v, want, 'late YouTube resume override');
+            anchorWallAt = Date.now();
+            anchorVideoAt = want;
+          }
+        }, 220);
+      }
+    };
+
+    // video要素の生成・差し替えや遅い視聴履歴復元にも対応。
+    intervalId = setInterval(check, 350);
+    for (const delay of [50, 150, 400, 900, 1600, 2600, 4200, 6500, 9000, 13000, 18000, 25000, 32000]) {
+      setTimeout(check, delay);
+    }
+    setTimeout(() => { if (intervalId) clearInterval(intervalId); }, 36_000);
+  }
+
   function applyUrlTimestampOnce() {
     const seconds = getTimestampFromCurrentUrl();
     if (seconds === null) return;
@@ -4022,47 +4172,17 @@
     if (state.lastAppliedTimestampUrl === key) return;
     state.lastAppliedTimestampUrl = key;
 
-    const videoId = getVideoId();
-    const target = Math.max(0, Number(seconds) || 0);
-    const serial = ++state.timestampGuardSerial;
-    const startedAt = Date.now();
+    startTimestampGuard(getVideoId(), seconds, 'url');
+  }
 
-    // YouTubeはURLのt=を一度反映したあと、数秒遅れて「前回の続き」を
-    // 上書きすることがある。v0.5.2以前は最初の位置が合っていると監視を
-    // すぐ終了していたため、後から飛ばされるケースを拾えなかった。
-    const delays = [80, 300, 700, 1300, 2200, 3500, 5200, 7500, 10000, 13000];
-
-    const guardSeek = () => {
-      if (serial !== state.timestampGuardSerial) return;
-      if (videoId && getVideoId() !== videoId) return;
-
-      const video = document.querySelector('video');
-      if (!video || video.readyState < 1) return;
-
-      try {
-        const current = Number(video.currentTime);
-        if (!Number.isFinite(current)) return;
-
-        const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
-        const rate = Number.isFinite(Number(video.playbackRate)) ? Number(video.playbackRate) : 1;
-        const expected = target + (video.paused ? 0 : elapsed * rate);
-
-        // 指定位置から普通に再生が進んでいる場合は触らない。
-        // 前回視聴位置へ大きく飛ばされた時だけ、指定時刻へ戻す。
-        const nearTarget = Math.abs(current - target) <= 6;
-        const nearExpected = Math.abs(current - expected) <= 8;
-        if (!nearTarget && !nearExpected) {
-          video.currentTime = target;
-          console.info('[Member Chat Search] YouTube resume position overridden', {
-            videoId, target, previous: current,
-          });
-        }
-      } catch (e) {
-        console.debug('[Member Chat Search] timestamp guard failed', e);
-      }
-    };
-
-    for (const delay of delays) setTimeout(guardSeek, delay);
+  async function applyTimestampHandoff() {
+    try {
+      const seconds = await consumeTimestampHandoff();
+      if (seconds === null) return;
+      startTimestampGuard(getVideoId(), seconds, 'cross-search handoff');
+    } catch (e) {
+      console.debug('[Member Chat Search] timestamp handoff failed', e);
+    }
   }
 
   function resetForNavigation() {
@@ -4071,6 +4191,7 @@
     // 同じ動画でt=だけ変わった場合も、外部リンクの指定時刻を優先する。
     if (id === state.videoId) {
       applyUrlTimestampOnce();
+      void applyTimestampHandoff();
       return;
     }
 
@@ -4097,6 +4218,7 @@
     renderSearchResults();
     if (id) void initializeVideoStorage(id);
     applyUrlTimestampOnce();
+    void applyTimestampHandoff();
   }
 
   function boot() {
@@ -4104,6 +4226,7 @@
     createUi();
     state.videoId = getVideoId();
     applyUrlTimestampOnce();
+    void applyTimestampHandoff();
 
     document.addEventListener('yt-navigate-finish', resetForNavigation, true);
     window.addEventListener('popstate', resetForNavigation);
@@ -4114,6 +4237,7 @@
       } else if (!document.hidden && state.videoId && !state.loading) {
         void initializeVideoStorage(state.videoId);
         applyUrlTimestampOnce();
+        void applyTimestampHandoff();
       }
     });
 
