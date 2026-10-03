@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.3
+// @version      0.4.4
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.3';
+  const VERSION = '0.4.4';
 
   const state = {
     videoId: null,
@@ -58,6 +58,7 @@
     cloudStatus: '未接続',
     cloudLastBackupId: '',
     cloudLastError: '',
+    cloudUploadPromise: null,
     searchScope: 'current',
     crossSyncBusy: false,
     crossSearchSerial: 0,
@@ -486,9 +487,21 @@
 
   async function cloudUploadCompleted(videoId, messages, { silent = false } = {}) {
     if (!state.cloudEnabled || !state.cloudToken || !videoId || !messages?.length) return null;
+
+    // ページ読込時の自動保存と手動「再保存」が重なったら、同じ保存処理を共有する。
+    if (state.cloudUploadPromise) {
+      if (!silent) cloudUiStatus('☁️ すでに保存中です。完了を待っています…');
+      try {
+        return await state.cloudUploadPromise;
+      } catch (e) {
+        console.warn('[Member Chat Search] shared cloud upload failed', e);
+        return null;
+      }
+    }
+
     if (state.cloudBusy) {
-      if (!silent) cloudUiStatus('☁️ 他のpCloud処理の完了待ち…');
-      try { await waitForCloudIdle(); }
+      if (!silent) cloudUiStatus('☁️ 別のpCloud処理の完了待ち…');
+      try { await waitForCloudIdle(180000); }
       catch (e) {
         const msg = `⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 120)} [${cloudDevice(videoId)}]`;
         cloudUiStatus(msg, true);
@@ -496,78 +509,89 @@
       }
     }
 
-    state.cloudBusy = true;
-    if (!silent) cloudUiStatus('☁️ pCloudへ保存中…');
-    try {
-      const payload = cloudPayload(videoId, messages);
-      const textPayload = JSON.stringify(payload);
-      const bytes = new TextEncoder().encode(textPayload);
-      if (bytes.byteLength > 20 * 1024 * 1024) {
-        throw new Error('チャット保存データが20MBを超えています。');
-      }
-      const sha = await cloudSha(bytes);
-
-      const res = await gmRequest({
-        method: 'POST',
-        url: `${CLOUD_URL}/v1/backups`,
-        headers: {
-          authorization: `Bearer ${state.cloudToken}`,
-          accept: 'application/json',
-          'content-type': 'application/json',
-          'x-nrh-device': cloudDevice(videoId),
-          'x-nrh-origin': location.origin,
-          'x-nrh-sha256': sha,
-          'x-nrh-version': VERSION,
-        },
-        data: textPayload,
-        responseType: 'text',
-        timeout: 60000,
-      });
-
-      let body = {};
-      try { body = JSON.parse(res.responseText || res.response || '{}'); }
-      catch { throw new Error('pCloud保存応答を読み取れません。'); }
-
-      if (res.status < 200 || res.status >= 300 || !body.ok) {
-        throw new Error(`pCloud保存 HTTP ${res.status}: ${body.error || '保存失敗'}`);
-      }
-
-      const list = await cloudList(videoId);
-      const match =
-        (body.backup?.id ? list.find((x) => x.id === body.backup.id) : null) ||
-        list.find((x) => x.sha256 === sha && Number(x.size || 0) === bytes.byteLength);
-
-      if (!match) throw new Error('pCloud保存後の世代確認に失敗しました。');
-
-      const verify = await cloudFetchBackup(match, videoId);
-      if (verify.count !== messages.length) {
-        throw new Error('pCloud保存後の件数照合に失敗しました。');
-      }
-
-      state.cloudLastBackupId = String(match.id || '');
-      state.cloudLastError = '';
-      cloudUiStatus(`☁️ pCloud保存済み：${messages.length.toLocaleString()}件`);
-      try {
-        await writeArchiveIndexFromChat(verify, match);
-      } catch (e) {
-        console.warn('[Member Chat Search] cross index local write failed', e);
-      }
-      void cloudUpsertArchiveManifest(verify, match);
-      return match;
-    } catch (e) {
-      const msg = `⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 120)} [${cloudDevice(videoId)}]`;
-      cloudUiStatus(msg, true);
-      console.warn('[Member Chat Search] cloud upload failed', e);
-      return null;
-    } finally {
-      state.cloudBusy = false;
+    const task = (async () => {
+      state.cloudBusy = true;
       updateCloudUi();
+      if (!silent) cloudUiStatus('☁️ pCloudへ保存中…');
+      try {
+        const payload = cloudPayload(videoId, messages);
+        const textPayload = JSON.stringify(payload);
+        const bytes = new TextEncoder().encode(textPayload);
+        if (bytes.byteLength > 20 * 1024 * 1024) {
+          throw new Error('チャット保存データが20MBを超えています。');
+        }
+        const sha = await cloudSha(bytes);
+
+        const res = await gmRequest({
+          method: 'POST',
+          url: `${CLOUD_URL}/v1/backups`,
+          headers: {
+            authorization: `Bearer ${state.cloudToken}`,
+            accept: 'application/json',
+            'content-type': 'application/json',
+            'x-nrh-device': cloudDevice(videoId),
+            'x-nrh-origin': location.origin,
+            'x-nrh-sha256': sha,
+            'x-nrh-version': VERSION,
+          },
+          data: textPayload,
+          responseType: 'text',
+          timeout: 90000,
+        });
+
+        let body = {};
+        try { body = JSON.parse(res.responseText || res.response || '{}'); }
+        catch { throw new Error('pCloud保存応答を読み取れません。'); }
+
+        if (res.status < 200 || res.status >= 300 || !body.ok) {
+          throw new Error(`pCloud保存 HTTP ${res.status}: ${body.error || '保存失敗'}`);
+        }
+
+        const list = await cloudList(videoId);
+        const match =
+          (body.backup?.id ? list.find((x) => x.id === body.backup.id) : null) ||
+          list.find((x) => x.sha256 === sha && Number(x.size || 0) === bytes.byteLength);
+
+        if (!match) throw new Error('pCloud保存後の世代確認に失敗しました。');
+
+        const verify = await cloudFetchBackup(match, videoId);
+        if (verify.count !== messages.length) {
+          throw new Error('pCloud保存後の件数照合に失敗しました。');
+        }
+
+        state.cloudLastBackupId = String(match.id || '');
+        state.cloudLastError = '';
+        cloudUiStatus(`☁️ pCloud保存済み：${messages.length.toLocaleString()}件`);
+        try {
+          await writeArchiveIndexFromChat(verify, match);
+        } catch (e) {
+          console.warn('[Member Chat Search] cross index local write failed', e);
+        }
+        void cloudUpsertArchiveManifest(verify, match);
+        return match;
+      } catch (e) {
+        const msg = `⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 120)} [${cloudDevice(videoId)}]`;
+        cloudUiStatus(msg, true);
+        console.warn('[Member Chat Search] cloud upload failed', e);
+        return null;
+      } finally {
+        state.cloudBusy = false;
+        updateCloudUi();
+      }
+    })();
+
+    state.cloudUploadPromise = task;
+    try {
+      return await task;
+    } finally {
+      if (state.cloudUploadPromise === task) state.cloudUploadPromise = null;
     }
   }
 
   async function cloudRestoreLatest(videoId, { silent = false } = {}) {
     if (!state.cloudEnabled || !state.cloudToken || !videoId || state.cloudBusy) return false;
     state.cloudBusy = true;
+    updateCloudUi();
     if (!silent) cloudUiStatus('☁️ pCloudを確認中…');
 
     try {
@@ -647,6 +671,7 @@
 
     let connected = false;
     state.cloudBusy = true;
+    updateCloudUi();
     cloudUiStatus('☁️ pCloud接続を確認中…');
 
     try {
@@ -1615,10 +1640,14 @@
     return new Promise((resolve, reject) => {
       let settled = false;
       let control = null;
+      let hardTimer = null;
+      const requestedTimeout = Math.max(1000, Number(details?.timeout || 45000));
+      const hardTimeoutMs = requestedTimeout + 5000;
 
       const finish = (fn, value) => {
         if (settled) return;
         settled = true;
+        if (hardTimer) clearTimeout(hardTimer);
         if (signal) signal.removeEventListener('abort', onAbort);
         fn(value);
       };
@@ -1642,6 +1671,12 @@
           onerror: (error) => finish(reject, new Error(error?.error || error?.message || 'GM request failed')),
           ontimeout: () => finish(reject, new Error('GM request timeout')),
         });
+
+        // Macaque側でtimeoutが効かない場合でも、JS側で必ず解除する。
+        hardTimer = setTimeout(() => {
+          try { control?.abort?.(); } catch { /* ignore */ }
+          finish(reject, new Error(`GM request hard timeout (${Math.round(hardTimeoutMs / 1000)}s)`));
+        }, hardTimeoutMs);
       } catch (e) {
         finish(reject, e);
       }
