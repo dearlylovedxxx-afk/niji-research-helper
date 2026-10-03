@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.1
+// @version      0.4.2
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.1';
+  const VERSION = '0.4.2';
 
   const state = {
     videoId: null,
@@ -81,6 +81,18 @@
   let archiveDbPromise = null;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function withTimeout(promise, ms, label = '処理') {
+    let timer = null;
+    return Promise.race([
+      Promise.resolve(promise),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label}がタイムアウトしました`)), ms);
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
 
   async function gmGetValue(key, fallback) {
     try {
@@ -1074,7 +1086,7 @@
         updatedAt: Date.now(),
         requestCount: state.requestCount,
       };
-      await writeCache(record);
+      await withTimeout(writeCache(record), 4000, 'ローカルキャッシュ保存');
       state.cacheRecord = record;
       state.cacheCompleted = record.completed;
       state.messages = messages;
@@ -1112,7 +1124,13 @@
 
   async function restoreCacheForVideo(videoId, { allowAutoResume = true } = {}) {
     if (!videoId) return;
-    let record = await readCache(videoId);
+    let record = null;
+    try {
+      record = await withTimeout(readCache(videoId), 3000, 'ローカルキャッシュ確認');
+    } catch (e) {
+      console.warn('[Member Chat Search] cache restore skipped', e);
+      record = null;
+    }
     if (getVideoId() !== videoId) return;
 
     // v0.1.xまでの保存データはTop Chat由来の可能性があるため再利用しない。
@@ -2935,27 +2953,47 @@
       return;
     }
 
-    if (!autoResume && state.cacheCompleted) {
-      await deleteCache(videoId);
-      state.cacheRecord = null;
-      state.cacheCompleted = false;
-      state.messages = [];
-      state.messageMap = new Map();
-      state.workerProgress = [];
+    // クリック直後に必ずUIを反応させる。IndexedDB確認が詰まっても無反応に見せない。
+    state.videoId = videoId;
+    state.loading = true;
+    state.manualAbort = false;
+    state.abortController = new AbortController();
+    state.loadedVideoId = null;
+    setLoadButton('中止', false);
+    status('取得準備中…');
+    renderSearchResults();
+
+    let cache = null;
+    try {
+      if (!autoResume && state.cacheCompleted) {
+        await withTimeout(deleteCache(videoId), 2500, '旧キャッシュ削除');
+        state.cacheRecord = null;
+        state.cacheCompleted = false;
+        state.messages = [];
+        state.messageMap = new Map();
+        state.workerProgress = [];
+      }
+
+      cache = state.cacheRecord?.videoId === videoId
+        ? state.cacheRecord
+        : await withTimeout(readCache(videoId), 3000, 'ローカルキャッシュ確認');
+
+      if (cache && cache.chatMode !== 'all-v2') {
+        await withTimeout(deleteCache(videoId), 2500, '旧形式キャッシュ削除').catch(() => {});
+        cache = null;
+        state.cacheRecord = null;
+        state.cacheCompleted = false;
+        state.messages = [];
+        state.messageMap = new Map();
+        state.workerProgress = [];
+        status('旧バージョンの保存データを無視して、全チャットを最初から取得します。');
+      }
+    } catch (e) {
+      console.warn('[Member Chat Search] cache preflight skipped', e);
+      cache = null;
+      status('ローカルキャッシュ確認をスキップして取得を開始します…');
     }
 
-    let cache = state.cacheRecord?.videoId === videoId ? state.cacheRecord : await readCache(videoId);
-    if (cache && cache.chatMode !== 'all-v2') {
-      await deleteCache(videoId);
-      cache = null;
-      state.cacheRecord = null;
-      state.cacheCompleted = false;
-      state.messages = [];
-      state.messageMap = new Map();
-      state.workerProgress = [];
-      setLoadButton('チャットを取得', false);
-      status('旧バージョンの保存データを破棄しました。全チャットを最初から取得します。');
-    }
     if (cache && !state.messages.length) {
       state.messages = cache.messages || [];
       state.messageMap = new Map();
@@ -2965,13 +3003,7 @@
       }
     }
 
-    state.videoId = videoId;
-    state.loading = true;
-    state.manualAbort = false;
-    state.abortController = new AbortController();
-    state.loadedVideoId = null;
-    setLoadButton('中止', false);
-    status(autoResume || cache?.messages?.length ? '保存済みデータから続き取得を開始…' : '準備中…');
+    status(autoResume || cache?.messages?.length ? '保存済みデータから続き取得を開始…' : 'Chat Replay取得を開始します…');
     renderSearchResults();
 
     const fastInput = document.querySelector(`#${PANEL_ID} .mcs-fast`);
@@ -2980,7 +3012,7 @@
     // 新規取得時だけ空の開始記録を保存。再開時に巨大な全件スナップショットを
     // もう一度書き直してから開始する無駄を避ける。
     if (!cache?.messages?.length) {
-      await persistSnapshot({ completed: false, inProgress: true, force: true });
+      void persistSnapshot({ completed: false, inProgress: true, force: true });
     }
 
     try {
