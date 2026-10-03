@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.9
+// @version      0.5.0
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.9';
+  const VERSION = '0.5.0';
 
   const state = {
     videoId: null,
@@ -384,6 +384,7 @@
         channel: String(row?.channel || ''),
         count: Math.max(0, Number(row?.count || 0)),
         memberOnly: row?.memberOnly === true ? true : row?.memberOnly === false ? false : null,
+        publishedAt: String(row?.publishedAt || ''),
         backupId: String(row?.backupId || ''),
         backupSha: String(row?.backupSha || ''),
         backupSize: Math.max(0, Number(row?.backupSize || 0)),
@@ -423,6 +424,7 @@
         channel: chat.channel || '',
         count: Array.isArray(chat.messages) ? chat.messages.length : Number(chat.count || 0),
         memberOnly: chat.memberOnly === true ? true : chat.memberOnly === false ? false : null,
+        publishedAt: String(chat.publishedAt || ''),
         backupId: String(item.id || ''),
         backupSha: String(item.sha256 || ''),
         backupSize: Number(item.size || 0),
@@ -435,9 +437,20 @@
     }
   }
 
+  function publishedAtFromPlayerResponse(player) {
+    const micro = player?.microformat?.playerMicroformatRenderer || {};
+    return String(
+      micro?.liveBroadcastDetails?.startTimestamp ||
+      micro?.publishDate ||
+      micro?.uploadDate ||
+      ''
+    ).trim();
+  }
+
   function currentVideoMetadata(videoId) {
     let title = '';
     let channel = '';
+    let publishedAt = '';
     try {
       title =
         document.querySelector('h1 yt-formatted-string')?.textContent?.trim() ||
@@ -447,9 +460,26 @@
         document.querySelector('ytd-channel-name a')?.textContent?.trim() ||
         document.querySelector('#owner-name a')?.textContent?.trim() ||
         '';
+      let page = window;
+      if (typeof unsafeWindow !== 'undefined') page = unsafeWindow;
+      publishedAt = publishedAtFromPlayerResponse(page?.ytInitialPlayerResponse);
+      publishedAt ||= document.querySelector('meta[itemprop="datePublished"]')?.content || '';
+      publishedAt ||= document.querySelector('meta[itemprop="uploadDate"]')?.content || '';
     } catch { /* ignore */ }
 
-    return { videoId, title, channel };
+    return { videoId, title, channel, publishedAt: String(publishedAt || '').trim() };
+  }
+
+  function archiveDateLabel(value = '') {
+    const raw = String(value || '').trim();
+    if (!raw) return '日付不明';
+    const ymd = raw.match(/^(20\d{2})-(\d{2})-(\d{2})/);
+    if (ymd) return `${ymd[1]}/${ymd[2]}/${ymd[3]}`;
+    const d = new Date(raw);
+    if (Number.isNaN(d.getTime())) return '日付不明';
+    return new Intl.DateTimeFormat('ja-JP', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(d);
   }
 
   function memberOnlyFromInitialData(initialData) {
@@ -486,18 +516,24 @@
     return null;
   }
 
-  async function detectMemberOnlyVideo(videoId, { allowDom = true } = {}) {
-    if (!videoId) return null;
+  async function inspectVideoArchiveFacts(videoId, { allowDom = true } = {}) {
+    if (!videoId) return { memberOnly: null, publishedAt: '' };
+
+    let memberOnly = null;
+    let publishedAt = '';
 
     if (allowDom) {
       const dom = memberOnlyFromDom(videoId);
-      if (dom === true) return true;
+      if (dom === true) memberOnly = true;
 
       try {
         let page = window;
         if (typeof unsafeWindow !== 'undefined') page = unsafeWindow;
         const pageResult = memberOnlyFromInitialData(page?.ytInitialData);
-        if (pageResult === true) return true;
+        if (pageResult === true) memberOnly = true;
+        publishedAt = publishedAtFromPlayerResponse(page?.ytInitialPlayerResponse) || '';
+        publishedAt ||= document.querySelector('meta[itemprop="datePublished"]')?.content || '';
+        publishedAt ||= document.querySelector('meta[itemprop="uploadDate"]')?.content || '';
       } catch { /* ignore */ }
     }
 
@@ -506,12 +542,18 @@
       const timer = setTimeout(() => controller.abort(), 25000);
       const desktop = await fetchDesktopWatchDataViaGM(videoId, controller.signal);
       clearTimeout(timer);
-      const result = memberOnlyFromInitialData(desktop?.initialData);
-      if (result !== null) return result;
+      const freshMember = memberOnlyFromInitialData(desktop?.initialData);
+      if (freshMember !== null) memberOnly = freshMember;
+      publishedAt ||= String(desktop?.publishedAt || '').trim();
     } catch (e) {
-      if (e?.name !== 'AbortError') console.warn('[Member Chat Search] member-only detection failed', videoId, e);
+      if (e?.name !== 'AbortError') console.warn('[Member Chat Search] archive facts detection failed', videoId, e);
     }
-    return null;
+
+    return { memberOnly, publishedAt: String(publishedAt || '').trim() };
+  }
+
+  async function detectMemberOnlyVideo(videoId, options = {}) {
+    return (await inspectVideoArchiveFacts(videoId, options)).memberOnly;
   }
 
   function cloudPayload(videoId, messages) {
@@ -544,6 +586,7 @@
           chatMode: 'all-v2',
           completed: true,
           memberOnly: state.memberOnly === true ? true : state.memberOnly === false ? false : null,
+          publishedAt: meta.publishedAt || '',
           count: messages.length,
           messages,
         },
@@ -710,9 +753,13 @@
         try {
           const data = await cloudFetchBackup(item, videoId);
           let memberOnly = data?.memberOnly === true ? true : data?.memberOnly === false ? false : null;
-          if (memberOnly === null) {
-            memberOnly = await detectMemberOnlyVideo(videoId);
+          let publishedAt = String(data?.publishedAt || '').trim();
+          if (memberOnly === null || !publishedAt) {
+            const facts = await inspectVideoArchiveFacts(videoId);
+            if (memberOnly === null) memberOnly = facts.memberOnly;
+            publishedAt ||= facts.publishedAt;
             data.memberOnly = memberOnly;
+            data.publishedAt = publishedAt;
           }
           const record = {
             videoId,
@@ -987,6 +1034,7 @@
             : chat.memberOnly === false
               ? false
               : (prev.memberOnly === true ? true : prev.memberOnly === false ? false : null),
+          publishedAt: String(chat.publishedAt || prev.publishedAt || ''),
           exportedAt: String(chat.exportedAt || prev.exportedAt || ''),
           backupId: item?.id ? String(item.id) : String(prev.backupId || ''),
           backupSha: item?.sha256 ? String(item.sha256) : String(prev.backupSha || ''),
@@ -1071,6 +1119,7 @@
             videoId: archive.videoId,
             title: archive.title || archive.videoId,
             channel: archive.channel || '',
+            publishedAt: archive.publishedAt || '',
             archiveCreatedAt: archive.backupCreatedAt || archive.exportedAt || '',
             msg,
           });
@@ -1137,6 +1186,7 @@
           backupSize: Number(item.size || old.backupSize || 0),
           backupCreatedAt: item.createdAt || old.backupCreatedAt || '',
           memberOnly: old.memberOnly === true ? true : old.memberOnly === false ? false : null,
+          publishedAt: String(old.publishedAt || ''),
         });
       }
 
@@ -1189,6 +1239,20 @@
               localClass !== null
             ) {
               entry.memberOnly = localClass;
+              entry.publishedAt = String(local?.publishedAt || entry?.publishedAt || '');
+              if (!entry.publishedAt) {
+                const facts = await inspectVideoArchiveFacts(videoId, { allowDom: false });
+                entry.publishedAt = facts.publishedAt || '';
+                if (entry.publishedAt) {
+                  await writeArchiveIndexFromChat({
+                    ...local,
+                    videoId,
+                    memberOnly: localClass,
+                    publishedAt: entry.publishedAt,
+                    messages: local.messages,
+                  }, item);
+                }
+              }
               if (localClass) memberOnlyCount++;
               else publicCount++;
               skipped++;
@@ -1207,16 +1271,21 @@
               }
 
               let memberOnly = chat?.memberOnly === true ? true : chat?.memberOnly === false ? false : manifestClass;
-              if (memberOnly === null) {
-                memberOnly = await detectMemberOnlyVideo(videoId, { allowDom: false });
+              let publishedAt = String(chat?.publishedAt || entry?.publishedAt || '').trim();
+              if (memberOnly === null || !publishedAt) {
+                const facts = await inspectVideoArchiveFacts(videoId, { allowDom: false });
+                if (memberOnly === null) memberOnly = facts.memberOnly;
+                publishedAt ||= facts.publishedAt;
               }
               chat.memberOnly = memberOnly;
+              chat.publishedAt = publishedAt;
 
               await writeArchiveIndexFromChat(chat, usedItem);
               entry.title = chat.title || entry.title || '';
               entry.channel = chat.channel || entry.channel || '';
               entry.count = chat.messages.length;
               entry.memberOnly = memberOnly;
+              entry.publishedAt = publishedAt;
               entry.backupId = String(usedItem.id || '');
               entry.backupSha = String(usedItem.sha256 || '');
               entry.backupSize = Number(usedItem.size || 0);
@@ -1863,10 +1932,14 @@
       parseJsonAfterMarker(html, 'var ytInitialData = ') ||
       parseJsonAfterMarker(html, 'ytInitialData = ') ||
       parseJsonAfterMarker(html, 'window["ytInitialData"] = ');
+    const playerResponse =
+      parseJsonAfterMarker(html, 'var ytInitialPlayerResponse = ') ||
+      parseJsonAfterMarker(html, 'ytInitialPlayerResponse = ') ||
+      parseJsonAfterMarker(html, 'window["ytInitialPlayerResponse"] = ');
 
     const parsed = extractInitialContinuation(initialData);
     if (parsed?.continuation) {
-      return { initialData, continuation: parsed, method: 'parsed' };
+      return { initialData, playerResponse, continuation: parsed, method: 'parsed' };
     }
 
     // YouTubeのHTML構造が変わってytInitialDataの抽出に失敗しても、
@@ -1883,6 +1956,7 @@
         if (token) {
           return {
             initialData,
+            playerResponse,
             continuation: { continuation: token, source: 'liveChatRenderer.regex' },
             method: 'regex',
           };
@@ -1890,7 +1964,7 @@
       }
     }
 
-    return { initialData, continuation: null, method: 'none' };
+    return { initialData, playerResponse, continuation: null, method: 'none' };
   }
 
   async function fetchDesktopWatchDataViaGM(videoId, signal) {
@@ -1917,6 +1991,12 @@
       const parsed = continuationFromDesktopHtml(html);
       return {
         initialData: parsed?.initialData || null,
+        playerResponse: parsed?.playerResponse || null,
+        publishedAt: publishedAtFromPlayerResponse(parsed?.playerResponse) ||
+          (html.match(/itemprop=["']datePublished["'][^>]*content=["']([^"']+)/i)?.[1] || '') ||
+          (html.match(/itemprop=["']uploadDate["'][^>]*content=["']([^"']+)/i)?.[1] || '') ||
+          (html.match(/"startTimestamp"\s*:\s*"([^"]+)"/)?.[1] || '') ||
+          (html.match(/"publishDate"\s*:\s*"([^"]+)"/)?.[1] || ''),
         cfg: parseAllYtcfgSets(html),
         continuation: parsed?.continuation || null,
         method: parsed?.method || 'none',
@@ -2934,7 +3014,7 @@
     const tabs = makeEl('div', { className: 'mcs-tabs' });
     const currentTab = makeEl('button', { className: 'mcs-tab active', type: 'button', text: 'この動画' });
     currentTab.dataset.scope = 'current';
-    const globalTab = makeEl('button', { className: 'mcs-tab', type: 'button', text: 'メン限のみ横断' });
+    const globalTab = makeEl('button', { className: 'mcs-tab', type: 'button', text: 'メン限横断 ↗' });
     globalTab.dataset.scope = 'global';
     tabs.append(currentTab, globalTab);
 
@@ -2982,7 +3062,7 @@
 
     const help = makeEl('div', {
       className: 'mcs-help',
-      text: '自動取得するのはメンバー限定アーカイブだけです。通常公開アーカイブは自動取得せず、手動取得しても横断検索には含めません。',
+      text: '自動取得はメンバー限定だけ。横断検索は上の「メン限横断 ↗」から別ページで開きます。',
     });
     controls.append(tabs, load, statusEl, fastLabel, cloudWrap, crossTools, search, help);
 
@@ -3034,10 +3114,252 @@
     cloudDisconnect.addEventListener('click', () => void disconnectCloud());
     crossSync.addEventListener('click', () => void cloudSyncArchiveIndex());
     currentTab.addEventListener('click', () => setSearchScope('current'));
-    globalTab.addEventListener('click', () => setSearchScope('global'));
+    globalTab.addEventListener('click', () => {
+      openCrossSearchPage(search.value || '');
+      setSearchScope('current');
+    });
     search.addEventListener('input', renderSearchResults);
     updateCloudUi();
     void updateCrossStats();
+  }
+
+
+  function openCrossSearchPage(initialQuery = '') {
+    const win = window.open('about:blank', 'mcs-member-cross-search');
+    if (!win) {
+      status('横断検索ページを開けませんでした。ポップアップを許可してください。', true);
+      return;
+    }
+
+    const doc = win.document;
+    doc.title = 'メン限チャット横断検索';
+    doc.documentElement.lang = 'ja';
+    doc.body.replaceChildren();
+    doc.body.style.margin = '0';
+    doc.body.style.fontFamily = '-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans JP",sans-serif';
+    doc.body.style.background = '#f5f6f8';
+    doc.body.style.color = '#17191d';
+
+    const style = doc.createElement('style');
+    style.textContent = `
+      *{box-sizing:border-box}
+      body{min-height:100vh}
+      .mcsx-head{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.96);backdrop-filter:blur(12px);border-bottom:1px solid #ddd;padding:14px 18px}
+      .mcsx-title{font-size:20px;font-weight:850;margin-bottom:10px}
+      .mcsx-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;max-width:1100px}
+      .mcsx-input{width:100%;font-size:16px;padding:12px 14px;border:1px solid #bbb;border-radius:10px;background:#fff}
+      .mcsx-sync{border:0;border-radius:10px;padding:0 16px;font-weight:800;background:#1265d8;color:#fff;cursor:pointer}
+      .mcsx-status{max-width:1100px;margin-top:8px;font-size:12px;color:#666}
+      .mcsx-main{max-width:1100px;margin:0 auto;padding:18px}
+      .mcsx-empty{padding:50px 16px;text-align:center;color:#777}
+      .mcsx-card{background:#fff;border:1px solid #ddd;border-radius:14px;margin:0 0 16px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+      .mcsx-cardhead{display:grid;grid-template-columns:112px minmax(0,1fr) auto;gap:12px;align-items:center;padding:13px 15px;background:#fafafa;border-bottom:1px solid #e6e6e6}
+      .mcsx-date{font-size:15px;font-weight:850;color:#125cc0;font-variant-numeric:tabular-nums}
+      .mcsx-video-title{font-size:15px;font-weight:800;line-height:1.45}
+      .mcsx-channel{font-size:12px;color:#727272;margin-top:3px}
+      .mcsx-count{font-size:12px;font-weight:750;color:#555;white-space:nowrap}
+      .mcsx-row{display:grid;grid-template-columns:82px 150px minmax(0,1fr);gap:10px;align-items:start;padding:10px 14px;border-bottom:1px solid #eee;text-decoration:none;color:inherit}
+      .mcsx-row:last-child{border-bottom:0}
+      .mcsx-row:hover{background:#f6f9ff}
+      .mcsx-time{font-weight:850;color:#0866d9;font-variant-numeric:tabular-nums}
+      .mcsx-author{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .mcsx-msg{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5}
+      @media(max-width:700px){
+        .mcsx-head{padding:11px}
+        .mcsx-title{font-size:17px}
+        .mcsx-main{padding:10px}
+        .mcsx-tools{grid-template-columns:1fr}
+        .mcsx-sync{min-height:42px}
+        .mcsx-cardhead{grid-template-columns:1fr auto}
+        .mcsx-date{grid-column:1/-1}
+        .mcsx-row{grid-template-columns:70px minmax(0,1fr)}
+        .mcsx-msg{grid-column:1/-1;padding-left:0}
+      }
+      @media(prefers-color-scheme:dark){
+        body{background:#101114;color:#f0f1f3}
+        .mcsx-head{background:rgba(24,25,29,.96);border-color:#383a40}
+        .mcsx-input,.mcsx-card{background:#1b1d22;color:#f0f1f3;border-color:#383a40}
+        .mcsx-cardhead{background:#22252b;border-color:#383a40}
+        .mcsx-row{border-color:#303238}
+        .mcsx-row:hover{background:#252b36}
+        .mcsx-status,.mcsx-channel{color:#aaa}
+        .mcsx-count{color:#bbb}
+      }
+    `;
+    doc.head.appendChild(style);
+
+    const head = doc.createElement('header');
+    head.className = 'mcsx-head';
+    const title = doc.createElement('div');
+    title.className = 'mcsx-title';
+    title.textContent = '🔎 メン限チャット横断検索';
+    const tools = doc.createElement('div');
+    tools.className = 'mcsx-tools';
+    const input = doc.createElement('input');
+    input.className = 'mcsx-input';
+    input.type = 'search';
+    input.placeholder = '本文・投稿者を検索（A | B でOR）';
+    input.value = String(initialQuery || '');
+    const sync = doc.createElement('button');
+    sync.className = 'mcsx-sync';
+    sync.type = 'button';
+    sync.textContent = '☁️ pCloud同期・日付更新';
+    tools.append(input, sync);
+    const info = doc.createElement('div');
+    info.className = 'mcsx-status';
+    info.textContent = 'メンバー限定と確認できたアーカイブだけを検索します。';
+    head.append(title, tools, info);
+
+    const main = doc.createElement('main');
+    main.className = 'mcsx-main';
+    doc.body.append(head, main);
+
+    let timer = null;
+    let serial = 0;
+    const show = (text) => {
+      main.replaceChildren();
+      const el = doc.createElement('div');
+      el.className = 'mcsx-empty';
+      el.textContent = text;
+      main.appendChild(el);
+    };
+
+    const updateInfo = async (prefix = '') => {
+      try {
+        const stats = await archiveIndexStats();
+        if (win.closed) return;
+        info.textContent = `${prefix ? prefix + ' / ' : ''}メン限 ${stats.archives.toLocaleString()}本・${stats.messages.toLocaleString()}コメント`;
+      } catch {
+        if (!win.closed) info.textContent = prefix || '横断DBの状態を確認できませんでした。';
+      }
+    };
+
+    const run = async () => {
+      const my = ++serial;
+      const q = String(input.value || '').trim();
+      if (!q) {
+        show('検索語を入力してください。');
+        await updateInfo();
+        return;
+      }
+      show('検索中…');
+      try {
+        const { matches, truncated } = await searchArchiveIndex(q);
+        if (win.closed || my !== serial) return;
+        if (!matches.length) {
+          show('該当するチャットはありません。');
+          await updateInfo('0件');
+          return;
+        }
+
+        const groups = new Map();
+        for (const hit of matches) {
+          let group = groups.get(hit.videoId);
+          if (!group) {
+            group = {
+              videoId: hit.videoId,
+              title: hit.title || hit.videoId,
+              channel: hit.channel || '',
+              publishedAt: hit.publishedAt || '',
+              archiveCreatedAt: hit.archiveCreatedAt || '',
+              rows: [],
+            };
+            groups.set(hit.videoId, group);
+          }
+          group.rows.push(hit.msg);
+        }
+
+        const ordered = [...groups.values()].sort((a, b) => {
+          const ad = Date.parse(a.publishedAt || a.archiveCreatedAt || 0) || 0;
+          const bd = Date.parse(b.publishedAt || b.archiveCreatedAt || 0) || 0;
+          return bd - ad;
+        });
+
+        main.replaceChildren();
+        for (const group of ordered) {
+          const card = doc.createElement('section');
+          card.className = 'mcsx-card';
+          const cardHead = doc.createElement('div');
+          cardHead.className = 'mcsx-cardhead';
+
+          const date = doc.createElement('div');
+          date.className = 'mcsx-date';
+          date.textContent = archiveDateLabel(group.publishedAt);
+
+          const titleWrap = doc.createElement('div');
+          const vt = doc.createElement('div');
+          vt.className = 'mcsx-video-title';
+          vt.textContent = group.title;
+          const ch = doc.createElement('div');
+          ch.className = 'mcsx-channel';
+          ch.textContent = group.channel || '';
+          titleWrap.append(vt, ch);
+
+          const count = doc.createElement('div');
+          count.className = 'mcsx-count';
+          count.textContent = `${group.rows.length.toLocaleString()}件`;
+          cardHead.append(date, titleWrap, count);
+          card.appendChild(cardHead);
+
+          for (const msg of group.rows) {
+            const row = doc.createElement('a');
+            row.className = 'mcsx-row';
+            row.href = archiveTimestampUrl(group.videoId, msg.seconds);
+            row.target = '_blank';
+            row.rel = 'noopener';
+
+            const time = doc.createElement('span');
+            time.className = 'mcsx-time';
+            time.textContent = formatTime(msg.seconds);
+            const author = doc.createElement('span');
+            author.className = 'mcsx-author';
+            author.textContent = msg.author || '（投稿者不明）';
+            const body = doc.createElement('span');
+            body.className = 'mcsx-msg';
+            body.textContent = msg.message || '';
+            row.append(time, author, body);
+            card.appendChild(row);
+          }
+          main.appendChild(card);
+        }
+
+        await updateInfo(`${truncated ? CROSS_RESULT_LIMIT.toLocaleString() + '件以上' : matches.length.toLocaleString() + '件'} / ${groups.size.toLocaleString()}本`);
+      } catch (e) {
+        if (win.closed || my !== serial) return;
+        show(`横断検索失敗：${String(e?.message || e).slice(0, 160)}`);
+      }
+    };
+
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => void run(), 160);
+    });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        clearTimeout(timer);
+        void run();
+      }
+    });
+    sync.addEventListener('click', async () => {
+      sync.disabled = true;
+      sync.textContent = '同期中…';
+      info.textContent = 'pCloud同期中。古い保存分の日付もYouTubeから補完します…';
+      try {
+        await cloudSyncArchiveIndex();
+        await updateInfo('同期完了');
+        await run();
+      } finally {
+        if (!win.closed) {
+          sync.disabled = false;
+          sync.textContent = '☁️ pCloud同期・日付更新';
+        }
+      }
+    });
+
+    void updateInfo();
+    if (input.value.trim()) void run();
+    input.focus();
   }
 
 
@@ -3289,6 +3611,7 @@
           channel: meta.channel,
           count: messages.length,
           memberOnly: state.memberOnly === true ? true : state.memberOnly === false ? false : null,
+          publishedAt: currentVideoMetadata(videoId).publishedAt || '',
           messages,
           exportedAt: new Date().toISOString(),
         });
