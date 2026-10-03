@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.5.1
+// @version      0.5.2
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.5.1';
+  const VERSION = '0.5.2';
 
   const state = {
     videoId: null,
@@ -594,7 +594,7 @@
 
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 25000);
+      const timer = setTimeout(() => controller.abort(), 15000);
       const desktop = await fetchDesktopWatchDataViaGM(videoId, controller.signal);
       clearTimeout(timer);
       const freshMember = memberOnlyFromInitialData(desktop?.initialData);
@@ -604,17 +604,24 @@
 
       // メン限watch HTMLではplayerResponseの日付が省かれることがある。
       // その場合は同じログインセッションでInnertube nextを叩き、dateTextを補完する。
+      // v0.5.1ではこのnext側に独立タイムアウトが無く、1件が詰まると同期全体が止まり得た。
       if (!publishedAt && desktop?.cfg) {
+        const nextController = new AbortController();
+        const nextTimer = setTimeout(() => nextController.abort(), 10000);
         try {
           const origin = 'https://www.youtube.com';
           const cfg = normalizeCfg(desktop.cfg || {});
           const auth = await buildAuthorization(origin);
           if (cfg?.INNERTUBE_CONTEXT?.client) {
-            const nextData = await fetchNextInitialData(videoId, cfg, auth, origin, controller.signal);
+            const nextData = await fetchNextInitialData(videoId, cfg, auth, origin, nextController.signal);
             publishedAt = publishedAtFromInitialData(nextData);
           }
         } catch (nextErr) {
-          console.warn('[Member Chat Search] date next fallback failed', videoId, nextErr);
+          if (nextErr?.name !== 'AbortError') {
+            console.warn('[Member Chat Search] date next fallback failed', videoId, nextErr);
+          }
+        } finally {
+          clearTimeout(nextTimer);
         }
       }
     } catch (e) {
@@ -1221,10 +1228,18 @@
     location.assign(archiveTimestampUrl(videoId, seconds));
   }
 
-  async function cloudSyncArchiveIndex() {
-    if (state.crossSyncBusy) return;
+  async function cloudSyncArchiveIndex({ onProgress = null } = {}) {
+    const report = async (message) => {
+      await updateCrossStats(message);
+      try { if (typeof onProgress === 'function') onProgress(message); } catch { /* ignore */ }
+    };
+
+    if (state.crossSyncBusy) {
+      await report('すでに横断DB同期中です。');
+      return;
+    }
     if (!state.cloudEnabled || !state.cloudToken) {
-      await updateCrossStats('pCloudに接続してから横断DBを同期してください。');
+      await report('pCloudに接続してから横断DBを同期してください。');
       return;
     }
     state.crossSyncBusy = true;
@@ -1232,7 +1247,7 @@
     const syncBtn = document.querySelector(`#${PANEL_ID} .mcs-cross-sync`);
     if (syncBtn) syncBtn.textContent = '同期中…';
     try {
-      await updateCrossStats('pCloudのアーカイブ一覧を確認中…');
+      await report('pCloudのアーカイブ一覧を確認中…');
 
       const manifestEntries = await cloudLoadArchiveManifest();
       const manifestMap = new Map(manifestEntries.map((x) => [x.videoId, { ...x }]));
@@ -1264,7 +1279,7 @@
 
       const entries = [...manifestMap.values()];
       if (!entries.length) {
-        await updateCrossStats('pCloudに保存済みのメン限チャットが見つかりませんでした。');
+        await report('pCloudに保存済みのメン限チャットが見つかりませんでした。');
         return;
       }
 
@@ -1378,7 +1393,7 @@
             if (entry?.publishedAt) datedCount++;
             else dateUnknownCount++;
             done++;
-            await updateCrossStats(
+            await report(
               `メン限横断DB同期中：${done}/${entries.length}本（メン限${memberOnlyCount} / 日付取得${datedCount} / 日付不明${dateUnknownCount} / 通常${publicCount} / 失敗${failed}）`
             );
           }
@@ -1391,12 +1406,12 @@
       catch (e) { console.warn('[Member Chat Search] manifest backfill failed', e); }
 
       const stats = await archiveIndexStats();
-      await updateCrossStats(
+      await report(
         `同期完了：メン限 ${stats.archives.toLocaleString()}本 / ${stats.messages.toLocaleString()}コメント（日付取得${datedCount}・日付不明${dateUnknownCount}・通常公開${publicCount}本除外・判定不明${unknownCount}・失敗${failed}）`
       );
       if (state.searchScope === 'global') scheduleCrossSearchRender(true);
     } catch (e) {
-      await updateCrossStats(`横断DB同期失敗：${String(e?.message || e).slice(0, 120)}`);
+      await report(`横断DB同期失敗：${String(e?.message || e).slice(0, 120)}`);
     } finally {
       state.crossSyncBusy = false;
       if (syncBtn) syncBtn.textContent = '☁️ メン限横断DB同期';
@@ -3427,8 +3442,12 @@
       sync.textContent = '同期中…';
       info.textContent = 'pCloud同期中。古い保存分の日付もYouTubeから補完します…';
       try {
-        await cloudSyncArchiveIndex();
-        await updateInfo('同期完了');
+        await cloudSyncArchiveIndex({
+          onProgress: (message) => {
+            if (!win.closed) info.textContent = message;
+          },
+        });
+        await updateInfo('同期処理終了');
         await run();
       } finally {
         if (!win.closed) {
