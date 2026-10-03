@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.61
+// @version      1.0.62
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.61';
+  const VERSION = '1.0.62';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -68,6 +68,7 @@
   const KEY_LIVER_FAVS = 'npf_liver_favorites_v1'; // 検索フォーム専用・既存のチャンネルお気に入りとは別
   const KEY_SETTINGS = 'npf_settings';
   const KEY_SYNC = 'npf_sync_points';
+  const KEY_YT_SEEK_HANDOFF = 'npf_youtube_seek_handoff_v1';
   const KEY_CAL = 'npf_video_sync_calibration';
   const KEY_WIKI_CACHE = 'npf_wiki_cache_v11';
   const WIKI_BASE = 'https://wikiwiki.jp/nijisanji';
@@ -2298,6 +2299,15 @@
     }
     $('#npf-ts-description', overlay).textContent = `${formatClock(sec)} を保存しました。この時刻から動画を再生しますか？`;
     $('#npf-ts-open', overlay).href = youtubeUrl(videoId, sec);
+
+    // YouTubeはURLのt=へ一度移動した後、視聴履歴の「前回の続き」を遅れて適用することがある。
+    // 遷移前にGM領域へ受け渡しを保存し、YouTube側ヘルパーが数秒だけ指定時刻を優先する。
+    void gmSet(KEY_YT_SEEK_HANDOFF, {
+      videoId: String(videoId || ''),
+      seconds: Math.max(0, Math.floor(Number(sec) || 0)),
+      createdAt: Date.now(),
+    }).catch(err => console.debug('[NRH][timestamp handoff save]', err?.message || err));
+
     overlay.hidden = false;
     $('#npf-ts-only', overlay)?.focus({ preventScroll: true });
   }
@@ -4096,6 +4106,68 @@
     const video = youtubeVideoElement();
     const n = Number(video?.currentTime || 0);
     return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  }
+
+  let youtubeSeekHandoffRun = 0;
+
+  async function applyYoutubeSeekHandoff() {
+    if (!isYoutubeHost()) return false;
+    const run = ++youtubeSeekHandoffRun;
+
+    let handoff = null;
+    try { handoff = await gmGet(KEY_YT_SEEK_HANDOFF, null); }
+    catch { return false; }
+
+    const videoId = String(handoff?.videoId || '');
+    const seconds = Number(handoff?.seconds);
+    const createdAt = Number(handoff?.createdAt || 0);
+    if (
+      !videoId ||
+      !Number.isFinite(seconds) ||
+      seconds < 0 ||
+      !createdAt ||
+      Date.now() - createdAt > 2 * 60 * 1000
+    ) {
+      if (handoff) void gmSet(KEY_YT_SEEK_HANDOFF, null).catch(() => {});
+      return false;
+    }
+
+    if (currentYoutubeVideoId() !== videoId) return false;
+
+    // 一度この動画で受け取ったら再利用しない。以降はこのページ内のガードだけで処理する。
+    void gmSet(KEY_YT_SEEK_HANDOFF, null).catch(() => {});
+
+    const startedAt = Date.now();
+    const delays = [0, 350, 900, 1700, 2800, 4300, 5600];
+
+    const applyOnce = () => {
+      if (run !== youtubeSeekHandoffRun || currentYoutubeVideoId() !== videoId) return;
+      const video = youtubeVideoElement();
+      if (!video || video.readyState < 1) return;
+
+      const current = Number(video.currentTime);
+      if (!Number.isFinite(current)) return;
+
+      // 正常に指定位置から再生が進んでいる場合は触らない。
+      // 「前回の続き」へ大きく飛ばされた時だけ戻す。
+      const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
+      const expected = seconds + (video.paused ? 0 : elapsed);
+      const nearRequested = Math.abs(current - seconds) <= 7;
+      const nearExpected = Math.abs(current - expected) <= 7;
+      if (!nearRequested && !nearExpected) {
+        try {
+          video.currentTime = seconds;
+          console.info('[NRH] YouTube resume position overridden by requested timestamp', {
+            videoId, seconds, previous: current,
+          });
+        } catch (err) {
+          console.debug('[NRH][timestamp handoff seek]', err?.message || err);
+        }
+      }
+    };
+
+    for (const delay of delays) setTimeout(applyOnce, delay);
+    return true;
   }
 
   function seekYoutube(delta) {
@@ -8408,6 +8480,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       createShell();
       ensureYoutubePanel();
       handleYoutubeNavigation();
+      void applyYoutubeSeekHandoff();
       // Only one NIJI entry point on mobile. Research mounts as a tab inside it;
       // failures in archive initialization must not take down the proven mobile FAB.
       try {
@@ -8418,7 +8491,9 @@ e.el.classList.toggle('npf-r-hidden', !show);
       }
 
       document.addEventListener('yt-navigate-finish', handleYoutubeNavigation, true);
+      document.addEventListener('yt-navigate-finish', () => setTimeout(() => void applyYoutubeSeekHandoff(), 80), true);
       window.addEventListener('popstate', handleYoutubeNavigation, true);
+      window.addEventListener('popstate', () => setTimeout(() => void applyYoutubeSeekHandoff(), 80), true);
 
       clearInterval(youtubeTimer);
       youtubeTimer = setInterval(() => {
