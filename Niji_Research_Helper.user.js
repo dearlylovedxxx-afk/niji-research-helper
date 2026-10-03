@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.59
+// @version      1.0.60
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.59';
+  const VERSION = '1.0.60';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5912,12 +5912,40 @@
     const out = [];
     for (const m of arr) {
       const id = m?.id || m?.channel?.id || '';
-      const name = m?.name || m?.english_name || m?.channel?.name || m?.channel?.english_name || '';
-      const key = id || normalizeResearchText(name);
+      const rawNames = [
+        m?.name,
+        m?.channel?.name,
+        m?.english_name,
+        m?.channel?.english_name,
+      ].filter(Boolean).map(x => String(x).trim()).filter(Boolean);
+
+      // Holodexのmentionsは「人物名」ではなくYouTubeチャンネル表示名を返すことがある。
+      // 日本語名を優先し、/ 英語名・【所属】・Channel/Ch. などを落として人物名として扱う。
+      const cleaned = [...new Set(rawNames.map(collaboratorDisplayName).filter(Boolean))];
+      const japanese = cleaned.find(name => /[ぁ-んァ-ヶ一-龠々]/.test(name));
+      const name = japanese || cleaned.slice().sort((a, b) => a.length - b.length)[0] || '';
+      const key = id || normalizeCollaboratorName(name);
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      out.push({ id, name: String(name || '').trim() });
+      out.push({ id, name, aliases: rawNames });
     }
+    return out;
+  }
+
+  function researchMergeCollaboratorNames(wikiPeople = [], mentions = []) {
+    // WikiはHolodexの代替ではなく補完元。両方を統合し、Wikiでしか拾えない参加者も
+    // Holodexでしか拾えない参加者も残す。表示は常に人物名へ正規化する。
+    const out = [];
+    const seen = new Set();
+    const add = raw => {
+      const display = collaboratorDisplayName(raw);
+      const key = normalizeCollaboratorName(display);
+      if (!display || !key || seen.has(key)) return;
+      seen.add(key);
+      out.push(display);
+    };
+    for (const name of wikiPeople) add(name);
+    for (const mention of mentions) add(mention?.name || '');
     return out;
   }
 
@@ -6281,16 +6309,19 @@
     entry.mentions = researchMentionList(meta);
 
     const wiki = entry.wikiInfo || null;
-    const wikiPeople = [...(wiki?.collaborators || [])];
+    const wikiPeople = [...(wiki?.collaborators || [])]
+      .map(collaboratorDisplayName).filter(Boolean);
     const categoryTitle = [entry.title, meta?.title, wiki?.wikiTitle].filter(Boolean).join(' ');
     const baseCategories = researchCategories(categoryTitle, meta, entry.game);
     entry.categories = [...baseCategories];
     if ((wikiPeople.length || wiki?.hasCollabNote) && !entry.categories.includes('コラボ')) entry.categories.push('コラボ');
     if (entry.categories.includes('コラボ')) entry.categories = entry.categories.filter(x => x !== 'ソロゲー');
 
-    entry.collaborators = wikiPeople.length ? wikiPeople : entry.mentions.map(x => x.name).filter(Boolean);
-    if (wikiPeople.length) entry.collabCount = wikiPeople.length + 1;
-    else entry.collabCount = entry.mentions.length ? entry.mentions.length + 1 : (entry.categories.includes('コラボ') ? null : 1);
+    // Holodexだけ / Wikiだけ の二択にしない。Wikiを補完元として必ず合流する。
+    entry.collaborators = researchMergeCollaboratorNames(wikiPeople, entry.mentions);
+    entry.collabCount = entry.collaborators.length
+      ? entry.collaborators.length + 1
+      : (entry.categories.includes('コラボ') ? null : 1);
     entry.url = youtubeUrl(entry.id);
 
     // The desktop badge row is mounted on the OUTER rich-item, which can be
@@ -6349,19 +6380,33 @@
     }
 
     if (entry.collabCount && entry.collabCount > 1) {
-      const p = makeResearchPill(`👥 ${entry.collabCount}人${wikiPeople.length ? '（Wiki）' : ''}`);
-      p.title = wikiPeople.length ? '非公式Wikiのコラボ相手記載から算出（配信者本人を含む）' : 'Holodexの参加者情報から推定（配信者本人を含む）';
+      const hasHolodexPeople = entry.mentions.length > 0;
+      const sourceLabel = wikiPeople.length && hasHolodexPeople ? '（Wiki+Holodex）'
+        : wikiPeople.length ? '（Wiki）' : '';
+      const p = makeResearchPill(`👥 ${entry.collabCount}人${sourceLabel}`);
+      p.title = wikiPeople.length && hasHolodexPeople
+        ? 'Holodex参加者情報に非公式Wikiのコラボ相手記載を補完して統合（配信者本人を含む）'
+        : wikiPeople.length
+          ? '非公式Wikiのコラボ相手記載から算出（配信者本人を含む）'
+          : 'Holodexの参加者情報から推定（配信者本人を含む）';
       bar.appendChild(p);
     }
 
     for (const cat of entry.categories) bar.appendChild(makeResearchPill(cat, `npf-r-cat-${cat}`));
 
     if (entry.collaborators?.length) {
-      for (const person of entry.collaborators) {
+      const wikiKeys = new Set(wikiPeople.map(normalizeCollaboratorName).filter(Boolean));
+      for (const rawPerson of entry.collaborators) {
+        const person = collaboratorDisplayName(rawPerson);
+        if (!person) continue;
+        const personKey = normalizeCollaboratorName(person);
+        const fromWikiPerson = wikiKeys.has(personKey);
         const b = document.createElement('button');
         b.type = 'button';
-        b.className = `npf-r-pill npf-r-collab-person${wikiPeople.length ? ' npf-r-wiki' : ''}`;
-        const joinedAt = wiki?.collaboratorJoinTimes?.[person];
+        b.className = `npf-r-pill npf-r-collab-person${fromWikiPerson ? ' npf-r-wiki' : ''}`;
+        const joinedAtKey = Object.keys(wiki?.collaboratorJoinTimes || {})
+          .find(key => normalizeCollaboratorName(key) === personKey);
+        const joinedAt = joinedAtKey ? wiki.collaboratorJoinTimes[joinedAtKey] : '';
         b.textContent = `🤝 ${person}${joinedAt ? ` (${joinedAt}〜)` : ''}`;
         b.dataset.collaborator = person;
         b.title = `${person}：絞り込み → 除外 → 解除`;
@@ -6490,7 +6535,7 @@
     button.setAttribute('aria-pressed', String(research.collectionActive));
     button.title = research.collectionActive
       ? '未着手のHolodex/Wiki取得を停止します。すでに通信中の1件は終了する場合があります。'
-      : 'この一覧の未取得動画をHolodex/Wikiで調査します。スクロールで増えた動画も対象です。';
+      : 'この一覧をHolodexで取得し、コラボ相手など不足分を非公式Wikiで補完します。スクロールで増えた動画も対象です。';
     const auto = $('#npf-r-auto-channel-toggle');
     if (auto) {
       const key = researchChannelKey();
@@ -6500,7 +6545,7 @@
     }
     const hint = $('#npf-r-collection-hint');
     if (hint) hint.textContent = research.collectionActive
-      ? '取得中：この一覧で追加表示された動画も調査。止めると未着手の取得は実行しません。'
+      ? '取得中：Holodex取得後にWikiも照合し、コラボ相手など不足分を補完します。追加表示された動画も対象です。'
       : '手動モード：ページを開くだけでは外部取得しません。保存済みのDBは表示できます。';
   }
 
@@ -7184,9 +7229,15 @@
 
   function collaboratorDisplayName(name = '') {
     let s = String(name || '').trim();
-    s = s.replace(/[【\[][^】\]]*(?:にじさんじ|nijisanji)[^】\]]*[】\]]/gi, '').trim();
+    // 所属・配信チャンネル装飾を落として「人物名」を表示する。
+    s = s.replace(/[【\[][^】\]]*(?:にじさんじ|nijisanji|hololive|ホロライブ|vtuber)[^】\]]*[】\]]/gi, '').trim();
     if (/[\/／]/.test(s)) s = s.split(/\s*[\/／]\s*/)[0].trim();
-    s = s.replace(/[（(](?:視点|主催|途中参加|途中離脱|vc|ボイチャ|通話|敬称略|不参加|なし|無し)[^）)]*[）)]/gi, '').trim();
+    s = s
+      .replace(/[（(](?:視点|主催|途中参加|途中離脱|vc|ボイチャ|通話|敬称略|不参加|なし|無し)[^）)]*[）)]/gi, '')
+      .replace(/\s*(?:[-–—|｜]\s*)?(?:official\s*)?(?:youtube\s*)?(?:channel|ch\.?|チャンネル)\s*$/i, '')
+      .replace(/\s*(?:公式|official)\s*$/i, '')
+      .replace(/[\s　]+$/g, '')
+      .trim();
     return s || String(name || '').trim();
   }
 
