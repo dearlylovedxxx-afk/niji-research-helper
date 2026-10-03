@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.60
+// @version      1.0.61
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.60';
+  const VERSION = '1.0.61';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -6317,8 +6317,17 @@
     if ((wikiPeople.length || wiki?.hasCollabNote) && !entry.categories.includes('コラボ')) entry.categories.push('コラボ');
     if (entry.categories.includes('コラボ')) entry.categories = entry.categories.filter(x => x !== 'ソロゲー');
 
-    // Holodexだけ / Wikiだけ の二択にしない。Wikiを補完元として必ず合流する。
-    entry.collaborators = researchMergeCollaboratorNames(wikiPeople, entry.mentions);
+    // コラボ相手はWikiを正とする。Wikiに人物情報がある動画では、
+    // Holodexのチャンネル表示名/mentionsを混ぜず、Wikiの人物名へ寄せる。
+    // Wikiにコラボ相手記載がない場合だけHolodexをフォールバックとして使う。
+    entry.collaborators = wikiPeople.length
+      ? [...new Map(wikiPeople.map(name => [normalizeCollaboratorName(name), collaboratorDisplayName(name)]))
+          .values()].filter(Boolean)
+      : [...new Map(entry.mentions
+          .map(m => collaboratorDisplayName(m?.name || ''))
+          .filter(Boolean)
+          .map(name => [normalizeCollaboratorName(name), name]))
+          .values()];
     entry.collabCount = entry.collaborators.length
       ? entry.collaborators.length + 1
       : (entry.categories.includes('コラボ') ? null : 1);
@@ -6380,15 +6389,11 @@
     }
 
     if (entry.collabCount && entry.collabCount > 1) {
-      const hasHolodexPeople = entry.mentions.length > 0;
-      const sourceLabel = wikiPeople.length && hasHolodexPeople ? '（Wiki+Holodex）'
-        : wikiPeople.length ? '（Wiki）' : '';
+      const sourceLabel = wikiPeople.length ? '（Wiki）' : '';
       const p = makeResearchPill(`👥 ${entry.collabCount}人${sourceLabel}`);
-      p.title = wikiPeople.length && hasHolodexPeople
-        ? 'Holodex参加者情報に非公式Wikiのコラボ相手記載を補完して統合（配信者本人を含む）'
-        : wikiPeople.length
-          ? '非公式Wikiのコラボ相手記載から算出（配信者本人を含む）'
-          : 'Holodexの参加者情報から推定（配信者本人を含む）';
+      p.title = wikiPeople.length
+        ? '非公式Wikiのコラボ相手記載を優先（配信者本人を含む）'
+        : 'Wikiにコラボ相手記載がないためHolodex参加者情報を使用（配信者本人を含む）';
       bar.appendChild(p);
     }
 
@@ -6535,7 +6540,7 @@
     button.setAttribute('aria-pressed', String(research.collectionActive));
     button.title = research.collectionActive
       ? '未着手のHolodex/Wiki取得を停止します。すでに通信中の1件は終了する場合があります。'
-      : 'この一覧をHolodexで取得し、コラボ相手など不足分を非公式Wikiで補完します。スクロールで増えた動画も対象です。';
+      : 'この一覧をHolodexで取得し、コラボ相手は非公式Wikiに記載があればWikiを優先します。Wikiにない場合だけHolodexを使います。';
     const auto = $('#npf-r-auto-channel-toggle');
     if (auto) {
       const key = researchChannelKey();
@@ -6545,7 +6550,7 @@
     }
     const hint = $('#npf-r-collection-hint');
     if (hint) hint.textContent = research.collectionActive
-      ? '取得中：Holodex取得後にWikiも照合し、コラボ相手など不足分を補完します。追加表示された動画も対象です。'
+      ? '取得中：Holodex取得後にWikiも照合。コラボ相手はWiki記載を優先し、Wikiにない場合のみHolodexを使います。'
       : '手動モード：ページを開くだけでは外部取得しません。保存済みのDBは表示できます。';
   }
 
@@ -7238,6 +7243,14 @@
       .replace(/\s*(?:公式|official)\s*$/i, '')
       .replace(/[\s　]+$/g, '')
       .trim();
+
+    // Holodexしか使えない場合の最低限の人物名補正。
+    // Wikiが取得できた動画ではそちらの日本語人物名が優先される。
+    const aliasKey = normalizeResearchText(s).replace(/[\s　._-]+/g, '');
+    const aliases = {
+      kanae: '叶',
+    };
+    if (aliases[aliasKey]) return aliases[aliasKey];
     return s || String(name || '').trim();
   }
 
