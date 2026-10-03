@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.58
+// @version      1.0.59
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.58';
+  const VERSION = '1.0.59';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -1336,15 +1336,42 @@
       const latest = researchBackups[0];
       try {
         const data = await cloudFetchResearchSnapshot(latest);
-        const summary = data?.preferences?.researchBackupSummary || {};
+        const videos = Array.isArray(data?.stores?.videos) ? data.stores.videos : [];
+        const channels = Array.isArray(data?.stores?.channels) ? data.stores.channels : [];
+        const wikiSets = Array.isArray(data?.stores?.wiki) ? data.stores.wiki : [];
+        const pairs = Array.isArray(data?.stores?.pairs) ? data.stores.pairs : [];
+
+        let holodexRows = 0;
+        let wikiLinkedRows = 0;
+        const byChannel = new Map();
+        for (const row of videos) {
+          if (row?.meta) holodexRows++;
+          if (row?.wikiInfo) wikiLinkedRows++;
+          const channelId = String(row?.channelId || row?.meta?.channel?.id || row?.meta?.channel_id || '').trim();
+          const channelName = String(row?.channelName || row?.meta?.channel?.name || '').trim();
+          const key = channelId || (channelName ? `name:${channelName}` : '');
+          if (!key) continue;
+          const prev = byChannel.get(key) || { name: channelName || channelId, count: 0 };
+          prev.name = channelName || prev.name || channelId;
+          prev.count++;
+          byChannel.set(key, prev);
+        }
+        const topChannels = [...byChannel.values()]
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 10);
+
         const detail = document.createElement('div');
         detail.className = 'npf-r-note';
-        detail.style.cssText = 'margin:6px 0 10px 0;line-height:1.5;';
+        detail.style.cssText = 'margin:6px 0 10px 0;padding:8px;border:1px solid #7b8fb9;border-radius:8px;line-height:1.55;white-space:pre-line;';
         detail.textContent =
-          `最新バックアップの中身：動画 ${Number(summary.videos ?? data?.stores?.videos?.length ?? 0).toLocaleString()}件 / ` +
-          `チャンネル ${Number(summary.channels ?? data?.stores?.channels?.length ?? 0).toLocaleString()}件 / ` +
-          `Wiki ${Number(summary.wiki ?? data?.stores?.wiki?.length ?? 0).toLocaleString()}件 / ` +
-          `コラボ組 ${Number(summary.pairs ?? data?.stores?.pairs?.length ?? 0).toLocaleString()}件`;
+          `最新バックアップのDB内訳（※不破湊だけの件数ではなく、にじヘルパー全体の蓄積です）\n` +
+          `・動画レコード：${videos.length.toLocaleString()}件（Holodex情報あり ${holodexRows.toLocaleString()}件 / Wiki紐付けあり ${wikiLinkedRows.toLocaleString()}件）\n` +
+          `・チャンネルキャッシュ：${channels.length.toLocaleString()}件（コラボ候補・名前解決用一覧も含む）\n` +
+          `・Wikiキャッシュ：${wikiSets.length.toLocaleString()}セット（年別ページ等の保存単位。動画本数ではありません）\n` +
+          `・コラボ検索キャッシュ：${pairs.length.toLocaleString()}組` +
+          (topChannels.length
+            ? `\n\n動画レコードの主な配信チャンネル：\n${topChannels.map(x => `・${x.name}：${x.count.toLocaleString()}件`).join('\n')}`
+            : '');
         list.appendChild(detail);
       } catch (e) {
         console.warn('[NRH][cloud list latest inspect]', e);
