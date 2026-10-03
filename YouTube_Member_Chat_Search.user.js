@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.4.4
+// @version      0.4.5
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.4.4';
+  const VERSION = '0.4.5';
 
   const state = {
     videoId: null,
@@ -499,16 +499,8 @@
       }
     }
 
-    if (state.cloudBusy) {
-      if (!silent) cloudUiStatus('☁️ 別のpCloud処理の完了待ち…');
-      try { await waitForCloudIdle(180000); }
-      catch (e) {
-        const msg = `⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 120)} [${cloudDevice(videoId)}]`;
-        cloudUiStatus(msg, true);
-        return null;
-      }
-    }
-
+    // 読込・一覧確認など別のpCloud処理は保存をブロックしない。
+    // 保存同士だけは上の cloudUploadPromise で一本化する。
     const task = (async () => {
       state.cloudBusy = true;
       updateCloudUi();
