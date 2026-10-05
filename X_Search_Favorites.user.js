@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.1.6
-// @description  X高度検索・保存検索・履歴・本文一致のみ・読み込み済み検索結果のいいね順。保存先はこのスクリプト専用のローカル領域。
+// @version      1.1.7
+// @description  X高度検索・保存検索・履歴・本文一致のみ・読み込み済み検索結果のいいね順。Niji Cloud併用時は保存検索・フォルダ・履歴を全端末共有。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @run-at       document-idle
@@ -14,16 +14,29 @@
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.1.6', KEY='xsf_userscript_v1';
+const VERSION='1.1.7', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
-let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0;
+let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
 const hidden=new Map();
 let scanRunning=false, scanStop=false, scanStep=0, scanLimit=150, scanNotice='', scanOriginalY=0, manualCapture=false;
 
-function load(){try{const obj=JSON.parse(localStorage.getItem(KEY)||'{}');if(obj&&typeof obj==='object'){
-for(const k of ['folders','savedSearches','history'])if(Array.isArray(obj[k]))data[k]=obj[k];
-}}catch(e){console.warn('[XSF] saved data cannot be read',e);} if(!data.folders.includes('未分類'))data.folders.unshift('未分類');}
-function save(){localStorage.setItem(KEY,JSON.stringify(data));}
+function load(){
+ const raw=localStorage.getItem(KEY)||'';
+ try{const obj=JSON.parse(raw||'{}');if(obj&&typeof obj==='object'){
+  for(const k of ['folders','savedSearches','history'])if(Array.isArray(obj[k]))data[k]=obj[k];
+ }}catch(e){console.warn('[XSF] saved data cannot be read',e);}
+ if(!data.folders.includes('未分類'))data.folders.unshift('未分類');
+ lastDataRaw=raw;
+}
+function save(){const raw=JSON.stringify(data);localStorage.setItem(KEY,raw);lastDataRaw=raw;}
+function refreshSharedData(){
+ const raw=localStorage.getItem(KEY)||'';
+ if(raw===lastDataRaw)return;
+ data={folders:['未分類'],savedSearches:[],history:[]};
+ load();
+ try{if(!panel.hidden)renderPanel();}catch{}
+ console.info('[XSF] Niji Cloud shared data reflected');
+}
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,8);}
 function E(tag,cls='',text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;}
 function urlSearch(){return new URL(location.href).searchParams.get('q')||'';}
@@ -321,7 +334,9 @@ sorted.append(highRow);
 }
 sortBtn.onclick=()=>{if(!activeSearch()){alert('Xの検索結果ページで使ってください。');return;}const open=sorted.hidden;closeAll();if(open){captureLikes();sorted.hidden=false;scanNotice=`現在読み込み済み ${sortRows.size}件。先頭から追加収集するか、X画面を手動スクロールしてね。`;drawSorted();}};
 let scheduled=0;const observer=new MutationObserver(()=>{if(scheduled)return;scheduled=setTimeout(()=>{scheduled=0;if(!host.isConnected)(document.body||document.documentElement).append(host);if(filterOn)applyFilter();if(scanRunning||manualCapture||!sorted.hidden)captureLikes();},350);});observer.observe(document.documentElement,{childList:true,subtree:true});
-timer=setInterval(()=>{if(!host.isConnected)(document.body||document.documentElement).append(host);if(location.href!==route){route=location.href;filterOn=false;filterQuery='';scanStop=true;manualCapture=false;scanBar.hidden=true;restore();filterBtn.textContent='本文一致のみ';sortRows.clear();sorted.hidden=true;}if(filterOn)applyFilter();if(scanRunning||manualCapture||!sorted.hidden){captureLikes();if(manualCapture){scanNotice=`手動収集中：${sortRows.size}件。Xの投稿をスクロールし、終了時に「停止して結果を見る」を押してね。`;updateScanState();}}},1100);
-window.__xsfUserscriptCleanup=()=>{scanStop=true;manualCapture=false;observer.disconnect();clearInterval(timer);clearTimeout(scheduled);restore();host.remove();};
+timer=setInterval(()=>{refreshSharedData();if(!host.isConnected)(document.body||document.documentElement).append(host);if(location.href!==route){route=location.href;filterOn=false;filterQuery='';scanStop=true;manualCapture=false;scanBar.hidden=true;restore();filterBtn.textContent='本文一致のみ';sortRows.clear();sorted.hidden=true;}if(filterOn)applyFilter();if(scanRunning||manualCapture||!sorted.hidden){captureLikes();if(manualCapture){scanNotice=`手動収集中：${sortRows.size}件。Xの投稿をスクロールし、終了時に「停止して結果を見る」を押してね。`;updateScanState();}}},1100);
+const onNijiCloudApplied=()=>refreshSharedData();
+window.addEventListener('niji-cloud-sync-applied',onNijiCloudApplied);
+window.__xsfUserscriptCleanup=()=>{scanStop=true;manualCapture=false;observer.disconnect();clearInterval(timer);clearTimeout(scheduled);window.removeEventListener('niji-cloud-sync-applied',onNijiCloudApplied);restore();host.remove();};
 load();currentFields=blank();
 })();
