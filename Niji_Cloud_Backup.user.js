@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Niji Cloud Sync (OR / X / Pixiv / pictBLand)
+// @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.2.1
+// @version      0.2.2
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
