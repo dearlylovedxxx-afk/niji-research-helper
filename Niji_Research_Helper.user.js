@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.67
+// @version      1.0.68
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.67';
+  const VERSION = '1.0.68';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -6925,13 +6925,16 @@
       const key = researchChannelKey();
       auto.style.display = key ? 'block' : 'none';
       auto.textContent = research.autoChannelKeys.has(key)
-        ? '☑ このチャンネルの自動取得 ON' : '□ このチャンネルの自動取得 OFF';
+        ? '☑ このチャンネルの自動取得 ON（全端末共通）'
+        : '□ このチャンネルの自動取得 OFF（初期設定）';
     }
     const hint = $('#npf-r-collection-hint');
     if (hint) hint.textContent = research.collectionActive
-      ? '取得中：Holodex取得後にWikiも照合。コラボ相手はWiki記載を優先し、Wikiにない場合のみHolodexを使います。'
+      ? '取得中：新規・期限切れアーカイブを更新し、Holodex取得後にWikiも照合。コラボ相手はWiki人物名を正とします。'
       : (isYoutubeArchiveChannelPage()
-        ? '自動更新：チャンネルの動画/配信一覧では、DBにない新規アーカイブと期限切れデータだけを収集します。'
+        ? (research.autoChannelKeys.has(researchChannelKey())
+          ? '自動取得ON：このチャンネルだけ、新規アーカイブと期限切れデータを差分更新します。設定はNiji Cloudで全端末共有。'
+          : '自動取得OFF：初期設定です。お気に入り等、取得したいライバーだけONにしてください。設定は全端末で共有されます。')
         : '検索結果ページは手動モード：保存済みDBは表示し、必要なときだけ取得を開始します。');
   }
 
@@ -8721,7 +8724,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
     wikiRefresh.addEventListener('click', () => void refreshResearchWiki());
     actions.append(csv, reset, rescan, wikiRetry, wikiRefresh); body.appendChild(actions);
     const note = document.createElement('div'); note.className = 'npf-r-note';
-    note.textContent = 'アーカイブ一覧の外部取得は手動開始です。Wiki照合は保存済み動画IDと投稿者名を優先。既存のDBは維持し、429時は取得を停止します。';
+    note.textContent = '自動取得は初期OFF。取得したいライバーのチャンネルだけONにすると、その設定をNiji Cloudで全端末共有し、新規アーカイブを差分更新します。Wiki照合済み動画のコラボ相手はWikiの人物名を正とします。';
     body.appendChild(note);
     panel.appendChild(body);
     (document.body || document.documentElement).appendChild(panel);
@@ -8750,8 +8753,9 @@ e.el.classList.toggle('npf-r-hidden', !show);
     if (active) {
       scheduleResearchScan(250);
       const key = researchChannelKey();
-      const shouldAutoCollect = isYoutubeArchiveChannelPage() ||
-        (key && research.autoChannelKeys.has(key));
+      // 自動取得は初期OFF。ユーザーがこのチャンネルをONにした場合だけ開始する。
+      // autoResearchChannels はNiji Cloudの共通設定として全端末で共有される。
+      const shouldAutoCollect = !!(key && research.autoChannelKeys.has(key));
       if (shouldAutoCollect && !research.collectionActive && !research.holodexPaused)
         startResearchCollection();
     }
