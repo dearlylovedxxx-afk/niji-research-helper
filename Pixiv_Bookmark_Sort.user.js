@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.14
+// @version      0.6.15
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -987,7 +987,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivSavedSearchesV0613) return;
+  if (window.__pixivSavedSearchesV0615) return;
   window.__pixivSavedSearchesV0613 = true;
 
   const STORAGE_KEY = 'pixiv-saved-searches-v1';
@@ -1214,7 +1214,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   async function cloudUpload(rows, revision, token = cloudToken) {
     const payload = {
       app: 'Niji Research Helper',
-      version: 'pixiv-saved-search-sync-v1',
+      version: '0.6.15',
       dbVersion: 1,
       exportedAt: new Date().toISOString(),
       sourceOrigin: location.origin,
@@ -1242,7 +1242,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
         'x-nrh-device': CLOUD_DEVICE,
         'x-nrh-origin': location.origin,
         'x-nrh-sha256': hash,
-        'x-nrh-version': 'pixiv-search-sync-v1',
+        'x-nrh-version': '0.6.15',
       },
       data: text,
       responseType: 'text',
