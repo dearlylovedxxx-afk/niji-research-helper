@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.72
+// @version      1.0.73
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.72';
+  const VERSION = '1.0.73';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -429,6 +429,7 @@
     searchWindowHours: 24,
     youtubeCopyMode: 'title-url',
     autoResearchChannels: [],
+    preferredCommentAuthors: [],
   };
 
   const state = {
@@ -4475,6 +4476,274 @@
     return String(author?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
   }
 
+  const YT_COMMENT_ROOT_SELECTOR = [
+    'ytd-comment-thread-renderer',
+    'ytd-comment-view-model',
+    'ytd-comment-renderer',
+    'ytm-comment-thread-renderer',
+    'ytm-comment-renderer'
+  ].join(',');
+
+  function youtubeCommentAuthorInfo(root) {
+    if (!(root instanceof Element)) return null;
+    const authorLink = root.querySelector(
+      'a#author-text[href], #author-text a[href], a[href^="/@"], a[href^="/channel/"], a[href^="/user/"], a[href^="/c/"]'
+    );
+    const authorText = root.querySelector('#author-text span, #author-text, .author-text');
+    const name = String(authorText?.textContent || authorLink?.textContent || '')
+      .replace(/\s+/g, ' ').trim().slice(0, 80);
+    let href = '';
+    let key = '';
+    try {
+      const raw = String(authorLink?.getAttribute?.('href') || authorLink?.href || '').trim();
+      if (raw) {
+        const url = new URL(raw, location.origin);
+        const path = url.pathname.replace(/\/+$/, '');
+        const m = path.match(/^\/(?:@[^/?#]+|channel\/UC[A-Za-z0-9_-]+|user\/[^/?#]+|c\/[^/?#]+)/i);
+        if (m) {
+          href = m[0];
+          key = 'channel:' + m[0].toLowerCase();
+        }
+      }
+    } catch {}
+    if (!key && name) key = 'name:' + normalizedName(name);
+    if (!key) return null;
+    return { key, name: name || href || key, href };
+  }
+
+  function preferredCommentAuthors() {
+    const raw = state.settings?.preferredCommentAuthors;
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const item of raw) {
+      const key = String(item?.key || '').trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        key,
+        name: String(item?.name || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+        href: String(item?.href || '').trim().slice(0, 180),
+      });
+      if (out.length >= 30) break;
+    }
+    return out;
+  }
+
+  function isPreferredCommentAuthor(info) {
+    if (!info?.key) return false;
+    return preferredCommentAuthors().some(x => x.key === info.key);
+  }
+
+  async function togglePreferredCommentAuthor(info) {
+    if (!info?.key) return;
+    const current = preferredCommentAuthors();
+    const exists = current.some(x => x.key === info.key);
+    state.settings.preferredCommentAuthors = exists
+      ? current.filter(x => x.key !== info.key)
+      : [...current, { key: info.key, name: info.name, href: info.href }].slice(-30);
+    await gmSet(KEY_SETTINGS, state.settings);
+    scanYoutubePreferredComments(true);
+    toast(exists ? `☆ ${info.name || 'このユーザー'} の優先表示を解除しました` : `⭐ ${info.name || 'このユーザー'} を優先コメントに登録しました`);
+  }
+
+  function youtubeCommentBody(root) {
+    return root?.querySelector?.('#content-text, .content-text, yt-attributed-string#content-text') || null;
+  }
+
+  function seekYoutubeFromPriority(seconds) {
+    const video = youtubeVideoElement();
+    if (!video) return toast('動画プレイヤーが見つかりません');
+    const sec = Math.max(0, Math.floor(Number(seconds) || 0));
+    const duration = Number.isFinite(video.duration) ? video.duration : Infinity;
+    video.currentTime = Math.min(duration, sec);
+    const play = video.play();
+    if (play?.catch) play.catch(() => {});
+  }
+
+  function makeYoutubePriorityCommentCard(root, info) {
+    const body = youtubeCommentBody(root);
+    const card = document.createElement('div');
+    card.className = 'npf-yt-priority-card';
+    card.style.cssText = [
+      'border:1px solid rgba(128,128,128,.28)','border-radius:12px','padding:10px 11px',
+      'background:rgba(127,127,127,.08)','color:inherit','font-family:-apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif'
+    ].join(';');
+
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:7px;';
+
+    const author = document.createElement(info.href ? 'a' : 'span');
+    author.textContent = `⭐ ${info.name || '優先ユーザー'}`;
+    author.style.cssText = 'font-weight:800;font-size:13px;color:inherit;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
+    if (info.href) author.href = info.href;
+
+    const unstar = document.createElement('button');
+    unstar.type = 'button';
+    unstar.textContent = '★ 優先中';
+    unstar.title = 'このユーザーの優先表示を解除';
+    unstar.style.cssText = [
+      'appearance:none','-webkit-appearance:none','border:1px solid rgba(128,128,128,.35)',
+      'border-radius:999px','padding:5px 8px','background:rgba(255,200,0,.13)','color:inherit',
+      'font:700 11px/1.2 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif','cursor:pointer'
+    ].join(';');
+    unstar.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      void togglePreferredCommentAuthor(info);
+    });
+
+    head.append(author, unstar);
+    card.appendChild(head);
+
+    const text = document.createElement('div');
+    text.className = 'npf-yt-priority-text';
+    text.textContent = String(body?.textContent || body?.innerText || '').replace(/\r/g, '').trim();
+    text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;';
+    card.appendChild(text);
+
+    const items = youtubeTimestampCommentItems(body);
+    if (items.length) {
+      const times = document.createElement('div');
+      times.style.cssText = 'display:flex;gap:5px;flex-wrap:wrap;margin-top:8px;';
+      for (const item of items.slice(0, 24)) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = formatClock(item.seconds);
+        btn.title = item.label ? `${formatClock(item.seconds)} ${item.label}` : `${formatClock(item.seconds)} へ移動`;
+        btn.style.cssText = [
+          'appearance:none','-webkit-appearance:none','border:1px solid rgba(80,130,220,.38)',
+          'border-radius:999px','padding:4px 7px','background:rgba(80,130,220,.10)','color:inherit',
+          'font:750 11px/1.2 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif','cursor:pointer'
+        ].join(';');
+        btn.addEventListener('click', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          seekYoutubeFromPriority(item.seconds);
+        });
+        times.appendChild(btn);
+      }
+      if (items.length >= 2) {
+        const pin = document.createElement('button');
+        pin.type = 'button';
+        pin.textContent = `📌 目次を固定（${items.length}）`;
+        pin.style.cssText = [
+          'appearance:none','-webkit-appearance:none','border:1px solid rgba(128,128,128,.35)',
+          'border-radius:999px','padding:4px 8px','background:rgba(127,127,127,.10)','color:inherit',
+          'font:750 11px/1.2 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif','cursor:pointer'
+        ].join(';');
+        pin.addEventListener('click', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          pinYoutubeTimestampComment(body);
+        });
+        times.appendChild(pin);
+      }
+      card.appendChild(times);
+    }
+    return card;
+  }
+
+  function priorityCommentMount(roots) {
+    const first = roots.find(root => root instanceof Element && root.isConnected);
+    if (!first) return null;
+    return first.parentElement || first;
+  }
+
+  function renderYoutubePriorityComments() {
+    if (!currentYoutubeVideoId()) {
+      $('#npf-yt-priority-comments')?.remove();
+      return;
+    }
+    const favorites = preferredCommentAuthors();
+    const roots = $$(YT_COMMENT_ROOT_SELECTOR).filter(root => !root.closest?.('#npf-yt-priority-comments'));
+    const mount = priorityCommentMount(roots);
+    if (!mount || !roots.length || !favorites.length) {
+      $('#npf-yt-priority-comments')?.remove();
+      return;
+    }
+
+    let box = $('#npf-yt-priority-comments');
+    if (!box) {
+      box = document.createElement('section');
+      box.id = 'npf-yt-priority-comments';
+    }
+    if (box.parentElement !== mount) mount.insertBefore(box, mount.firstChild);
+    box.replaceChildren();
+    box.style.cssText = [
+      'display:block','margin:8px 0 12px','padding:10px','border:1px solid rgba(255,190,0,.35)',
+      'border-radius:14px','background:rgba(255,190,0,.055)','color:inherit',
+      'font-family:-apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif'
+    ].join(';');
+
+    const title = document.createElement('div');
+    title.textContent = '⭐ 優先コメント';
+    title.style.cssText = 'font-size:14px;font-weight:850;margin-bottom:8px;';
+    box.appendChild(title);
+
+    const matched = [];
+    const seen = new Set();
+    for (const root of roots) {
+      const info = youtubeCommentAuthorInfo(root);
+      if (!info || seen.has(info.key) || !favorites.some(x => x.key === info.key)) continue;
+      seen.add(info.key);
+      matched.push({ root, info });
+    }
+
+    if (!matched.length) {
+      const waiting = document.createElement('div');
+      waiting.textContent = `登録済み：${favorites.map(x => x.name || x.href || 'ユーザー').join('、')}。まだこのコメント欄では読み込まれていません。スクロール等で読み込まれると、ここへ自動で表示します。`;
+      waiting.style.cssText = 'font-size:12px;line-height:1.55;opacity:.72;';
+      box.appendChild(waiting);
+      return;
+    }
+
+    const list = document.createElement('div');
+    list.style.cssText = 'display:grid;gap:8px;';
+    for (const {root, info} of matched) list.appendChild(makeYoutubePriorityCommentCard(root, info));
+    box.appendChild(list);
+  }
+
+  function bindYoutubePriorityButton(root) {
+    if (!(root instanceof Element)) return;
+    const info = youtubeCommentAuthorInfo(root);
+    if (!info) return;
+    let button = root.querySelector('.npf-yt-priority-author-btn');
+    if (!button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'npf-yt-priority-author-btn';
+      button.style.cssText = [
+        'appearance:none','-webkit-appearance:none','display:inline-flex','align-items:center',
+        'margin:7px 0 2px 6px','padding:5px 9px','border-radius:999px',
+        'border:1px solid rgba(128,128,128,.38)','background:rgba(127,127,127,.10)',
+        'color:inherit','font:700 12px/1.25 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif',
+        'cursor:pointer','vertical-align:middle'
+      ].join(';');
+      button.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        const latest = youtubeCommentAuthorInfo(root);
+        if (latest) void togglePreferredCommentAuthor(latest);
+      });
+      const mount = root.querySelector('#toolbar, #action-buttons, .toolbar');
+      const body = youtubeCommentBody(root);
+      if (mount) mount.appendChild(button);
+      else body?.insertAdjacentElement('afterend', button);
+    }
+    const preferred = isPreferredCommentAuthor(info);
+    button.textContent = preferred ? '★ 優先中' : '☆ この人を優先';
+    button.title = preferred ? 'このユーザーの優先表示を解除' : 'このユーザーのコメントをコメント欄上部へ表示';
+    button.style.setProperty('background', preferred ? 'rgba(255,200,0,.13)' : 'rgba(127,127,127,.10)');
+  }
+
+  function scanYoutubePreferredComments(force = false) {
+    if (!isYoutubeHost() || !currentYoutubeVideoId()) return;
+    const roots = $$(YT_COMMENT_ROOT_SELECTOR);
+    for (const root of roots) bindYoutubePriorityButton(root);
+    renderYoutubePriorityComments();
+  }
+
   async function saveYoutubeTimestampPin(videoId, items, author = '') {
     if (!videoId || !Array.isArray(items) || items.length < 2) return false;
     const now = Date.now();
@@ -4780,6 +5049,7 @@
   function syncYoutubeTimestampFeature() {
     if (!isYoutubeHost()) return;
     scanYoutubeTimestampComments();
+    scanYoutubePreferredComments();
     ensureYoutubeTimestampOverlay();
   }
 
