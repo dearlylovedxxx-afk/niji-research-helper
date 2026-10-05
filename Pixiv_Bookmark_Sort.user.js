@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.17
+// @version      0.6.18
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1239,6 +1239,160 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
+// ---- Pixiv home recommendation visibility (v0.6.18) ----
+(() => {
+  try { if (window.top !== window.self) return; } catch { return; }
+  'use strict';
+  if (window.__pixivHomeRecommendationVisibilityV0618) return;
+  window.__pixivHomeRecommendationVisibilityV0618 = true;
+
+  const KEY = 'pixiv-hide-home-recommendations-v1';
+  const ROOT_ID = 'pixiv-home-display-settings-v1';
+  const HIDDEN_ATTR = 'data-pixiv-home-recommendation-hidden';
+  let enabled = true;
+  let root = null;
+  let scanTimer = null;
+
+  function load() {
+    try {
+      const raw = localStorage.getItem(KEY);
+      enabled = raw == null ? true : raw === '1';
+    } catch { enabled = true; }
+  }
+
+  function save() {
+    try { localStorage.setItem(KEY, enabled ? '1' : '0'); } catch {}
+  }
+
+  function isHome() {
+    const p = location.pathname.replace(/\/+$/, '') || '/';
+    return p === '/' || /^\/[a-z]{2}(?:-[a-z]{2})?$/i.test(p);
+  }
+
+  function textOf(el) {
+    return String(el?.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function recommendationHeading(el) {
+    const t = textOf(el);
+    if (!t) return false;
+    if (/フォロー|following|新着|new works?/i.test(t)) return false;
+    return /おすすめ(?:作品|イラスト|マンガ|漫画|小説)?|あなたへのおすすめ|recommended(?: works?| illustrations?| manga| novels?)?|for you/i.test(t);
+  }
+
+  function artworkLinks(el) {
+    if (!el?.querySelectorAll) return 0;
+    return el.querySelectorAll('a[href*="/artworks/"],a[href*="/novel/show.php?id="]').length;
+  }
+
+  function candidateBlock(heading) {
+    const section = heading.closest?.('section');
+    if (section && artworkLinks(section) >= 1) return section;
+
+    let node = heading.parentElement;
+    let best = null;
+    for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+      if (node === document.body || node === document.documentElement) break;
+      const links = artworkLinks(node);
+      if (links >= 2) {
+        best = node;
+        const headings = node.querySelectorAll?.('h1,h2,h3,[role="heading"]').length || 0;
+        if (headings <= 2) break;
+      }
+    }
+    return best;
+  }
+
+  function clearHidden() {
+    document.querySelectorAll('[' + HIDDEN_ATTR + '="1"]').forEach(el => {
+      el.style.removeProperty('display');
+      el.removeAttribute(HIDDEN_ATTR);
+    });
+  }
+
+  function apply() {
+    clearTimeout(scanTimer);
+    scanTimer = null;
+
+    if (!enabled || !isHome()) {
+      clearHidden();
+      return;
+    }
+
+    const headings = document.querySelectorAll('h1,h2,h3,[role="heading"]');
+    for (const heading of headings) {
+      if (!recommendationHeading(heading)) continue;
+      const block = candidateBlock(heading);
+      if (!block) continue;
+      const allText = textOf(block).slice(0, 500);
+      if (/フォロー中の新着|following.*new|new.*following/i.test(allText)) continue;
+      block.setAttribute(HIDDEN_ATTR, '1');
+      block.style.setProperty('display', 'none', 'important');
+    }
+  }
+
+  function schedule() {
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(apply, 120);
+  }
+
+  function build() {
+    if (root?.isConnected) return root;
+    root = document.createElement('section');
+    root.id = ROOT_ID;
+    root.style.cssText = 'display:none;position:fixed;top:78px;right:0;bottom:0;left:0;z-index:2147483645;background:#f4f6f8;color:#263040;overflow:auto;padding:22px 14px 80px;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif;';
+    const card = document.createElement('div');
+    card.style.cssText = 'max-width:720px;margin:0 auto;background:#fff;border:1px solid #dde2e8;border-radius:14px;padding:16px;';
+    const title = document.createElement('h2');
+    title.textContent = '👁 Pixivトップ表示';
+    title.style.cssText = 'margin:0 0 12px;font-size:18px;';
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:10px;font-weight:700;';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = enabled;
+    input.style.cssText = 'width:20px;height:20px;';
+    const span = document.createElement('span');
+    span.textContent = 'トップの「おすすめ作品」系を非表示';
+    label.append(input, span);
+    const note = document.createElement('p');
+    note.textContent = 'フォロー中の新着、検索結果、タグ検索、ブックマーク、作品ページには影響しません。';
+    note.style.cssText = 'margin:10px 0 0;color:#66717e;font-size:12px;';
+    input.addEventListener('change', () => {
+      enabled = !!input.checked;
+      save();
+      apply();
+    });
+    card.append(title, label, note);
+    root.append(card);
+    document.body.append(root);
+    return root;
+  }
+
+  function open() {
+    build();
+    root.style.setProperty('display', 'block', 'important');
+    const input = root.querySelector('input[type="checkbox"]');
+    if (input) input.checked = enabled;
+  }
+
+  function close() {
+    root?.style.setProperty('display', 'none', 'important');
+  }
+
+  load();
+  apply();
+
+  const observer = new MutationObserver(schedule);
+  if (document.documentElement) observer.observe(document.documentElement, {childList:true, subtree:true});
+  window.addEventListener('popstate', schedule, true);
+  window.addEventListener('hashchange', schedule, true);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) schedule(); });
+
+  window.__pixivHomeDisplayUi = {open, close, apply, isEnabled:() => enabled};
+})();
+
+
 // ---- Unified Pixiv tools shell (v0.6.10) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
@@ -1289,6 +1443,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     return window.__pixivSavedSearchesUi || null;
   }
 
+  function displayUi() {
+    return window.__pixivHomeDisplayUi || null;
+  }
+
   function ensurePageSpecificUi() {
     // The novel module may be initialized a frame after this shell.
     const n = novelUi();
@@ -1326,6 +1484,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     savedSearchUi()?.close?.();
   }
 
+  function hideDisplaySettings() {
+    displayUi()?.close?.();
+  }
+
   function showPlaceholder(message) {
     const node = document.getElementById(PLACEHOLDER_ID);
     if (!node) return;
@@ -1351,6 +1513,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     hidePlaceholder();
     hideNovel();
     hideSavedSearches();
+    hideDisplaySettings();
 
     if (!isSearchPage()) {
       hideBookmark();
@@ -1373,6 +1536,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     hidePlaceholder();
     hideBookmark();
     hideSavedSearches();
+    hideDisplaySettings();
 
     if (!isNovelPage()) {
       hideNovel();
@@ -1399,6 +1563,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     hidePlaceholder();
     hideBookmark();
     hideNovel();
+    hideDisplaySettings();
     const s = savedSearchUi();
     if (!s?.open) {
       showPlaceholder('保存検索機能を準備中です。少し待ってからもう一度お試しください。');
@@ -1407,10 +1572,26 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     s.open();
   }
 
+  function openDisplaySettings() {
+    active = 'display';
+    paintTabs();
+    hidePlaceholder();
+    hideBookmark();
+    hideNovel();
+    hideSavedSearches();
+    const d = displayUi();
+    if (!d?.open) {
+      showPlaceholder('表示設定を準備中です。少し待ってからもう一度お試しください。');
+      return;
+    }
+    d.open();
+  }
+
   function switchTo(tab) {
     ensurePageSpecificUi();
     if (tab === 'novel') openNovel();
     else if (tab === 'searches') openSavedSearches();
+    else if (tab === 'display') openDisplaySettings();
     else openBookmark();
   }
 
@@ -1419,6 +1600,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     hidePlaceholder();
     hideNovel();
     hideSavedSearches();
+    hideDisplaySettings();
 
     const b = bookmarkUi();
     if (b?.veil?.classList.contains('open') && b.close) b.close.click();
@@ -1501,13 +1683,19 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     searches.textContent = '🔖 保存検索';
     searches.addEventListener('click', () => switchTo('searches'));
 
+    const display = document.createElement('button');
+    display.type = 'button';
+    display.dataset.toolTab = 'display';
+    display.textContent = '👁 表示';
+    display.addEventListener('click', () => switchTo('display'));
+
     const close = document.createElement('button');
     close.type = 'button';
     close.className = 'pt-close';
     close.textContent = '閉じる';
     close.addEventListener('click', closeAll);
 
-    bar.append(title, searches, bookmark, novel, close);
+    bar.append(title, searches, bookmark, novel, display, close);
 
     const placeholder = document.createElement('div');
     placeholder.id = PLACEHOLDER_ID;
