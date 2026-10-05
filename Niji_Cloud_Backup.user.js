@@ -1,15 +1,13 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.1.7
+// @version      0.1.8
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
-// @description  OR検索・X保存検索・Pixiv調査DB/保存検索・pictBLand保存検索をアプリ別にpCloudへ保存・検証・安全に統合復元。
+// @description  OR検索・X保存検索・Pixiv調査DB/保存検索をアプリ別にpCloudへ保存・検証・安全に統合復元。pictBLand保存検索はpictBLand本体の自動同期へ移行。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @match        https://www.pixiv.net/*
-// @match        https://pictbland.net/*
-// @match        https://www.pictbland.net/*
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @grant        GM.xmlHttpRequest
@@ -27,8 +25,6 @@ const APPS={
  'x.com':{id:'x',label:'X Search Favorites',name:'X Search Favorites'},
  'twitter.com':{id:'x',label:'X Search Favorites',name:'X Search Favorites'},
  'www.pixiv.net':{id:'pixiv',label:'Pixivブクマ順',name:'Pixiv Bookmark Sort'},
- 'pictbland.net':{id:'pictbland',label:'pictBLand',name:'pictBLand Tools'},
- 'www.pictbland.net':{id:'pictbland',label:'pictBLand',name:'pictBLand Tools'},
 };
 const app=APPS[location.hostname.toLowerCase()];if (!app) return;
 const GATEWAY='https://niji-research-backup.dearlylovedxxx.workers.dev';
