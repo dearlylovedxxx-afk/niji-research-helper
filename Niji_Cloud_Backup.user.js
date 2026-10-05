@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.2.2
+// @version      0.2.3
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
@@ -597,6 +597,7 @@ stateText(settings.enabled?`☁️ 全端末共通同期ON。最終同期：${se
 function integrateNativeBackup() {
  try {
   let slot=null, nativeReady=false;
+
   if(app.id==='or') {
    const root=document.getElementById('niji-or-root');
    slot=root?.querySelector('.nor-body > details');
@@ -606,38 +607,77 @@ function integrateNativeBackup() {
    nativeReady=!!root?.querySelector('#bar button');
    slot=root?.querySelector('#panel [data-ncb-slot="x"]');
   } else if(app.id==='pixiv') {
-   const root=document.getElementById('pixiv-bookmark-sort-cross-page-v05')?.shadowRoot;
-   const counted=root?.querySelector('.counted');
-   if(counted?.parentNode) {
-    slot=counted.parentNode;
+   // Pixivは「♥全体ブックマーク」の中ではなく、統合Pixivツール上部の
+   // 保存検索 / 全体ブックマーク / 小説TXT と同列にNiji Cloudを出す。
+   const bar=document.getElementById('pixiv-tools-unified-bar');
+   if(bar){
     nativeReady=true;
+    slot=bar;
+
+    let button=bar.querySelector('[data-ncb-native-backup="pixiv"]');
+    if(!button){
+      button=document.createElement('button');
+      button.type='button';
+      button.dataset.ncbNativeBackup='pixiv';
+      button.dataset.toolTab='niji-cloud';
+      button.textContent='☁️ Niji Cloud';
+      button.addEventListener('click',()=>{
+        // Pixiv側の他画面を閉じるため、既存タブのactiveだけ外してCloudを選択状態にする。
+        for(const b of bar.querySelectorAll('[data-tool-tab]'))b.classList.toggle('active',b===button);
+        try{window.__pixivSavedSearchesUi?.close?.();}catch{}
+        try{
+          const root=document.getElementById('pixiv-bookmark-sort-cross-page-v05')?.shadowRoot;
+          root?.querySelector('.pbs-new-overlay')?.classList.remove('pbs-open');
+          root?.querySelector('.veil')?.classList.remove('open');
+        }catch{}
+        document.getElementById('pnte-root')?.classList.remove('pnte-open');
+        document.getElementById('pixiv-tools-unified-placeholder')?.classList.remove('open');
+        panel.hidden=false;
+        panel.style.setProperty('top','78px','important');
+        panel.style.setProperty('height','calc(100dvh - 78px)','important');
+        update();
+      });
+
+      const close=bar.querySelector('.pt-close');
+      if(close)bar.insertBefore(button,close);
+      else bar.append(button);
+
+      // 他のPixivツールタブへ移ったらCloud画面を閉じる。
+      for(const b of bar.querySelectorAll('[data-tool-tab]:not([data-ncb-native-backup="pixiv"])')){
+        b.addEventListener('click',()=>{
+          panel.hidden=true;
+          panel.style.removeProperty('top');
+          panel.style.removeProperty('height');
+        });
+      }
+      close?.addEventListener('click',()=>{
+        panel.hidden=true;
+        panel.style.removeProperty('top');
+        panel.style.removeProperty('height');
+      });
+    }
    }
   } else if(app.id==='pictbland') {
    const bar=document.getElementById('pictbland-tools-unified-bar');
    slot=bar?.querySelector('[data-ncb-slot="pictbland"]');
    nativeReady=!!slot;
   }
-  if(slot && !slot.querySelector('[data-ncb-native-backup="'+app.id+'"]')) {
+
+  if(app.id!=='pixiv' && slot && !slot.querySelector('[data-ncb-native-backup="'+app.id+'"]')) {
    const button=document.createElement('button');
    button.type='button';
    button.dataset.ncbNativeBackup=app.id;
    button.textContent='☁️ Niji Cloud';
    if(app.id==='or')button.className='nor-button';
-   if(app.id==='pixiv') {
-    button.style.cssText='display:block!important;width:100%!important;margin:9px 0!important;min-height:44px!important;padding:10px!important;border-radius:9px!important;background:#156a89!important;color:#fff!important;border:0!important;font:700 14px system-ui!important;cursor:pointer!important';
-   } else if(app.id==='x') {
+   if(app.id==='x') {
     button.style.cssText='min-height:43px!important;padding:8px 10px!important;border-radius:9px!important;border:1px solid #9baeca!important;background:#e9f5fc!important;color:#173b54!important;font:700 12px system-ui!important;cursor:pointer!important';
    } else if(app.id==='pictbland') {
-    button.textContent='☁️ Niji Cloud';
     button.style.cssText='min-height:34px!important;padding:8px 7px!important;border-radius:9px!important;border:1px solid #cec7dc!important;background:#fff!important;color:#33294a!important;font:700 11px system-ui!important;cursor:pointer!important';
    }
    button.addEventListener('click',()=>{panel.hidden=false;update();});
-   if(app.id==='pixiv') {
-    const counted=slot.querySelector('.counted');
-    if(counted)counted.after(button);
-    else slot.append(button);
-   } else slot.append(button);
+   slot.append(button);
   }
+
   if(app.id==='x'||app.id==='pictbland'||nativeReady) launch.style.setProperty('display','none','important');
   else launch.style.removeProperty('display');
  } catch(e) { console.warn('[NCB] native menu attachment failed',e); }
