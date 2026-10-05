@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji OR Results Merger (standalone add-on)
 // @namespace    niji-or-results-merger-standalone
-// @version      0.4.14
+// @version      0.4.15
 // @description  コメントOR試験版。動画タイトル・配信日時の補完、明示的な並び順、正しい動画IDのタイムスタンプと直接開けるコメント一覧。本体DBは変更しません。
 // @match        https://comment2434.com/*
 // @match        https://www.comment2434.com/*
@@ -31,7 +31,7 @@
   const boot=document.createElement('button');
   boot.id=bootId;
   boot.type='button';
-  boot.textContent='🔀 OR起動中 0.4.14';
+  boot.textContent='🔀 OR起動中 0.4.15';
   boot.style.cssText='position:fixed!important;top:45px!important;left:8px!important;bottom:auto!important;z-index:2147483647!important;min-width:104px!important;min-height:44px!important;background:#4d35a4!important;color:white!important;border:2px solid #fff!important;border-radius:24px!important;padding:10px!important;pointer-events:auto!important;display:block!important;font:700 13px system-ui!important;';
   (document.body||document.documentElement).append(boot);
   const mergedStyleId='niji-or-pov-combined-style';
@@ -51,16 +51,17 @@
     restoreBootEnabled=false;
     clearInterval(recoveryTimer);
     if (hostRecoveryTimer) clearInterval(hostRecoveryTimer);
+    try { window.removeEventListener('niji-cloud-or-applied', onNijiCloudOrApplied); } catch {}
     boot.remove();
     mergedStyle.remove();
     document.getElementById('niji-or-root')?.remove();
   };
-  console.info('[Niji OR Merger] v0.4.14 injected', location.href);
+  console.info('[Niji OR Merger] v0.4.15 injected', location.href);
   const previousRoot = document.getElementById('niji-or-root');
   if (previousRoot) previousRoot.remove();
 
   const STORAGE_KEY = 'niji_or_merger_addon_batches_v1';
-  const VERSION = '0.4.14';
+  const VERSION = '0.4.15';
   const VIDEO_META_KEY = 'niji_or_merger_addon_video_metadata_v046';
   const RESULT_SORT_KEY = 'niji_or_merger_addon_result_sort_v046';
   const AUTO_KEY = 'niji_or_merger_addon_auto_v3';
@@ -1281,6 +1282,32 @@
     if(['comments','newest','oldest','title'].includes(savedSort)) resultSort=savedSort;
   } catch(err) {console.warn('[Niji OR Merger] v0.4.1 restore',err);}
   render();
+
+  async function refreshFromNijiCloud() {
+    if (busy || autoRunning || runDriving || runJob?.active || multiJob?.active) {
+      setTimeout(() => void refreshFromNijiCloud(), 1500);
+      return;
+    }
+    try {
+      const saved=await storeGet(STORAGE_KEY,[]);
+      if(Array.isArray(saved)) batches=saved.filter(b=>b&&typeof b.label==='string'&&Array.isArray(b.rows));
+      const savedMeta=await storeGet(VIDEO_META_KEY,{});
+      if(savedMeta&&typeof savedMeta==='object'&&!Array.isArray(savedMeta)) videoMetadata=savedMeta;
+      const savedSort=await storeGet(RESULT_SORT_KEY,'comments');
+      if(['comments','newest','oldest','title'].includes(savedSort)) resultSort=savedSort;
+      const last=await storeGet(LAST_WORDS_KEY,[]);
+      if(Array.isArray(last)) lastRunWords=last;
+      const savedMin=await storeGet(MIN_COMMENTS_KEY,null);
+      if(Number.isSafeInteger(savedMin)&&savedMin>=1&&savedMin<=9999) minimumInput.value=String(savedMin);
+      render();
+      console.info('[Niji OR Merger] Niji Cloud shared data applied');
+    } catch (e) {
+      console.warn('[Niji OR Merger] Niji Cloud UI refresh failed', e);
+    }
+  }
+  const onNijiCloudOrApplied=()=>void refreshFromNijiCloud();
+  window.addEventListener('niji-cloud-or-applied',onNijiCloudOrApplied);
+
   if(runJob?.active) void driveRun();
   hostRecoveryTimer=setInterval(() => {
     if (!host.isConnected && document.body) document.body.append(host);
@@ -1320,10 +1347,18 @@ const APPS={
 const app=APPS[location.hostname.toLowerCase()];if (!app) return;
 const GATEWAY='https://niji-research-backup.dearlylovedxxx.workers.dev';
 const CONFIG='ncb_app_cloud_v1_'+app.id;
+const GLOBAL_TOKEN_KEY='ncb_client_token_v1';
 const CHUNK=3*1024*1024, MAX_PARTS=80;
 const enc=new TextEncoder(), dec=new TextDecoder('utf-8',{fatal:true});
 let settings={enabled:false,token:'',lastSavedAt:0,lastSha:'',syncInitialized:false,lastContentSha:'',lastRemoteId:'',lastSyncAt:0},working=false,nextScan=0,notice='未接続';
-try {settings={...settings,...await GM.getValue(CONFIG,{})};}catch(e){console.warn('[NCB] config read',e);}
+try {
+ const savedConfig=await GM.getValue(CONFIG,null);
+ if(savedConfig&&typeof savedConfig==='object')settings={...settings,...savedConfig};
+ const globalToken=String(await GM.getValue(GLOBAL_TOKEN_KEY,'')||'').trim();
+ if(!settings.token&&globalToken&&savedConfig===null){
+  settings.token=globalToken;settings.enabled=true;
+ }
+}catch(e){console.warn('[NCB] config read',e);}
 const device=()=>`shared-${app.id}`;
 const el=(tag,klass='',value)=>{const n=document.createElement(tag);if(klass)n.className=klass;if(value!==undefined)n.textContent=value;return n;};
 const sha=async data=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),b=>b.toString(16).padStart(2,'0')).join('');
@@ -1375,6 +1410,7 @@ async function requestOr(action,payload){
    if([OR_KEYS[3],OR_KEYS[4],OR_KEYS[5]].includes(key) && value && typeof value==='object') value={...value,active:false};
    await orSet(key,value??null);
   }
+  try{window.dispatchEvent(new Event('niji-cloud-or-applied'));}catch{}
   return `OR共有データを反映しました（保存結果${payload[OR_KEYS[0]].length}件）`;
  }
  if(action!=='merge'||!payload||typeof payload!=='object'||!Array.isArray(payload[OR_KEYS[0]]))throw Error('ORのバックアップ形式が違います');
@@ -1402,7 +1438,8 @@ async function requestOr(action,payload){
  if(!sort&&['comments','newest','oldest','title'].includes(payload[OR_KEYS[2]]))await orSet(OR_KEYS[2],payload[OR_KEYS[2]]);
  const minimum=await orGet(OR_KEYS[7],null);
  if(minimum===null&&Number.isSafeInteger(payload[OR_KEYS[7]]))await orSet(OR_KEYS[7],payload[OR_KEYS[7]]);
- return `ORリスト${merged.length}件を統合しました。comment2434を再読み込みしてください。`;
+ try{window.dispatchEvent(new Event('niji-cloud-or-applied'));}catch{}
+ return `ORリスト${merged.length}件を統合しました。`;
 }
 async function existingDb(name,create=false){
  return new Promise((resolve,reject)=>{
@@ -1477,32 +1514,72 @@ function hasMeaningfulPayload(obj){
  return !!(p.savedSearches?.length||(p.databases||[]).some(d=>Object.values(d.stores||{}).some(rows=>Array.isArray(rows)&&rows.length))||
    p.preferences?.minimum!=null||p.preferences?.sort!=null);
 }
-async function mergePixivDatabases(databases){
- let inserted=0;
+async function mergePixivDatabases(databases,{replace=false}={}){
+ let changed=0;
  const allowed={'pixiv-bookmark-sort-cross-page-v02':['works','meta'],'pixiv-bookmark-sort-extras-v01':['details']};
- for(const item of databases||[]){
-  if(!allowed[item.name]||!item.stores||typeof item.stores!=='object')throw Error('PixivバックアップのDB形式が違います');
-  const db=await existingDb(item.name,true);
+ const incomingByName=new Map((Array.isArray(databases)?databases:[]).map(x=>[x?.name,x]));
+ for(const [name,stores] of Object.entries(allowed)){
+  const item=incomingByName.get(name);
+  if(!item){
+   // A missing database can also mean that device never opened this feature.
+   // Do not erase an entire local DB solely because the snapshot omitted it.
+   continue;
+  }
+  if(!item.stores||typeof item.stores!=='object')throw Error('PixivバックアップのDB形式が違います');
+  const db=await existingDb(name,true);
   try{
-   for(const store of allowed[item.name]){
-    const rows=item.stores[store];if(!rows)continue;
-    if(!Array.isArray(rows)||!db.objectStoreNames.contains(store))throw Error('Pixiv DBストアが一致しません: '+store);
+   for(const store of stores){
+    const rows=item.stores[store];
+    if(!Array.isArray(rows)||!db.objectStoreNames.contains(store))continue;
+
+    if(replace){
+     changed+=await new Promise((resolve,reject)=>{
+      const tx=db.transaction(store,'readwrite'),st=tx.objectStore(store);
+      st.clear();
+      for(const row of rows){
+       if(!row||typeof row.key!=='string'||!row.key)continue;
+       st.put(row);
+      }
+      tx.oncomplete=()=>resolve(rows.length);
+      tx.onerror=()=>reject(tx.error||Error('DB書き込み失敗'));
+      tx.onabort=()=>reject(tx.error||Error('DB反映中断'));
+     });
+     continue;
+    }
+
     for(let offset=0;offset<rows.length;offset+=250){
      const group=rows.slice(offset,offset+250);
-     inserted+=await new Promise((resolve,reject)=>{
-      let added=0;const tx=db.transaction(store,'readwrite'),st=tx.objectStore(store);
-      tx.oncomplete=()=>resolve(added);tx.onerror=()=>reject(tx.error||Error('DB書き込み失敗'));tx.onabort=()=>reject(tx.error||Error('DB復元中断'));
+     changed+=await new Promise((resolve,reject)=>{
+      let count=0;const tx=db.transaction(store,'readwrite'),st=tx.objectStore(store);
+      tx.oncomplete=()=>resolve(count);tx.onerror=()=>reject(tx.error||Error('DB書き込み失敗'));tx.onabort=()=>reject(tx.error||Error('DB復元中断'));
       for(const row of group){
        if(!row||typeof row.key!=='string'||!row.key)continue;
        const get=st.get(row.key);
-       get.onsuccess=()=>{if(get.result===undefined){st.put(row);added++;}};
+       get.onsuccess=()=>{
+        const local=get.result;
+        if(local===undefined){st.put(row);count++;return;}
+        if(store==='works'){
+         const localStatus=Number(local?.status||0),remoteStatus=Number(row?.status||0);
+         if(localStatus===0&&remoteStatus!==0){st.put({...local,...row});count++;}
+        }else if(store==='meta'){
+         const merged={...row,...local};
+         for(const key of ['nextPage','total','discovered','processed','skipped','pageSize','lastPage']){
+          const a=Number(local?.[key]),b=Number(row?.[key]);
+          if(Number.isFinite(a)||Number.isFinite(b))merged[key]=Math.max(Number.isFinite(a)?a:0,Number.isFinite(b)?b:0);
+         }
+         merged.searchDone=!!(local?.searchDone||row?.searchDone);
+         st.put(merged);count++;
+        }else if(store==='details'){
+         st.put({...row,...local});count++;
+        }
+       };
       }
      });
     }
    }
   }finally{db.close();}
  }
- return inserted;
+ return changed;
 }
 function normalizePictRows(rows){
  const out=[],seen=new Set();
@@ -1534,6 +1611,7 @@ async function restore(snap,{mode='merge'}={}){
   }
   localStorage.setItem('xsf_userscript_v1',JSON.stringify(result));
   try{window.dispatchEvent(new Event('xsf-cloud-sync-applied'));}catch{}
+  try{window.dispatchEvent(new CustomEvent('niji-cloud-sync-applied',{detail:{app:'x'}}));}catch{}
   return `X共有データを反映しました（保存検索${result.savedSearches.length}件・履歴${result.history.length}件）`;
  }
  if(app.id==='pictbland'){
@@ -1547,9 +1625,10 @@ async function restore(snap,{mode='merge'}={}){
   }
   localStorage.setItem('pictbland-saved-search-words-v1',JSON.stringify(rows));
   try{window.__pictblandSavedSearchUi?.render?.();}catch{}
+  try{window.dispatchEvent(new CustomEvent('niji-cloud-sync-applied',{detail:{app:'pictbland'}}));}catch{}
   return `pictBLand共有検索${rows.length}件を反映しました`;
  }
- const count=await mergePixivDatabases(snap.payload.databases||[]);
+ const count=await mergePixivDatabases(snap.payload.databases||[],{replace:mode==='replace'});
  const pref=snap.payload.preferences||{};
  if(mode==='replace'){
   if(typeof pref.minimum==='string')localStorage.setItem('pixiv-bookmark-sort-minimum-v03',pref.minimum);
@@ -1574,7 +1653,8 @@ async function restore(snap,{mode='merge'}={}){
   localStorage.setItem('pixiv-saved-searches-v1',JSON.stringify(merged));
  }
  try{window.dispatchEvent(new Event('pixiv-saved-searches-changed'));}catch{}
- return `Pixiv共有データを反映しました（DB追加${count}件・保存検索${(JSON.parse(localStorage.getItem('pixiv-saved-searches-v1')||'[]')).length}件）`;
+ try{window.dispatchEvent(new CustomEvent('niji-cloud-sync-applied',{detail:{app:'pixiv'}}));}catch{}
+ return `Pixiv共有データを反映しました（DB反映${count}件・保存検索${(JSON.parse(localStorage.getItem('pixiv-saved-searches-v1')||'[]')).length}件）`;
 }
 function genericRequest(details){
  const api=GM.xmlHttpRequest||GM.xmlhttpRequest;
@@ -1810,7 +1890,9 @@ connect.onclick=async()=>{
   if(app.id==='pictbland')status=await genericJson('GET','/v1/status',null,token);
   else status=await xhr('GET','/status',null,token);
   if(!status.connected||!status.remoteOk)throw Error('pCloudが接続されていません');
-  settings.token=token;settings.enabled=true;settings.syncInitialized=false;settings.lastContentSha='';settings.lastRemoteId='';settings.lastSyncAt=0;await saveSettings();tokenInput.value='';
+  settings.token=token;settings.enabled=true;settings.syncInitialized=false;settings.lastContentSha='';settings.lastRemoteId='';settings.lastSyncAt=0;
+  await GM.setValue(GLOBAL_TOKEN_KEY,token);
+  await saveSettings();tokenInput.value='';
   stateText('接続OK。全端末共通データを初回同期します。');
  }catch(e){stateText('⚠️ 接続できません：'+String(e.message||e));}
  finally{working=false;update();}
@@ -1822,6 +1904,7 @@ disconnect.onclick=async()=>{
  if(!confirm('この端末のNiji Cloud同期を停止しますか？ クラウドとローカルのデータは削除しません。'))return;
  settings.enabled=false;settings.token='';settings.lastSha='';await saveSettings();stateText('この端末の自動同期を停止しました。クラウド上の共通データは残っています。');update();
 };
+if(settings.enabled&&settings.token)void saveSettings().catch(()=>{});
 stateText(settings.enabled?`☁️ 全端末共通同期ON。最終同期：${settings.lastSyncAt?new Date(settings.lastSyncAt).toLocaleString('ja-JP'):'これから同期'}`:'未接続：NIJI CLIENT TOKENを入力してください');update();
 // Keep a single launcher per site: expose backup inside each existing tool's panel.
 // Cloud credentials and data stay in this userscript; native buttons only open its panel.
