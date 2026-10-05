@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット v1
 // @namespace    marina-youtube-mobile-enhancer-v1
-// @version      1.0.1
+// @version      1.1.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer_v1.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.1';
+  const VERSION = '1.1.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -371,13 +371,14 @@
       html.${CLASS_FULLSCREEN} [data-ytme-app-promo="1"],
       html.${CLASS_FULLSCREEN} #marina-member-chat-search-button,
       html.${CLASS_FULLSCREEN} #marina-member-chat-search-panel,
-      html.${CLASS_FULLSCREEN} [id^="npf-yt-"],
-      html.${CLASS_FULLSCREEN} [id^="npf-floating"],
-      html.${CLASS_FULLSCREEN} #npf-fab,
-      html.${CLASS_FULLSCREEN} #npf-research-fab,
-      html.${CLASS_LANDSCAPE} #npf-fab,
-      html.${CLASS_LANDSCAPE} #npf-research-fab {
+      html.${CLASS_FULLSCREEN} [id^="npf-"],
+      html.${CLASS_LANDSCAPE} [id^="npf-"],
+      html.${CLASS_FULLSCREEN} #marina-member-chat-search-button,
+      html.${CLASS_FULLSCREEN} #marina-member-chat-search-panel,
+      html.${CLASS_LANDSCAPE} #marina-member-chat-search-button,
+      html.${CLASS_LANDSCAPE} #marina-member-chat-search-panel {
         display: none !important;
+        visibility: hidden !important;
       }
 
       html.${CLASS_FULLSCREEN} ytd-app,
@@ -539,15 +540,31 @@
       html.${CLASS_LANDSCAPE} #full-bleed-container ytd-player,
       html.${CLASS_LANDSCAPE} #player ytd-player,
       html.${CLASS_LANDSCAPE} #movie_player {
-        width: 100% !important;
-        max-width: none !important;
+        width: 100vw !important;
+        min-width: 100vw !important;
+        max-width: 100vw !important;
+        height: var(--ytme-stage-height, 100dvh) !important;
+        min-height: var(--ytme-stage-height, 100dvh) !important;
+        max-height: var(--ytme-stage-height, 100dvh) !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        background: #000 !important;
       }
 
-      html.${CLASS_FULLSCREEN} #player-theater-container ytd-player,
-      html.${CLASS_FULLSCREEN} #full-bleed-container ytd-player,
-      html.${CLASS_FULLSCREEN} #movie_player {
+      html.${CLASS_FULLSCREEN} #movie_player video.video-stream,
+      html.${CLASS_FULLSCREEN} #movie_player video.html5-main-video,
+      html.${CLASS_FULLSCREEN} #movie_player video,
+      html.${CLASS_LANDSCAPE} #movie_player video.video-stream,
+      html.${CLASS_LANDSCAPE} #movie_player video.html5-main-video,
+      html.${CLASS_LANDSCAPE} #movie_player video {
+        width: 100% !important;
         height: 100% !important;
+        max-width: none !important;
         max-height: none !important;
+        left: 0 !important;
+        top: 0 !important;
+        margin: 0 !important;
+        object-fit: contain !important;
       }
 
       html.${CLASS_FULLSCREEN} iframe[src*="live_chat"],
@@ -732,7 +749,17 @@
         }
       }
 
-      if (best) best.setAttribute('data-ytme-app-promo', '1');
+      if (best) {
+        best.setAttribute('data-ytme-app-promo', '1');
+        best.style.setProperty('display', 'none', 'important');
+        best.style.setProperty('visibility', 'hidden', 'important');
+        best.style.setProperty('height', '0', 'important');
+        best.style.setProperty('min-height', '0', 'important');
+        best.style.setProperty('max-height', '0', 'important');
+        best.style.setProperty('margin', '0', 'important');
+        best.style.setProperty('padding', '0', 'important');
+        best.style.setProperty('overflow', 'hidden', 'important');
+      }
     }
   }
 
@@ -1066,29 +1093,52 @@
     setTimeout(ensureTheaterMode, 300);
 
     const widen = () => {
+      const stageHeight = `${Math.round(window.visualViewport?.height || window.innerHeight)}px`;
+      ROOT.style.setProperty('--ytme-stage-height', stageHeight);
+
       const selectors = [
         '#columns', '#primary', '#primary-inner',
         '#player-theater-container', '#full-bleed-container',
         '#player', '#player-container-outer', '#player-container-inner', '#player-container',
-        'ytd-player'
+        'ytd-player', '#movie_player'
       ];
       for (const selector of selectors) {
         for (const el of document.querySelectorAll(selector)) {
           el.style.setProperty('max-width', 'none', 'important');
           el.style.setProperty('margin-left', '0', 'important');
           el.style.setProperty('margin-right', '0', 'important');
-          if (selector !== 'ytd-player') {
-            el.style.setProperty('width', '100vw', 'important');
-            el.style.setProperty('min-width', '100vw', 'important');
-          } else {
-            el.style.setProperty('width', '100%', 'important');
+          el.style.setProperty('width', selector === 'ytd-player' ? '100%' : '100vw', 'important');
+          el.style.setProperty('min-width', selector === 'ytd-player' ? '100%' : '100vw', 'important');
+
+          if (
+            selector === '#player-theater-container' ||
+            selector === '#full-bleed-container' ||
+            selector === '#player' ||
+            selector === '#player-container-outer' ||
+            selector === '#player-container-inner' ||
+            selector === '#player-container' ||
+            selector === 'ytd-player' ||
+            selector === '#movie_player'
+          ) {
+            el.style.setProperty('height', stageHeight, 'important');
+            el.style.setProperty('min-height', stageHeight, 'important');
+            el.style.setProperty('max-height', stageHeight, 'important');
           }
         }
       }
+
+      for (const video of document.querySelectorAll('#movie_player video, video.html5-main-video, video.video-stream')) {
+        video.style.setProperty('width', '100%', 'important');
+        video.style.setProperty('height', '100%', 'important');
+        video.style.setProperty('max-width', 'none', 'important');
+        video.style.setProperty('max-height', 'none', 'important');
+        video.style.setProperty('left', '0', 'important');
+        video.style.setProperty('top', '0', 'important');
+        video.style.setProperty('object-fit', 'contain', 'important');
+      }
     };
     widen();
-    setTimeout(widen, 80);
-    setTimeout(widen, 350);
+    for (const delay of [80, 180, 350, 700, 1200]) setTimeout(widen, delay);
 
     try {
       const anchor =
