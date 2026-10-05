@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット
 // @namespace    marina-youtube-mobile-enhancer
-// @version      0.2.0
+// @version      0.3.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.3.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -262,22 +262,61 @@
 
       html.${CLASS_FULLSCREEN},
       html.${CLASS_FULLSCREEN} body {
+        margin: 0 !important;
+        padding: 0 !important;
         overflow: hidden !important;
         overscroll-behavior: none !important;
         background: #000 !important;
       }
 
-      html.${CLASS_FULLSCREEN} body > *:not(.ytme-keep) {
-        overscroll-behavior: none !important;
+      /* iPhone Safariでは動画の祖先を fixed にすると映像レイヤーだけ黒くなることがある。
+         そのためページ側を1画面に畳み、プレイヤー自身は通常フローのまま全面化する。 */
+      html.${CLASS_FULLSCREEN} ytd-masthead,
+      html.${CLASS_FULLSCREEN} #masthead-container,
+      html.${CLASS_FULLSCREEN} ytm-mobile-topbar-renderer,
+      html.${CLASS_FULLSCREEN} ytd-app-promo-renderer,
+      html.${CLASS_FULLSCREEN} ytm-app-promo,
+      html.${CLASS_FULLSCREEN} [data-ytme-app-promo="1"],
+      html.${CLASS_FULLSCREEN} #marina-member-chat-search-button,
+      html.${CLASS_FULLSCREEN} #marina-member-chat-search-panel,
+      html.${CLASS_FULLSCREEN} [id^="npf-yt-"],
+      html.${CLASS_FULLSCREEN} [id^="npf-floating"] {
+        display: none !important;
+      }
+
+      html.${CLASS_FULLSCREEN} ytd-app,
+      html.${CLASS_FULLSCREEN} #content,
+      html.${CLASS_FULLSCREEN} #page-manager,
+      html.${CLASS_FULLSCREEN} ytd-watch-flexy,
+      html.${CLASS_FULLSCREEN} #columns,
+      html.${CLASS_FULLSCREEN} #primary,
+      html.${CLASS_FULLSCREEN} #primary-inner,
+      html.${CLASS_FULLSCREEN} #player,
+      html.${CLASS_FULLSCREEN} #player-container,
+      html.${CLASS_FULLSCREEN} #player-container-inner,
+      html.${CLASS_FULLSCREEN} #player-container-outer {
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        max-width: none !important;
+      }
+
+      html.${CLASS_FULLSCREEN} #secondary,
+      html.${CLASS_FULLSCREEN} #below,
+      html.${CLASS_FULLSCREEN} ytd-watch-metadata,
+      html.${CLASS_FULLSCREEN} #comments,
+      html.${CLASS_FULLSCREEN} #related {
+        visibility: hidden !important;
+        pointer-events: none !important;
       }
 
       .${CLASS_PLAYER} {
-        position: fixed !important;
-        inset: 0 !important;
+        position: relative !important;
+        inset: auto !important;
         width: 100vw !important;
-        height: 100dvh !important;
+        height: var(--ytme-stage-height, 100dvh) !important;
         min-width: 100vw !important;
-        min-height: 100dvh !important;
+        min-height: var(--ytme-stage-height, 100dvh) !important;
         max-width: none !important;
         max-height: none !important;
         margin: 0 !important;
@@ -291,19 +330,19 @@
       .${CLASS_PLAYER} #movie_player,
       .${CLASS_PLAYER} .html5-video-player,
       .${CLASS_PLAYER} ytd-player,
-      .${CLASS_PLAYER} ytm-player,
-      .${CLASS_PLAYER} video {
+      .${CLASS_PLAYER} ytm-player {
         width: 100% !important;
         height: 100% !important;
         min-width: 100% !important;
         min-height: 100% !important;
         max-width: none !important;
         max-height: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
       }
 
-      .${CLASS_PLAYER} video {
-        object-fit: contain !important;
-      }
+      /* video要素そのもののposition/transformはYouTube/WebKitに任せる。
+         ここを強制するとiPhone Safariで映像だけ黒くなることがある。 */
 
       #${OVERLAY_ID} {
         position: absolute !important;
@@ -362,13 +401,14 @@
   }
 
   function getFullscreenTarget(player = getPlayer()) {
-    const video = player?.querySelector?.('video') || document.querySelector('video');
+    // 一番外側のプレイヤー枠を優先。movie_player自体をfixed/移動すると
+    // iPhone Safariのハードウェア動画レイヤーが黒くなることがある。
     return (
-      video?.closest?.('ytm-player') ||
-      video?.closest?.('#player-container-id') ||
-      video?.closest?.('#player-container-outer') ||
-      video?.closest?.('ytd-player') ||
-      video?.closest?.('#player') ||
+      document.querySelector('#player-container-outer') ||
+      document.querySelector('#player-container-id') ||
+      document.querySelector('#player-container') ||
+      document.querySelector('ytm-player') ||
+      document.querySelector('ytd-player') ||
       player
     );
   }
@@ -640,21 +680,24 @@
     document.body?.classList.add(CLASS_FULLSCREEN);
     target.classList.add(CLASS_PLAYER);
 
-    // YouTubeの横長レイアウト側のinline寸法より必ず優先する。
+    const vv = window.visualViewport;
+    ROOT.style.setProperty('--ytme-stage-height', `${Math.round(vv?.height || window.innerHeight)}px`);
+
+    // fixedにはしない。外側レイアウトだけを1画面に畳む。
     for (const [prop, value] of [
-      ['position', 'fixed'],
-      ['inset', '0'],
+      ['position', 'relative'],
       ['width', '100vw'],
-      ['height', '100dvh'],
+      ['height', 'var(--ytme-stage-height)'],
       ['max-width', 'none'],
       ['max-height', 'none'],
       ['margin', '0'],
       ['z-index', '2147483646'],
       ['background', '#000'],
-      ['transform', 'none'],
     ]) {
       target.style.setProperty(prop, value, 'important');
     }
+
+    try { window.scrollTo({ top: 0, left: 0, behavior: 'instant' }); } catch { window.scrollTo(0, 0); }
 
     ensureOverlay();
     showNote(hasChatFrame() || Date.now() - topState.frameSeenAt < 5000 ? 'コメント待機中…' : 'チャットを準備中…');
@@ -689,6 +732,7 @@
         target.style.removeProperty(prop);
       }
     }
+    ROOT.style.removeProperty('--ytme-stage-height');
 
     document.getElementById(OVERLAY_ID)?.remove();
     topState.player = null;
@@ -709,11 +753,14 @@
 
     if (active && !landscape) markAppPromo();
 
-    // YouTubeアプリと同じ感覚に寄せる：視聴中に横向きになったら自動で動画を全面化。
-    if (landscape && !topState.pseudoFullscreen) {
-      enterPseudoFullscreen();
-    } else if (topState.pseudoFullscreen && !landscape) {
+    // 横にしただけでは通常表示。ユーザーが全画面ボタンを押した時だけ専用モードへ。
+    if (topState.pseudoFullscreen && !landscape) {
       exitPseudoFullscreen();
+    }
+
+    if (topState.pseudoFullscreen) {
+      const vv = window.visualViewport;
+      ROOT.style.setProperty('--ytme-stage-height', `${Math.round(vv?.height || window.innerHeight)}px`);
     }
 
     topState.enabled = active;
@@ -742,21 +789,24 @@
     }
   });
 
-  // 横向き時はネイティブ全画面へ渡すとWebページのコメントを重ねられない。
-  // 全画面ボタンは疑似全画面へ固定する。解除は縦向きへ戻した時に行う。
+  // 横画面でYouTubeの全画面ボタンを押した時だけ専用モード。
+  // 同じボタンでもう一度押すと解除できる。
   document.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
     const button = target?.closest?.('.ytp-fullscreen-button');
-    if (!button || !isLandscapePhone()) return;
+    if (!button) return;
+    if (!topState.pseudoFullscreen && !isLandscapePhone()) return;
 
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
 
-    if (!topState.pseudoFullscreen) enterPseudoFullscreen();
+    if (topState.pseudoFullscreen) exitPseudoFullscreen();
+    else enterPseudoFullscreen();
   }, true);
 
   window.addEventListener('resize', scheduleRefresh, { passive: true });
+  window.visualViewport?.addEventListener('resize', scheduleRefresh, { passive: true });
   window.addEventListener('orientationchange', scheduleRefresh, { passive: true });
   window.addEventListener('popstate', scheduleRefresh, { passive: true });
   document.addEventListener('yt-navigate-finish', scheduleRefresh, true);
