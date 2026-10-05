@@ -4644,6 +4644,14 @@
     return card;
   }
 
+  function youtubeCommentRoots() {
+    return $$(YT_COMMENT_ROOT_SELECTOR).filter(root => {
+      if (!(root instanceof Element) || !root.isConnected) return false;
+      const parent = root.parentElement;
+      return !parent?.closest?.(YT_COMMENT_ROOT_SELECTOR);
+    });
+  }
+
   function priorityCommentMount(roots) {
     const first = roots.find(root => root instanceof Element && root.isConnected);
     if (!first) return null;
@@ -4656,7 +4664,7 @@
       return;
     }
     const favorites = preferredCommentAuthors();
-    const roots = $$(YT_COMMENT_ROOT_SELECTOR).filter(root => !root.closest?.('#npf-yt-priority-comments'));
+    const roots = youtubeCommentRoots().filter(root => !root.closest?.('#npf-yt-priority-comments'));
     const mount = priorityCommentMount(roots);
     if (!mount || !roots.length || !favorites.length) {
       $('#npf-yt-priority-comments')?.remove();
@@ -4685,8 +4693,11 @@
     const seen = new Set();
     for (const root of roots) {
       const info = youtubeCommentAuthorInfo(root);
-      if (!info || seen.has(info.key) || !favorites.some(x => x.key === info.key)) continue;
-      seen.add(info.key);
+      if (!info || !favorites.some(x => x.key === info.key)) continue;
+      const bodyText = String(youtubeCommentBody(root)?.textContent || '').replace(/\s+/g, ' ').trim();
+      const signature = info.key + '\u0000' + bodyText;
+      if (seen.has(signature)) continue;
+      seen.add(signature);
       matched.push({ root, info });
     }
 
@@ -4739,7 +4750,7 @@
 
   function scanYoutubePreferredComments(force = false) {
     if (!isYoutubeHost() || !currentYoutubeVideoId()) return;
-    const roots = $$(YT_COMMENT_ROOT_SELECTOR);
+    const roots = youtubeCommentRoots();
     for (const root of roots) bindYoutubePriorityButton(root);
     renderYoutubePriorityComments();
   }
