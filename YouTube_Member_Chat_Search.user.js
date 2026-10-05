@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.5.6
+// @version      0.5.7
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.5.6';
+  const VERSION = '0.5.7';
 
   const state = {
     videoId: null,
@@ -3029,13 +3029,7 @@
     const style = document.createElement('style');
     style.id = `${APP_ID}-style`;
     style.textContent = `
-      #${BUTTON_ID} {
-        position: fixed; right: 14px; bottom: 74px; z-index: 2147483646;
-        border: 0; border-radius: 999px; padding: 11px 15px;
-        font: 600 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-        background: #0f0f0f; color: #fff; box-shadow: 0 4px 18px rgba(0,0,0,.28);
-        cursor: pointer; -webkit-tap-highlight-color: transparent;
-      }
+      #${BUTTON_ID} { display:none !important; }
       #${PANEL_ID} {
         position: fixed; right: 12px; bottom: 126px; z-index: 2147483647;
         width: min(430px, calc(100vw - 24px)); max-height: min(76vh, 720px);
@@ -3082,7 +3076,6 @@
       #${PANEL_ID} .mcs-msg { white-space:pre-wrap; overflow-wrap:anywhere; }
       #${PANEL_ID} .mcs-count { margin-left:auto; font-size:11px; color:#777; }
       @media (max-width: 600px) {
-        #${BUTTON_ID} { right:10px; bottom:76px; }
         #${PANEL_ID} { left:0; right:0; bottom:0; width:100vw; max-height:82vh; border-radius:16px 16px 0 0; border-left:0; border-right:0; }
       }
 
@@ -3219,11 +3212,15 @@
     };
 
     btn.setAttribute('aria-expanded', 'false');
+    btn.style.setProperty('display', 'none', 'important');
     btn.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
       setPanelOpen(panel.style.display === 'none');
     });
+    document.addEventListener('niji-member-chat-open', () => setPanelOpen(true));
+    document.addEventListener('niji-member-chat-close', () => setPanelOpen(false));
+    document.dispatchEvent(new CustomEvent('niji-member-chat-ready'));
     close.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
