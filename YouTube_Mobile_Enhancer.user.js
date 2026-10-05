@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット
 // @namespace    marina-youtube-mobile-enhancer
-// @version      0.6.0
+// @version      0.7.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.6.0';
+  const VERSION = '0.7.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -320,6 +320,16 @@
         max-height: none !important;
       }
 
+      /* Niji Research Helper の大きいパネルだけは視聴画面から退避。
+         タイムスタンプ overlay (#npf-yt-ts-overlay) は残す。 */
+      html.${CLASS_PHONE}.${CLASS_PORTRAIT} #npf-yt-panel,
+      html.${CLASS_PHONE}.${CLASS_PORTRAIT} #npf-research-panel,
+      html.${CLASS_PHONE}.${CLASS_PORTRAIT} #npf-sheet,
+      html.${CLASS_PHONE}.${CLASS_PORTRAIT} #npf-sheet-backdrop {
+        display: none !important;
+        visibility: hidden !important;
+      }
+
       html.${CLASS_FULLSCREEN},
       html.${CLASS_FULLSCREEN} body {
         margin: 0 !important;
@@ -370,73 +380,57 @@
         pointer-events: none !important;
       }
 
-      html.${CLASS_FULLSCREEN} [data-ytme-stage-hidden="1"] {
+      /* 横画面はYouTube自身のシアターモードを使う。
+         DOMの祖先を組み替えないのでiPhone Safariの動画レイヤーを黒くしない。 */
+      html.${CLASS_FULLSCREEN} #npf-yt-panel,
+      html.${CLASS_FULLSCREEN} #npf-research-panel,
+      html.${CLASS_FULLSCREEN} #npf-sheet,
+      html.${CLASS_FULLSCREEN} #npf-sheet-backdrop,
+      html.${CLASS_FULLSCREEN} #secondary,
+      html.${CLASS_FULLSCREEN} #below,
+      html.${CLASS_FULLSCREEN} ytd-watch-metadata,
+      html.${CLASS_FULLSCREEN} #comments,
+      html.${CLASS_FULLSCREEN} #related {
         display: none !important;
+        visibility: hidden !important;
       }
 
-      html.${CLASS_FULLSCREEN} [data-ytme-stage-path="1"] {
-        box-sizing: border-box !important;
+      html.${CLASS_FULLSCREEN} ytd-app {
+        --ytd-masthead-height: 0px !important;
+      }
+
+      html.${CLASS_FULLSCREEN} #page-manager,
+      html.${CLASS_FULLSCREEN} ytd-watch-flexy {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+      }
+
+      html.${CLASS_FULLSCREEN} #player-theater-container,
+      html.${CLASS_FULLSCREEN} #full-bleed-container {
         width: 100vw !important;
-        min-width: 100vw !important;
-        max-width: 100vw !important;
+        max-width: none !important;
         height: var(--ytme-stage-height, 100dvh) !important;
         min-height: var(--ytme-stage-height, 100dvh) !important;
         max-height: var(--ytme-stage-height, 100dvh) !important;
         margin: 0 !important;
         padding: 0 !important;
-        border: 0 !important;
-        transform: none !important;
+        background: #000 !important;
       }
 
-      /* チャットDOMは画面外で生かしておく。display:noneにするとReplayが止まることがある。 */
-      html.${CLASS_FULLSCREEN} [data-ytme-stage-chat-host="1"] {
-        display: block !important;
-        position: fixed !important;
-        left: -250vw !important;
-        top: 0 !important;
-        width: 420px !important;
-        height: 640px !important;
-        max-width: 420px !important;
-        max-height: 640px !important;
-        opacity: .001 !important;
-        visibility: visible !important;
-        pointer-events: none !important;
-        overflow: hidden !important;
+      html.${CLASS_FULLSCREEN} #player-theater-container ytd-player,
+      html.${CLASS_FULLSCREEN} #full-bleed-container ytd-player,
+      html.${CLASS_FULLSCREEN} #movie_player {
+        width: 100% !important;
+        height: 100% !important;
+        max-width: none !important;
+        max-height: none !important;
       }
 
       .${CLASS_PLAYER} {
-        position: relative !important;
-        inset: auto !important;
-        width: 100vw !important;
-        height: var(--ytme-stage-height, 100dvh) !important;
-        min-width: 100vw !important;
-        min-height: var(--ytme-stage-height, 100dvh) !important;
-        max-width: none !important;
-        max-height: none !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        z-index: 2147483646 !important;
         background: #000 !important;
-        transform: none !important;
-        contain: none !important;
       }
 
-      .${CLASS_PLAYER} #movie_player,
-      .${CLASS_PLAYER} .html5-video-player,
-      .${CLASS_PLAYER} ytd-player,
-      .${CLASS_PLAYER} ytm-player {
-        width: 100% !important;
-        height: 100% !important;
-        min-width: 100% !important;
-        min-height: 100% !important;
-        max-width: none !important;
-        max-height: none !important;
-        margin: 0 !important;
-        padding: 0 !important;
-      }
-
-      /* video要素そのもののposition/transformはYouTube/WebKitに任せる。
-         ここを強制するとiPhone Safariで映像だけ黒くなることがある。 */
+      /* video要素そのもののposition/transformはYouTube/WebKitに任せる。 */
 
       #${OVERLAY_ID} {
         position: absolute !important;
@@ -839,78 +833,24 @@
     observe();
   }
 
-  function clearStageIsolation() {
-    for (const el of document.querySelectorAll(
-      '[data-ytme-stage-path], [data-ytme-stage-hidden], [data-ytme-stage-chat-host]'
-    )) {
-      el.removeAttribute('data-ytme-stage-path');
-      el.removeAttribute('data-ytme-stage-hidden');
-      el.removeAttribute('data-ytme-stage-chat-host');
-    }
-    topState.stageActive = false;
-  }
+  function ensureTheaterMode() {
+    const flexy = document.querySelector('ytd-watch-flexy');
+    if (flexy?.hasAttribute('theater')) return true;
 
-  function isChatHostElement(el) {
-    if (!(el instanceof Element)) return false;
-    if (
-      el.matches?.(
-        'ytd-live-chat-frame#chat, ytm-live-chat-frame, #chatframe, iframe[src*="live_chat"], iframe[src*="live_chat_replay"]'
-      )
-    ) return true;
-
-    return Boolean(
-      el.querySelector?.(
-        'ytd-live-chat-frame#chat, ytm-live-chat-frame, #chatframe, iframe[src*="live_chat"], iframe[src*="live_chat_replay"]'
-      )
-    );
-  }
-
-  function applyStageIsolation(target) {
-    clearStageIsolation();
-    if (!(target instanceof Element) || !document.body) return;
-
-    const chain = [];
-    let node = target;
-    while (node && node instanceof Element) {
-      chain.push(node);
-      if (node === document.body) break;
-      node = node.parentElement;
+    const button = document.querySelector('.ytp-size-button');
+    if (button instanceof HTMLElement) {
+      try {
+        button.click();
+        return true;
+      } catch {}
     }
 
-    for (const el of chain) el.setAttribute('data-ytme-stage-path', '1');
-
-    for (let i = 0; i < chain.length - 1; i++) {
-      const childOnPath = chain[i];
-      const parent = chain[i + 1];
-
-      for (const sibling of parent.children) {
-        if (sibling === childOnPath) continue;
-        if (sibling.tagName === 'SCRIPT' || sibling.tagName === 'STYLE' || sibling.tagName === 'LINK') continue;
-
-        if (isChatHostElement(sibling)) {
-          sibling.setAttribute('data-ytme-stage-chat-host', '1');
-        } else {
-          sibling.setAttribute('data-ytme-stage-hidden', '1');
-        }
-      }
+    // 最後の保険。YouTubeデスクトップUIはtheater属性でレイアウトが切り替わる。
+    if (flexy) {
+      flexy.setAttribute('theater', '');
+      return true;
     }
-
-    // 遅れて生成されたChat Replayも画面外に残す。
-    for (const chat of document.querySelectorAll(
-      'ytd-live-chat-frame#chat, ytm-live-chat-frame, #chatframe, iframe[src*="live_chat"], iframe[src*="live_chat_replay"]'
-    )) {
-      let host = chat;
-      while (host.parentElement && host.parentElement !== document.body) {
-        if (chain.includes(host.parentElement)) break;
-        host = host.parentElement;
-      }
-      if (!chain.includes(host)) {
-        host.setAttribute('data-ytme-stage-chat-host', '1');
-        host.removeAttribute('data-ytme-stage-hidden');
-      }
-    }
-
-    topState.stageActive = true;
+    return false;
   }
 
   function requestBrowserFullscreen(target) {
@@ -949,42 +889,38 @@
   function enterPseudoFullscreen() {
     if (!isWatchPage() || !isLandscapePhone()) return false;
 
-    // 先にチャットを開く。全画面化してからではUIが動画の下に隠れるため。
     primeChatReplay();
+    ensureTheaterMode();
 
     const player = getPlayer();
-    const target = getFullscreenTarget(player);
-    if (!player || !target) return false;
+    if (!player) return false;
 
     topState.pseudoFullscreen = true;
     topState.player = player;
-    topState.fullscreenTarget = target;
+    topState.fullscreenTarget = player;
+    topState.stageActive = false;
     topState.laneUntil = Array(LANES).fill(0);
 
     ROOT.classList.add(CLASS_FULLSCREEN);
     document.body?.classList.add(CLASS_FULLSCREEN);
-    target.classList.add(CLASS_PLAYER);
+    player.classList.add(CLASS_PLAYER);
 
     const vv = window.visualViewport;
     ROOT.style.setProperty('--ytme-stage-height', `${Math.round(vv?.height || window.innerHeight)}px`);
 
-    // WebKitの動画レイヤー自体は動かさず、動画までの祖先だけを画面一杯にする。
-    applyStageIsolation(target);
+    // YouTube自身にプレイヤーを広げさせる。WebKit動画レイヤーの祖先は移動しない。
+    setTimeout(ensureTheaterMode, 60);
+    setTimeout(ensureTheaterMode, 300);
 
-    for (const [prop, value] of [
-      ['position', 'relative'],
-      ['width', '100vw'],
-      ['height', 'var(--ytme-stage-height)'],
-      ['max-width', 'none'],
-      ['max-height', 'none'],
-      ['margin', '0'],
-      ['z-index', '2147483646'],
-      ['background', '#000'],
-    ]) {
-      target.style.setProperty(prop, value, 'important');
+    try {
+      const anchor =
+        document.querySelector('#player-theater-container') ||
+        document.querySelector('#full-bleed-container') ||
+        player;
+      anchor.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' });
+    } catch {
+      try { window.scrollTo(0, 0); } catch {}
     }
-
-    try { window.scrollTo({ top: 0, left: 0, behavior: 'instant' }); } catch { window.scrollTo(0, 0); }
 
     ensureOverlay();
     showNote(hasChatFrame() || Date.now() - topState.frameSeenAt < 5000 ? 'コメント待機中…' : 'チャットを準備中…');
@@ -1016,13 +952,7 @@
     target?.classList?.remove(CLASS_PLAYER);
     document.querySelectorAll(`.${CLASS_PLAYER}`).forEach((el) => el.classList.remove(CLASS_PLAYER));
 
-    if (target) {
-      for (const prop of ['position','inset','width','height','max-width','max-height','margin','z-index','background','transform']) {
-        target.style.removeProperty(prop);
-      }
-    }
     ROOT.style.removeProperty('--ytme-stage-height');
-    clearStageIsolation();
 
     document.getElementById(OVERLAY_ID)?.remove();
     topState.player = null;
@@ -1054,9 +984,7 @@
     if (topState.pseudoFullscreen) {
       const vv = window.visualViewport;
       ROOT.style.setProperty('--ytme-stage-height', `${Math.round(vv?.height || window.innerHeight)}px`);
-      if (!topState.stageActive) {
-        applyStageIsolation(topState.fullscreenTarget || getFullscreenTarget(topState.player || getPlayer()));
-      }
+      ensureTheaterMode();
     }
 
     topState.enabled = active;
