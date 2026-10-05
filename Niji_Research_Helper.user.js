@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.65
+// @version      1.0.66
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.65';
+  const VERSION = '1.0.66';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -942,6 +942,7 @@
       await GM.setValue(KEY_PREF_REV,state.preferenceRevision);
       state.preferenceCloudBackupId=String(item?.id||'');
       state.preferenceCloudReady=true;
+      try { refreshResearchSettingsFromState(); } catch {}
       if(isYoutubeHost())try{updateYoutubePanel();}catch{}
       else{try{bindCommentTimestamps();}catch{}}
       console.info('[NRH] Niji Cloud preferences '+note, state.preferenceRevision);
@@ -980,6 +981,7 @@
         state.calibration={...(remote.calibration||{}),...localCal};
         state.preferenceRevision=Math.max(Date.now(),remote.revision+1);
         await GM.setValue(KEY_SETTINGS,state.settings);await GM.setValue(KEY_SYNC,state.syncPoints);await GM.setValue(KEY_CAL,state.calibration);await GM.setValue(KEY_PREF_REV,state.preferenceRevision);
+        try { refreshResearchSettingsFromState(); } catch {}
         await preferenceCloudUpload(state.preferenceRevision);
         return;
       }
@@ -1352,6 +1354,27 @@
       }
       state.wikiCache={...state.wikiCache,...await nrhDbLoadWikiCache()};
       research.metaCache.clear();
+
+      // Niji CloudでDBが更新されても、すでに画面上にあるアーカイブカードは
+      // 自動では読み直されない。ここで表示中カードを現在DBから再hydrateする。
+      const visible=currentResearchEntries();
+      for(const entry of visible){
+        if(replace){
+          entry.meta=null;
+          entry.wikiInfo=null;
+          entry.wikiSourceUrl='';
+          entry.wikiChecked=false;
+          entry.wikiError='';
+          entry.wikiSkipReason='';
+        }
+        const result=await nrhHydrateEntryFromDb(entry);
+        if(research.collectionActive && result?.fresh===false && state.apiKey && !research.holodexPaused)
+          queueResearchMeta(entry,false,!!result?.found);
+        if(research.collectionActive && entry.meta && !entry.wikiChecked && !entry.wikiLoading)
+          queueResearchWiki(entry);
+      }
+      applyResearchFilters();
+      updateResearchStatus();
       await updateResearchDbStatus();
     }finally{cloud.suppressMarks=Math.max(0,cloud.suppressMarks-1);}
   }
@@ -5278,6 +5301,16 @@
     wikiMatched: 0,
   };
 
+  function refreshResearchSettingsFromState() {
+    research.autoChannelKeys = new Set(Array.isArray(state.settings?.autoResearchChannels)
+      ? state.settings.autoResearchChannels.filter(x => typeof x === 'string') : []);
+    updateResearchCollectionControls();
+    if (!isYoutubeResearchPage()) return;
+    const key = researchChannelKey();
+    if (key && research.autoChannelKeys.has(key) && !research.collectionActive && !research.holodexPaused)
+      startResearchCollection();
+  }
+
   function isYoutubeResearchPage() {
     if (!isYoutubeHost()) return false;
     const p = location.pathname || '';
@@ -8803,8 +8836,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
   if (favoriteLoad.recovered) console.info('[Niji Research Helper] channel favorites recovered from redundant storage');
   state.liverFavorites = await gmGet(KEY_LIVER_FAVS, []);
   state.settings = { ...DEFAULT_SETTINGS, ...(await gmGet(KEY_SETTINGS, DEFAULT_SETTINGS)) };
-  research.autoChannelKeys = new Set(Array.isArray(state.settings.autoResearchChannels)
-    ? state.settings.autoResearchChannels.filter(x => typeof x === 'string') : []);
+  refreshResearchSettingsFromState();
   state.syncPoints = await gmGet(KEY_SYNC, {});
   state.calibration = await gmGet(KEY_CAL, {});
   state.preferenceRevision = Number(await gmGet(KEY_PREF_REV, 0) || 0);
