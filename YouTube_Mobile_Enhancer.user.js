@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット
 // @namespace    marina-youtube-mobile-enhancer
-// @version      0.9.0
+// @version      1.0.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.9.0';
+  const VERSION = '1.0.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -305,6 +305,8 @@
     style.id = STYLE_ID;
     style.textContent = `
       html.${CLASS_PHONE}.${CLASS_PORTRAIT} [data-ytme-app-promo="1"],
+      html.${CLASS_LANDSCAPE} [data-ytme-app-promo="1"],
+      html.${CLASS_FULLSCREEN} [data-ytme-app-promo="1"],
       html.${CLASS_PHONE}.${CLASS_PORTRAIT} ytm-app-promo,
       html.${CLASS_PHONE}.${CLASS_PORTRAIT} ytm-open-app-button,
       html.${CLASS_PHONE}.${CLASS_PORTRAIT} ytd-app-promo-renderer,
@@ -370,7 +372,11 @@
       html.${CLASS_FULLSCREEN} #marina-member-chat-search-button,
       html.${CLASS_FULLSCREEN} #marina-member-chat-search-panel,
       html.${CLASS_FULLSCREEN} [id^="npf-yt-"],
-      html.${CLASS_FULLSCREEN} [id^="npf-floating"] {
+      html.${CLASS_FULLSCREEN} [id^="npf-floating"],
+      html.${CLASS_FULLSCREEN} #npf-fab,
+      html.${CLASS_FULLSCREEN} #npf-research-fab,
+      html.${CLASS_LANDSCAPE} #npf-fab,
+      html.${CLASS_LANDSCAPE} #npf-research-fab {
         display: none !important;
       }
 
@@ -447,18 +453,40 @@
       html.${CLASS_LANDSCAPE} #columns {
         display: block !important;
         width: 100vw !important;
+        min-width: 100vw !important;
+        max-width: 100vw !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        gap: 0 !important;
+      }
+
+      html.${CLASS_FULLSCREEN} #primary,
+      html.${CLASS_LANDSCAPE} #primary {
+        display: block !important;
+        flex: 0 0 100vw !important;
+        width: 100vw !important;
+        min-width: 100vw !important;
         max-width: 100vw !important;
         margin: 0 !important;
         padding: 0 !important;
       }
 
-      html.${CLASS_FULLSCREEN} #primary,
       html.${CLASS_FULLSCREEN} #primary-inner,
-      html.${CLASS_LANDSCAPE} #primary,
       html.${CLASS_LANDSCAPE} #primary-inner {
-        width: 100vw !important;
-        min-width: 100vw !important;
-        max-width: 100vw !important;
+        display: block !important;
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+
+      html.${CLASS_FULLSCREEN} #secondary,
+      html.${CLASS_LANDSCAPE} #secondary {
+        flex: 0 0 0 !important;
+        width: 0 !important;
+        min-width: 0 !important;
+        max-width: 0 !important;
         margin: 0 !important;
         padding: 0 !important;
       }
@@ -474,23 +502,51 @@
       }
 
       html.${CLASS_FULLSCREEN} #player-theater-container,
-      html.${CLASS_FULLSCREEN} #full-bleed-container {
+      html.${CLASS_FULLSCREEN} #full-bleed-container,
+      html.${CLASS_FULLSCREEN} #player,
+      html.${CLASS_FULLSCREEN} #player-container-outer,
+      html.${CLASS_FULLSCREEN} #player-container-inner,
+      html.${CLASS_FULLSCREEN} #player-container,
+      html.${CLASS_LANDSCAPE} #player-theater-container,
+      html.${CLASS_LANDSCAPE} #full-bleed-container,
+      html.${CLASS_LANDSCAPE} #player,
+      html.${CLASS_LANDSCAPE} #player-container-outer,
+      html.${CLASS_LANDSCAPE} #player-container-inner,
+      html.${CLASS_LANDSCAPE} #player-container {
+        box-sizing: border-box !important;
         width: 100vw !important;
-        max-width: none !important;
+        min-width: 100vw !important;
+        max-width: 100vw !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+        background: #000 !important;
+      }
+
+      html.${CLASS_FULLSCREEN} #player-theater-container,
+      html.${CLASS_FULLSCREEN} #full-bleed-container {
         height: var(--ytme-stage-height, 100dvh) !important;
         min-height: var(--ytme-stage-height, 100dvh) !important;
         max-height: var(--ytme-stage-height, 100dvh) !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        background: #000 !important;
+      }
+
+      html.${CLASS_FULLSCREEN} #player-theater-container ytd-player,
+      html.${CLASS_FULLSCREEN} #full-bleed-container ytd-player,
+      html.${CLASS_FULLSCREEN} #player ytd-player,
+      html.${CLASS_FULLSCREEN} #movie_player,
+      html.${CLASS_LANDSCAPE} #player-theater-container ytd-player,
+      html.${CLASS_LANDSCAPE} #full-bleed-container ytd-player,
+      html.${CLASS_LANDSCAPE} #player ytd-player,
+      html.${CLASS_LANDSCAPE} #movie_player {
+        width: 100% !important;
+        max-width: none !important;
       }
 
       html.${CLASS_FULLSCREEN} #player-theater-container ytd-player,
       html.${CLASS_FULLSCREEN} #full-bleed-container ytd-player,
       html.${CLASS_FULLSCREEN} #movie_player {
-        width: 100% !important;
         height: 100% !important;
-        max-width: none !important;
         max-height: none !important;
       }
 
@@ -644,23 +700,39 @@
 
   function markAppPromo() {
     if (!isPhoneViewport() || !isWatchPage()) return;
-    for (const el of document.querySelectorAll('a, button')) {
-      const text = String(el.textContent || '').replace(/\s+/g, '');
-      if (!/YouTube.*アプリ.*開く|アプリで開く/.test(text)) continue;
+
+    const candidates = [
+      ...document.querySelectorAll('a, button, [role="button"]')
+    ];
+
+    for (const el of candidates) {
+      const own = String(el.textContent || '').replace(/\s+/g, '');
+      if (!/(?:YouTube.*アプリ.*開く|アプリで開く|^開く$)/.test(own)) continue;
+
       const rect = el.getBoundingClientRect?.();
-      if (!rect || rect.top > 180) continue;
+      if (!rect || rect.top > 240) continue;
 
       let node = el;
-      let best = el;
-      for (let i = 0; i < 5 && node.parentElement; i++) {
+      let best = null;
+      for (let i = 0; i < 7 && node?.parentElement; i++) {
         node = node.parentElement;
         const r = node.getBoundingClientRect?.();
+        const text = String(node.textContent || '').replace(/\s+/g, '');
         if (!r) continue;
-        if (r.top < 180 && r.height >= 28 && r.height <= 130 && r.width >= window.innerWidth * .70) {
+
+        if (
+          r.top < 240 &&
+          r.height >= 36 &&
+          r.height <= 150 &&
+          r.width >= window.innerWidth * .72 &&
+          /YouTube/.test(text) &&
+          /アプリ|開く/.test(text)
+        ) {
           best = node;
         }
       }
-      best.setAttribute('data-ytme-app-promo', '1');
+
+      if (best) best.setAttribute('data-ytme-app-promo', '1');
     }
   }
 
@@ -992,6 +1064,31 @@
     // YouTube自身にプレイヤーを広げさせる。WebKit動画レイヤーの祖先は移動しない。
     setTimeout(ensureTheaterMode, 60);
     setTimeout(ensureTheaterMode, 300);
+
+    const widen = () => {
+      const selectors = [
+        '#columns', '#primary', '#primary-inner',
+        '#player-theater-container', '#full-bleed-container',
+        '#player', '#player-container-outer', '#player-container-inner', '#player-container',
+        'ytd-player'
+      ];
+      for (const selector of selectors) {
+        for (const el of document.querySelectorAll(selector)) {
+          el.style.setProperty('max-width', 'none', 'important');
+          el.style.setProperty('margin-left', '0', 'important');
+          el.style.setProperty('margin-right', '0', 'important');
+          if (selector !== 'ytd-player') {
+            el.style.setProperty('width', '100vw', 'important');
+            el.style.setProperty('min-width', '100vw', 'important');
+          } else {
+            el.style.setProperty('width', '100%', 'important');
+          }
+        }
+      }
+    };
+    widen();
+    setTimeout(widen, 80);
+    setTimeout(widen, 350);
 
     try {
       const anchor =
