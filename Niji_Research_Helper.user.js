@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.66
+// @version      1.0.67
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.66';
+  const VERSION = '1.0.67';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -1033,16 +1033,18 @@
     cloud.dirty = true;
     cloud.writes++;
     void GM.setValue(CLOUD_PENDING_KEY, true).catch(() => {});
-    cloudSchedule(cloud.writes >= 50 ? 5000 : 90000);
+    cloudSchedule(cloud.writes >= 50 ? 5000 : 30000);
     cloudUpdateUi();
   }
 
-  function cloudSchedule(delay = 90000) {
+  function cloudSchedule(delay = 30000) {
     if (!cloud.enabled || !cloud.token || !nrhDbEnabled() || !cloud.dirty) return;
     clearTimeout(cloud.timer);
     const now = Date.now();
-    const earliest = Math.max(now + delay, cloud.lastSavedAt + 5 * 60 * 1000, cloud.nextRetryAt);
-    cloud.timer = setTimeout(() => void cloudBackup(false), Math.max(1000, earliest - now));
+    // 新規アーカイブを何本も連続取得するため30秒デバウンス。
+    // ただし長時間ローカルだけに滞留させず、遅くとも1分単位で共通DBへ反映する。
+    const earliest = Math.max(now + delay, cloud.lastSavedAt + 60 * 1000, cloud.nextRetryAt);
+    cloud.timer = setTimeout(() => void cloudSyncShared({force:false}), Math.max(1000, earliest - now));
   }
 
   function cloudUpdateUi() {
@@ -5318,6 +5320,13 @@
     return /\/(videos|streams)\/?$/i.test(p) && (/^\/@/.test(p) || /^\/channel\//.test(p) || /^\/c\//.test(p) || /^\/user\//.test(p));
   }
 
+  function isYoutubeArchiveChannelPage() {
+    if (!isYoutubeHost()) return false;
+    const p = location.pathname || '';
+    return /\/(videos|streams)\/?$/i.test(p) &&
+      (/^\/@/.test(p) || /^\/channel\//.test(p) || /^\/c\//.test(p) || /^\/user\//.test(p));
+  }
+
   function researchChannelKey() {
     const m = String(location.pathname || '').match(/^\/(@[^/]+|channel\/[^/]+|c\/[^/]+|user\/[^/]+)\/(?:videos|streams)\/?$/i);
     return m ? m[1].toLowerCase() : '';
@@ -6689,7 +6698,8 @@
     // コラボ相手はWikiを正とする。Wikiに人物情報がある動画では、
     // Holodexのチャンネル表示名/mentionsを混ぜず、Wikiの人物名へ寄せる。
     // Wikiにコラボ相手記載がない場合だけHolodexをフォールバックとして使う。
-    entry.collaborators = wikiPeople.length
+    const wikiAuthoritative = entry.wikiChecked || !!entry.wikiInfo;
+    entry.collaborators = wikiAuthoritative
       ? [...new Map(wikiPeople.map(name => [normalizeCollaboratorName(name), collaboratorDisplayName(name)]))
           .values()].filter(Boolean)
       : [...new Map(entry.mentions
@@ -6758,11 +6768,11 @@
     }
 
     if (entry.collabCount && entry.collabCount > 1) {
-      const sourceLabel = wikiPeople.length ? '（Wiki）' : '';
+      const sourceLabel = wikiAuthoritative ? '（Wiki）' : '（Holodex仮）';
       const p = makeResearchPill(`👥 ${entry.collabCount}人${sourceLabel}`);
-      p.title = wikiPeople.length
-        ? '非公式Wikiのコラボ相手記載を優先（配信者本人を含む）'
-        : 'Wikiにコラボ相手記載がないためHolodex参加者情報を使用（配信者本人を含む）';
+      p.title = wikiAuthoritative
+        ? '非公式Wikiの記載を正として人物名を表示（配信者本人を含む）'
+        : 'Wiki未照合のため一時的にHolodex参加者情報を表示（Wiki照合後に置換）';
       bar.appendChild(p);
     }
 
@@ -6920,7 +6930,9 @@
     const hint = $('#npf-r-collection-hint');
     if (hint) hint.textContent = research.collectionActive
       ? '取得中：Holodex取得後にWikiも照合。コラボ相手はWiki記載を優先し、Wikiにない場合のみHolodexを使います。'
-      : '手動モード：ページを開くだけでは外部取得しません。保存済みのDBは表示できます。';
+      : (isYoutubeArchiveChannelPage()
+        ? '自動更新：チャンネルの動画/配信一覧では、DBにない新規アーカイブと期限切れデータだけを収集します。'
+        : '検索結果ページは手動モード：保存済みDBは表示し、必要なときだけ取得を開始します。');
   }
 
   function stopResearchCollection() {
@@ -7523,14 +7535,23 @@
           }).catch(() => {});
           const existing = byId.get(id);
           if (existing) {
-            existing.collaborators = [...new Set([...(existing.collaborators || []), ...people])];
+            // Wikiが見つかった動画はコラボ相手をWiki人物名へ完全に寄せる。
+            // Holodexのチャンネル表示名は候補探索にだけ使い、最終表示/DBには混ぜない。
+            existing.collaborators = [...new Map(people
+              .map(name => collaboratorDisplayName(name))
+              .filter(Boolean)
+              .map(name => [normalizeCollaboratorName(name), name])).values()];
             existing.notes = [...new Set([...(existing.notes || []), ...(wikiRow.notes || [])])];
             existing.sourceUrl ||= wikiRow.sourceUrl;
-            existing.source = existing.source === 'Holodex' ? 'Holodex+Wiki' : existing.source;
+            existing.source = 'Wiki';
             existing.dateLabel ||= wikiRow.dateLabel;
             existing.year ||= wikiRow.year;
             existing.game ||= wikiRow.game;
           } else {
+            wikiRow.collaborators = [...new Map(people
+              .map(name => collaboratorDisplayName(name))
+              .filter(Boolean)
+              .map(name => [normalizeCollaboratorName(name), name])).values()];
             byId.set(id, wikiRow);
           }
         }
@@ -8729,7 +8750,9 @@ e.el.classList.toggle('npf-r-hidden', !show);
     if (active) {
       scheduleResearchScan(250);
       const key = researchChannelKey();
-      if (key && research.autoChannelKeys.has(key) && !research.collectionActive && !research.holodexPaused)
+      const shouldAutoCollect = isYoutubeArchiveChannelPage() ||
+        (key && research.autoChannelKeys.has(key));
+      if (shouldAutoCollect && !research.collectionActive && !research.holodexPaused)
         startResearchCollection();
     }
   }
@@ -8881,7 +8904,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
     if (document.hidden) return;
     if (state.preferenceCloudToken) void preferenceCloudSync();
     if (isYoutubeHost() && cloud.enabled) void cloudSyncShared();
-  }, 120000);
+  }, 60000);
 
   console.info(`[Niji Research Helper] v${VERSION} ready on ${location.hostname}`);
 })();
