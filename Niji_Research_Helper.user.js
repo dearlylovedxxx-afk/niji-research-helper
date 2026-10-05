@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.70
+// @version      1.0.71
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.70';
+  const VERSION = '1.0.71';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -4532,7 +4532,7 @@
     );
     for (const body of bodies) {
       if (!(body instanceof Element)) continue;
-      if (body.querySelector?.('.npf-yt-ts-pin-btn')) continue;
+      if (body.dataset.npfTimestampPinBound === '1') continue;
       const items = youtubeTimestampCommentItems(body);
       if (items.length < 2) continue;
 
@@ -4558,6 +4558,7 @@
         ?.querySelector?.('#toolbar, #action-buttons, .toolbar');
       if (mount) mount.appendChild(button);
       else body.insertAdjacentElement('afterend', button);
+      body.dataset.npfTimestampPinBound = '1';
     }
   }
 
@@ -4671,6 +4672,7 @@
       root.dataset.videoId = videoId;
       root.dataset.savedAt = stamp;
       root.replaceChildren();
+      youtubeTimestampUi.lastActiveSecond = -1;
 
       const top = document.createElement('div');
       top.style.cssText = 'display:flex;align-items:center;gap:5px;pointer-events:auto;';
@@ -9198,6 +9200,11 @@ e.el.classList.toggle('npf-r-hidden', !show);
     const id = currentYoutubeVideoId() || '';
     if (id !== youtubeLastVideoId) {
       youtubeLastVideoId = id;
+      youtubeTimestampUi.manualOpen = false;
+      youtubeTimestampUi.manualClosed = false;
+      youtubeTimestampUi.videoId = id;
+      youtubeTimestampUi.lastActiveSecond = -1;
+      $('#npf-yt-ts-overlay')?.remove();
       closeYoutubePanel();
     }
     setTimeout(() => {
