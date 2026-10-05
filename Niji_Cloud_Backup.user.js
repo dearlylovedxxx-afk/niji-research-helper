@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.2.3
+// @version      0.2.4
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
@@ -419,9 +419,12 @@ async function uploadSnapshot(obj){
 }
 async function genericUploadPictSnapshot(obj){
  obj={...obj,format:2,app:app.name,origin:location.origin,device:device()};
- const wrapper={app:'Niji Research Helper',version:'0.2.0',dbVersion:1,exportedAt:new Date().toISOString(),sourceOrigin:'https://pictbland.net',device:device(),stores:{videos:[],channels:[],wiki:[],pairs:[]},preferences:{nijiCloudSnapshot:obj}};
+ // /v1/backups は NRH 共通ゲートウェイ用で、保存メタデータの origin は
+ // NRH が許可している論理originを使う。実際の対象サイトは snapshot.origin に保持する。
+ const logicalOrigin='https://www.youtube.com';
+ const wrapper={app:'Niji Research Helper',version:'0.2.4',dbVersion:1,exportedAt:new Date().toISOString(),sourceOrigin:logicalOrigin,device:device(),stores:{videos:[],channels:[],wiki:[],pairs:[]},preferences:{nijiCloudSnapshot:obj}};
  const text=JSON.stringify(wrapper),bytes=enc.encode(text),digest=await sha(bytes);
- const res=await genericRequest({method:'POST',url:GATEWAY+'/v1/backups',headers:{authorization:'Bearer '+settings.token,accept:'application/json','content-type':'application/json','x-nrh-device':device(),'x-nrh-origin':'https://pictbland.net','x-nrh-sha256':digest,'x-nrh-version':'0.2.0'},data:text,responseType:'text',timeout:60000});
+ const res=await genericRequest({method:'POST',url:GATEWAY+'/v1/backups',headers:{authorization:'Bearer '+settings.token,accept:'application/json','content-type':'application/json','x-nrh-device':device(),'x-nrh-origin':logicalOrigin,'x-nrh-sha256':digest,'x-nrh-version':'0.2.4'},data:text,responseType:'text',timeout:60000});
  let body={};try{body=JSON.parse(res.responseText||res.response||'{}');}catch{}
  if(res.status<200||res.status>=300||!body.ok)throw Error(`HTTP ${res.status}: ${String(body.error||'保存失敗')}`);
  const list=await getBackups(),item=(body.backup?.id?list.find(x=>x.id===body.backup.id):null)||list.find(x=>x.sha256===digest&&Number(x.size||0)===bytes.length)||list[0];
