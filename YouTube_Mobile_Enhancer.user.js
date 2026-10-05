@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット
 // @namespace    marina-youtube-mobile-enhancer
-// @version      0.7.0
+// @version      0.8.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.7.0';
+  const VERSION = '0.8.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -386,13 +386,53 @@
       html.${CLASS_FULLSCREEN} #npf-research-panel,
       html.${CLASS_FULLSCREEN} #npf-sheet,
       html.${CLASS_FULLSCREEN} #npf-sheet-backdrop,
-      html.${CLASS_FULLSCREEN} #secondary,
       html.${CLASS_FULLSCREEN} #below,
       html.${CLASS_FULLSCREEN} ytd-watch-metadata,
       html.${CLASS_FULLSCREEN} #comments,
       html.${CLASS_FULLSCREEN} #related {
         display: none !important;
         visibility: hidden !important;
+      }
+
+      /* 右側チャット欄は消す。ただしReplay自体は止めないため、
+         display:none ではなく画面外で生かす。 */
+      html.${CLASS_FULLSCREEN} #secondary,
+      html.${CLASS_FULLSCREEN} ytd-live-chat-frame#chat,
+      html.${CLASS_FULLSCREEN} #chat-container,
+      html.${CLASS_FULLSCREEN} ytm-live-chat-frame {
+        display: block !important;
+        visibility: visible !important;
+        position: fixed !important;
+        left: -200vw !important;
+        right: auto !important;
+        top: 0 !important;
+        width: 420px !important;
+        min-width: 420px !important;
+        max-width: 420px !important;
+        height: 640px !important;
+        min-height: 640px !important;
+        max-height: 640px !important;
+        opacity: .001 !important;
+        pointer-events: none !important;
+        overflow: hidden !important;
+        z-index: -1 !important;
+      }
+
+      html.${CLASS_FULLSCREEN} #columns {
+        display: block !important;
+        width: 100vw !important;
+        max-width: 100vw !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+
+      html.${CLASS_FULLSCREEN} #primary,
+      html.${CLASS_FULLSCREEN} #primary-inner {
+        width: 100vw !important;
+        min-width: 100vw !important;
+        max-width: 100vw !important;
+        margin: 0 !important;
+        padding: 0 !important;
       }
 
       html.${CLASS_FULLSCREEN} ytd-app {
@@ -424,6 +464,19 @@
         height: 100% !important;
         max-width: none !important;
         max-height: none !important;
+      }
+
+      html.${CLASS_FULLSCREEN} iframe[src*="live_chat"],
+      html.${CLASS_FULLSCREEN} iframe[src*="live_chat_replay"],
+      html.${CLASS_FULLSCREEN} iframe#chatframe {
+        position: fixed !important;
+        left: -200vw !important;
+        top: 0 !important;
+        width: 420px !important;
+        height: 640px !important;
+        opacity: .001 !important;
+        visibility: visible !important;
+        pointer-events: none !important;
       }
 
       .${CLASS_PLAYER} {
