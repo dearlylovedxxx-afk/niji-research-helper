@@ -75,7 +75,7 @@ async function appBackupPrune(env, app, device, origin) {
 }
 async function handleAppBackup(request, env) {
   const url=new URL(request.url);
-  const m=url.pathname.match(/^\/v1\/app-backups\/(or|x|pixiv)(?:\/(.*))?$/);
+  const m=url.pathname.match(/^\/v1\/app-backups\/(or|x|pixiv|pictbland)(?:\/(.*))?$/);
   const type=m && APP_BACKUP_TYPES[m[1]];
   const suppliedOrigin=request.headers.get('origin')||'';
   const corsOrigin=type && type.origins.includes(suppliedOrigin)?suppliedOrigin:'';
