@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット
 // @namespace    marina-youtube-mobile-enhancer
-// @version      0.3.0
+// @version      0.4.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.3.0';
+  const VERSION = '0.4.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -210,6 +210,13 @@
       });
 
       mo.observe(document.body, { childList: true, subtree: true });
+
+      // YouTube側が既存rendererを使い回す場合もあるため、短い周期で現在行を再確認する。
+      setInterval(() => {
+        for (const renderer of document.querySelectorAll(rendererSelector)) {
+          sendRenderer(renderer);
+        }
+      }, 240);
     }
 
     observe();
@@ -656,6 +663,16 @@
       });
 
       mo.observe(document.body, { childList: true, subtree: true });
+
+      setInterval(() => {
+        for (const renderer of document.querySelectorAll(rendererSelector)) {
+          const payload = makePayload(renderer);
+          if (!payload || seen.has(payload.id)) continue;
+          seen.add(payload.id);
+          topState.frameSeenAt = Date.now();
+          spawnComment(payload);
+        }
+      }, 260);
     };
 
     observe();
@@ -707,13 +724,14 @@
       if (topState.pseudoFullscreen && !hasChatFrame() && Date.now() - topState.frameSeenAt > 5000) {
         showNote('チャットリプレイを読み込み中…');
       }
-    }, 450);
+    }, 350);
 
-    setTimeout(() => {
-      if (topState.pseudoFullscreen && !hasChatFrame() && Date.now() - topState.frameSeenAt > 5000) {
-        primeChatReplay();
-      }
-    }, 1400);
+    for (const delay of [900, 1600, 2600]) {
+      setTimeout(() => {
+        if (!topState.pseudoFullscreen) return;
+        if (!hasChatFrame() && Date.now() - topState.frameSeenAt > 1800) primeChatReplay();
+      }, delay);
+    }
 
     return true;
   }
@@ -753,8 +771,11 @@
 
     if (active && !landscape) markAppPromo();
 
-    // 横にしただけでは通常表示。ユーザーが全画面ボタンを押した時だけ専用モードへ。
-    if (topState.pseudoFullscreen && !landscape) {
+    // iPhone横向きはそのまま専用モードへ。
+    // v0.2のfixed方式ではなく、v0.3以降の「通常フローのまま1画面に畳む」方式なので映像レイヤーは触らない。
+    if (landscape && !topState.pseudoFullscreen) {
+      enterPseudoFullscreen();
+    } else if (topState.pseudoFullscreen && !landscape) {
       exitPseudoFullscreen();
     }
 
@@ -789,20 +810,30 @@
     }
   });
 
-  // 横画面でYouTubeの全画面ボタンを押した時だけ専用モード。
-  // 同じボタンでもう一度押すと解除できる。
+  // 横向きではWebKitのネイティブ動画全画面へ渡すとDOMコメントを重ねられないため、
+  // YouTube標準の全画面操作は専用モード側で受け止める。
   document.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
-    const button = target?.closest?.('.ytp-fullscreen-button');
-    if (!button) return;
-    if (!topState.pseudoFullscreen && !isLandscapePhone()) return;
+    const control =
+      target?.closest?.('.ytp-fullscreen-button') ||
+      target?.closest?.('button');
+
+    if (!control || !isLandscapePhone()) return;
+
+    const label = [
+      control.getAttribute?.('aria-label') || '',
+      control.getAttribute?.('title') || '',
+      control.getAttribute?.('data-title-no-tooltip') || '',
+      control.className || '',
+    ].join(' ');
+
+    if (!/full.?screen|fullscreen|全画面|ytp-fullscreen/i.test(String(label))) return;
 
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
 
-    if (topState.pseudoFullscreen) exitPseudoFullscreen();
-    else enterPseudoFullscreen();
+    if (!topState.pseudoFullscreen) enterPseudoFullscreen();
   }, true);
 
   window.addEventListener('resize', scheduleRefresh, { passive: true });
