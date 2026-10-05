@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット
 // @namespace    marina-youtube-mobile-enhancer
-// @version      0.1.0
+// @version      0.2.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -32,6 +32,7 @@
     enabled: false,
     pseudoFullscreen: false,
     player: null,
+    fullscreenTarget: null,
     overlay: null,
     laneUntil: Array(LANES).fill(0),
     seen: new Map(),
@@ -95,7 +96,7 @@
 
     const send = (payload) => {
       try {
-        window.parent.postMessage(payload, '*');
+        window.top.postMessage(payload, '*');
       } catch {}
     };
 
@@ -283,11 +284,24 @@
         padding: 0 !important;
         z-index: 2147483646 !important;
         background: #000 !important;
+        transform: none !important;
+        contain: none !important;
       }
 
+      .${CLASS_PLAYER} #movie_player,
+      .${CLASS_PLAYER} .html5-video-player,
+      .${CLASS_PLAYER} ytd-player,
+      .${CLASS_PLAYER} ytm-player,
       .${CLASS_PLAYER} video {
         width: 100% !important;
         height: 100% !important;
+        min-width: 100% !important;
+        min-height: 100% !important;
+        max-width: none !important;
+        max-height: none !important;
+      }
+
+      .${CLASS_PLAYER} video {
         object-fit: contain !important;
       }
 
@@ -342,7 +356,69 @@
   function getPlayer() {
     return document.querySelector('#movie_player.html5-video-player')
       || document.querySelector('#movie_player')
-      || document.querySelector('.html5-video-player');
+      || document.querySelector('.html5-video-player')
+      || document.querySelector('video')?.parentElement
+      || null;
+  }
+
+  function getFullscreenTarget(player = getPlayer()) {
+    const video = player?.querySelector?.('video') || document.querySelector('video');
+    return (
+      video?.closest?.('ytm-player') ||
+      video?.closest?.('#player-container-id') ||
+      video?.closest?.('#player-container-outer') ||
+      video?.closest?.('ytd-player') ||
+      video?.closest?.('#player') ||
+      player
+    );
+  }
+
+  function hasChatFrame() {
+    return Boolean(
+      document.querySelector(
+        'iframe[src*="live_chat"], iframe[src*="live_chat_replay"], ytd-live-chat-frame iframe, ytm-live-chat-frame iframe, #chatframe'
+      )
+    );
+  }
+
+  function primeChatReplay() {
+    if (!isWatchPage() || hasChatFrame()) return true;
+
+    const candidates = [
+      ...document.querySelectorAll(
+        'button, [role="button"], tp-yt-paper-button, yt-button-shape, ytd-button-renderer, ytm-button-renderer'
+      ),
+    ];
+
+    const ranked = candidates
+      .map((el) => {
+        const text = [
+          el.getAttribute?.('aria-label') || '',
+          el.getAttribute?.('title') || '',
+          el.textContent || '',
+        ].join(' ').replace(/\s+/g, ' ').trim();
+
+        let score = 0;
+        if (/チャットのリプレイ/.test(text)) score += 10;
+        if (/上位のチャット/.test(text)) score += 8;
+        if (/ライブチャット/.test(text)) score += 7;
+        if (/チャット/.test(text)) score += 3;
+        if (/検索/.test(text)) score -= 20;
+        if (/設定/.test(text)) score -= 5;
+        return { el, text, score };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    const target = ranked[0]?.el;
+    if (!target) return false;
+
+    try {
+      target.click();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function markAppPromo() {
@@ -452,25 +528,150 @@
     topState.lastCommentAt = now;
   }
 
+
+  function bootTopChatObserver() {
+    const rendererSelector = [
+      'yt-live-chat-text-message-renderer',
+      'yt-live-chat-paid-message-renderer',
+      'yt-live-chat-paid-sticker-renderer',
+      'yt-live-chat-membership-item-renderer',
+      'yt-live-chat-viewer-engagement-message-renderer',
+    ].join(',');
+
+    const seen = new Set();
+
+    const makePayload = (renderer) => {
+      if (!(renderer instanceof Element)) return null;
+      const authorEl = renderer.querySelector('#author-name') || renderer.querySelector('.author-name');
+      const messageEl =
+        renderer.querySelector('#message') ||
+        renderer.querySelector('#content-text') ||
+        renderer.querySelector('#header-subtext') ||
+        renderer.querySelector('#primary-text');
+
+      let message = textWithEmoji(messageEl);
+      if (!message) {
+        const sticker = renderer.querySelector('img[alt], img[aria-label]');
+        message = sticker?.getAttribute('alt') || sticker?.getAttribute('aria-label') || '';
+      }
+
+      const amount =
+        textWithEmoji(renderer.querySelector('#purchase-amount')) ||
+        textWithEmoji(renderer.querySelector('#purchase-amount-chip'));
+      if (amount && !message.includes(amount)) message = message ? `${message} ${amount}` : amount;
+
+      message = String(message || '').trim();
+      if (!message) return null;
+
+      const author = textWithEmoji(authorEl);
+      const id =
+        renderer.getAttribute('id') ||
+        renderer.getAttribute('data-id') ||
+        renderer.dataset?.id ||
+        `${renderer.tagName.toLowerCase()}|${author}|${message}`;
+
+      return { type: MESSAGE_TYPE, version: VERSION, id, author, message, at: Date.now() };
+    };
+
+    const rememberExisting = () => {
+      for (const renderer of document.querySelectorAll(rendererSelector)) {
+        const payload = makePayload(renderer);
+        if (payload) seen.add(payload.id);
+      }
+    };
+
+    const observe = () => {
+      if (!document.body) {
+        setTimeout(observe, 100);
+        return;
+      }
+
+      rememberExisting();
+
+      const mo = new MutationObserver((mutations) => {
+        const candidates = new Set();
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) {
+            if (!(node instanceof Element)) continue;
+            if (node.matches?.(rendererSelector)) candidates.add(node);
+            for (const child of node.querySelectorAll?.(rendererSelector) || []) candidates.add(child);
+          }
+        }
+
+        for (const renderer of candidates) {
+          const payload = makePayload(renderer);
+          if (!payload || seen.has(payload.id)) continue;
+          seen.add(payload.id);
+          topState.frameSeenAt = Date.now();
+          spawnComment(payload);
+        }
+
+        if (seen.size > 3000) {
+          let count = 0;
+          for (const id of seen) {
+            seen.delete(id);
+            if (++count >= 800) break;
+          }
+        }
+      });
+
+      mo.observe(document.body, { childList: true, subtree: true });
+    };
+
+    observe();
+  }
+
   function enterPseudoFullscreen() {
     if (!isWatchPage() || !isLandscapePhone()) return false;
+
+    // 先にチャットを開く。全画面化してからではUIが動画の下に隠れるため。
+    primeChatReplay();
+
     const player = getPlayer();
-    if (!player) return false;
+    const target = getFullscreenTarget(player);
+    if (!player || !target) return false;
 
     topState.pseudoFullscreen = true;
     topState.player = player;
+    topState.fullscreenTarget = target;
     topState.laneUntil = Array(LANES).fill(0);
 
     ROOT.classList.add(CLASS_FULLSCREEN);
     document.body?.classList.add(CLASS_FULLSCREEN);
-    player.classList.add(CLASS_PLAYER);
+    target.classList.add(CLASS_PLAYER);
+
+    // YouTubeの横長レイアウト側のinline寸法より必ず優先する。
+    for (const [prop, value] of [
+      ['position', 'fixed'],
+      ['inset', '0'],
+      ['width', '100vw'],
+      ['height', '100dvh'],
+      ['max-width', 'none'],
+      ['max-height', 'none'],
+      ['margin', '0'],
+      ['z-index', '2147483646'],
+      ['background', '#000'],
+      ['transform', 'none'],
+    ]) {
+      target.style.setProperty(prop, value, 'important');
+    }
 
     ensureOverlay();
-    if (Date.now() - topState.frameSeenAt > 5000) {
-      showNote('チャットリプレイを開いておくとコメントが流れます');
-    } else {
-      showNote('コメント待機中…');
-    }
+    showNote(hasChatFrame() || Date.now() - topState.frameSeenAt < 5000 ? 'コメント待機中…' : 'チャットを準備中…');
+
+    setTimeout(() => {
+      primeChatReplay();
+      if (topState.pseudoFullscreen && !hasChatFrame() && Date.now() - topState.frameSeenAt > 5000) {
+        showNote('チャットリプレイを読み込み中…');
+      }
+    }, 450);
+
+    setTimeout(() => {
+      if (topState.pseudoFullscreen && !hasChatFrame() && Date.now() - topState.frameSeenAt > 5000) {
+        primeChatReplay();
+      }
+    }, 1400);
+
     return true;
   }
 
@@ -479,11 +680,19 @@
     ROOT.classList.remove(CLASS_FULLSCREEN);
     document.body?.classList.remove(CLASS_FULLSCREEN);
 
-    topState.player?.classList?.remove(CLASS_PLAYER);
+    const target = topState.fullscreenTarget;
+    target?.classList?.remove(CLASS_PLAYER);
     document.querySelectorAll(`.${CLASS_PLAYER}`).forEach((el) => el.classList.remove(CLASS_PLAYER));
+
+    if (target) {
+      for (const prop of ['position','inset','width','height','max-width','max-height','margin','z-index','background','transform']) {
+        target.style.removeProperty(prop);
+      }
+    }
 
     document.getElementById(OVERLAY_ID)?.remove();
     topState.player = null;
+    topState.fullscreenTarget = null;
     topState.overlay = null;
     topState.laneUntil = Array(LANES).fill(0);
   }
@@ -499,7 +708,14 @@
     ROOT.classList.toggle(CLASS_LANDSCAPE, landscape);
 
     if (active && !landscape) markAppPromo();
-    if (topState.pseudoFullscreen && !landscape) exitPseudoFullscreen();
+
+    // YouTubeアプリと同じ感覚に寄せる：視聴中に横向きになったら自動で動画を全面化。
+    if (landscape && !topState.pseudoFullscreen) {
+      enterPseudoFullscreen();
+    } else if (topState.pseudoFullscreen && !landscape) {
+      exitPseudoFullscreen();
+    }
+
     topState.enabled = active;
   }
 
@@ -526,20 +742,18 @@
     }
   });
 
-  // 横向き時だけYouTube標準の全画面ボタンを疑似全画面へ置き換える。
-  // 縦向きではYouTube本来の挙動を邪魔しない。
+  // 横向き時はネイティブ全画面へ渡すとWebページのコメントを重ねられない。
+  // 全画面ボタンは疑似全画面へ固定する。解除は縦向きへ戻した時に行う。
   document.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
     const button = target?.closest?.('.ytp-fullscreen-button');
-    if (!button) return;
-    if (!topState.pseudoFullscreen && !isLandscapePhone()) return;
+    if (!button || !isLandscapePhone()) return;
 
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
 
-    if (topState.pseudoFullscreen) exitPseudoFullscreen();
-    else enterPseudoFullscreen();
+    if (!topState.pseudoFullscreen) enterPseudoFullscreen();
   }, true);
 
   window.addEventListener('resize', scheduleRefresh, { passive: true });
@@ -550,6 +764,7 @@
 
   const boot = () => {
     injectStyle();
+    bootTopChatObserver();
     refreshMode();
 
     const mo = new MutationObserver(() => {
