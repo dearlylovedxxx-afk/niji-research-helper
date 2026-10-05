@@ -1,16 +1,11 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.15
+// @version      0.6.16
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
-// @grant        GM.getValue
-// @grant        GM.setValue
-// @grant        GM.xmlHttpRequest
-// @grant        GM.xmlhttpRequest
-// @grant        GM_xmlhttpRequest
-// @connect      niji-research-backup.dearlylovedxxx.workers.dev
+// @grant        none
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Pixiv_Bookmark_Sort.user.js
@@ -983,28 +978,18 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
 
 
-// ---- Saved Pixiv searches + pCloud sync (v0.6.13) ----
+// ---- Saved Pixiv searches (v0.6.9) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivSavedSearchesV0615) return;
-  window.__pixivSavedSearchesV0613 = true;
+  if (window.__pixivSavedSearchesV069) return;
+  window.__pixivSavedSearchesV069 = true;
 
   const STORAGE_KEY = 'pixiv-saved-searches-v1';
-  const SYNC_META_KEY = 'pixiv-saved-searches-cloud-meta-v1';
-  const CLOUD_CONFIG_KEY = 'pixiv-saved-searches-cloud-config-v1';
-  const CLOUD_URL = 'https://niji-research-backup.dearlylovedxxx.workers.dev';
-  const CLOUD_DEVICE = 'pixiv_saved_searches_v1';
   const ROOT_ID = 'pixiv-saved-searches-root';
   const OFFSET = 78;
   const MAX_SAVED = 200;
   let root = null;
-  let cloudEnabled = false;
-  let cloudToken = '';
-  let cloudBusy = false;
-  let cloudStatus = '☁️ pCloud未接続';
-  let cloudSaveTimer = null;
-  let lastCloudPullAt = 0;
 
   function isSearchUrl(u) {
     if (/^\/tags\/[^/]+(?:\/(?:artworks|illustrations|manga|novels))?(?:\/|$)/.test(u.pathname)) return true;
@@ -1033,7 +1018,11 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       }
     }
     const query = u.searchParams.toString();
-    return { href: u.pathname + (query ? '?' + query : ''), word, kind };
+    return {
+      href: u.pathname + (query ? '?' + query : ''),
+      word,
+      kind
+    };
   }
 
   function readSaved() {
@@ -1046,386 +1035,11 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     }
   }
 
-  function readSyncMeta() {
-    try {
-      const value = JSON.parse(localStorage.getItem(SYNC_META_KEY) || '{}');
-      return value && typeof value === 'object' ? value : {};
-    } catch {
-      return {};
-    }
-  }
-
-  function writeSyncMeta(patch) {
-    const next = { ...readSyncMeta(), ...patch };
-    localStorage.setItem(SYNC_META_KEY, JSON.stringify(next));
-    return next;
-  }
-
-  function derivedRevision(rows = readSaved()) {
-    const meta = readSyncMeta();
-    const stored = Number(meta.localRevision || 0);
-    if (stored > 0) return stored;
-    return rows.reduce((max, row) => Math.max(max, Number(row?.updatedAt || row?.createdAt || 0)), 0);
-  }
-
-  function nextRevision() {
-    return Math.max(Date.now(), derivedRevision() + 1);
-  }
-
-  function cleanRows(rows) {
-    return (Array.isArray(rows) ? rows : [])
-      .filter(row => row && typeof row.href === 'string' && row.href.startsWith('/') && typeof row.name === 'string')
-      .slice(0, MAX_SAVED);
-  }
-
-  function writeSaved(rows, { fromCloud = false, revision = 0 } = {}) {
-    const clean = cleanRows(rows);
+  function writeSaved(rows) {
+    const clean = rows.slice(0, MAX_SAVED);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
-    if (fromCloud) {
-      const rev = Math.max(0, Number(revision || 0));
-      writeSyncMeta({ initialized: true, localRevision: rev, lastCloudRevision: rev });
-    } else {
-      writeSyncMeta({ initialized: true, localRevision: nextRevision() });
-      scheduleCloudSave();
-    }
     window.dispatchEvent(new Event('pixiv-saved-searches-changed'));
     render();
-  }
-
-  async function gmGet(key, fallback) {
-    try {
-      if (typeof GM !== 'undefined' && typeof GM.getValue === 'function') return (await GM.getValue(key, fallback)) ?? fallback;
-    } catch (e) {
-      console.warn('[Pixiv Saved Search] GM.getValue failed', e);
-    }
-    return fallback;
-  }
-
-  async function gmSet(key, value) {
-    if (typeof GM !== 'undefined' && typeof GM.setValue === 'function') return GM.setValue(key, value);
-    throw new Error('GM.setValueが利用できません。');
-  }
-
-  function gmRequest(details) {
-    const fn =
-      (typeof GM !== 'undefined' && (GM.xmlHttpRequest || GM.xmlhttpRequest)) ||
-      (typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null);
-    if (!fn) return Promise.reject(new Error('GM通信APIが利用できません。'));
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let ctrl = null;
-      const finish = (cb, value) => {
-        if (settled) return;
-        settled = true;
-        cb(value);
-      };
-      try {
-        ctrl = fn({
-          ...details,
-          anonymous: false,
-          onload: r => finish(resolve, r),
-          onerror: e => finish(reject, new Error(e?.error || e?.message || 'GM request failed')),
-          ontimeout: () => finish(reject, new Error('GM request timeout')),
-        });
-      } catch (e) {
-        finish(reject, e);
-      }
-      setTimeout(() => {
-        if (settled) return;
-        try { ctrl?.abort?.(); } catch {}
-        finish(reject, new Error('pCloud通信がタイムアウトしました。'));
-      }, Math.max(5000, Number(details?.timeout || 30000) + 4000));
-    });
-  }
-
-  async function sha256(bytes) {
-    const digest = await crypto.subtle.digest('SHA-256', bytes);
-    return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-
-  function setCloudStatus(text) {
-    cloudStatus = text;
-    const el = root?.querySelector('.pss-cloud-status');
-    if (el) el.textContent = text;
-    updateCloudUi();
-  }
-
-  function updateCloudUi() {
-    if (!root) return;
-    const input = root.querySelector('.pss-cloud-token');
-    const connect = root.querySelector('.pss-cloud-connect');
-    const disconnect = root.querySelector('.pss-cloud-disconnect');
-    const status = root.querySelector('.pss-cloud-status');
-    if (status) status.textContent = cloudStatus;
-    if (input) input.hidden = cloudEnabled;
-    if (connect) connect.hidden = cloudEnabled;
-    if (disconnect) disconnect.hidden = !cloudEnabled;
-    for (const el of [input, connect, disconnect]) if (el) el.disabled = cloudBusy;
-  }
-
-  async function cloudList(token = cloudToken) {
-    const res = await gmRequest({
-      method: 'GET',
-      url: `${CLOUD_URL}/v1/backups?device=${encodeURIComponent(CLOUD_DEVICE)}`,
-      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-      responseType: 'text',
-      timeout: 30000,
-    });
-    let body = {};
-    try { body = JSON.parse(res.responseText || res.response || '{}'); } catch { throw new Error('pCloud一覧の応答が不正です。'); }
-    if (res.status < 200 || res.status >= 300 || !body.ok) throw new Error(`pCloud一覧 HTTP ${res.status}: ${body.error || '取得失敗'}`);
-    return (Array.isArray(body.backups) ? body.backups : []).sort((a,b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
-  }
-
-  async function cloudFetch(item, token = cloudToken) {
-    if (!item?.id || !item?.sha256) throw new Error('pCloudバックアップ情報が不正です。');
-    const res = await gmRequest({
-      method: 'GET',
-      url: `${CLOUD_URL}/v1/backups/${encodeURIComponent(item.id)}`,
-      headers: { authorization: `Bearer ${token}` },
-      responseType: 'arraybuffer',
-      timeout: 30000,
-    });
-    if (res.status !== 200) throw new Error(`pCloud読込 HTTP ${res.status}`);
-    const raw = res.response instanceof ArrayBuffer
-      ? new Uint8Array(res.response)
-      : ArrayBuffer.isView(res.response)
-        ? new Uint8Array(res.response.buffer, res.response.byteOffset, res.response.byteLength)
-        : new TextEncoder().encode(res.responseText || String(res.response || ''));
-    if (Number(item.size || 0) && raw.byteLength !== Number(item.size)) throw new Error('pCloudサイズ不一致');
-    if (await sha256(raw) !== item.sha256) throw new Error('pCloud SHA-256不一致');
-    let data;
-    try { data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)); }
-    catch { throw new Error('pCloud JSONが不正です。'); }
-    const sync = data?.preferences?.savedSearchSync;
-    if (
-      data?.app !== 'Niji Research Helper' ||
-      data?.device !== CLOUD_DEVICE ||
-      sync?.app !== 'Pixiv Saved Searches' ||
-      Number(sync?.schemaVersion) !== 1 ||
-      !Array.isArray(sync?.rows)
-    ) throw new Error('pCloud保存形式が違います。');
-    return {
-      rows: cleanRows(sync.rows),
-      revision: Math.max(0, Number(sync.revision || Date.parse(data.exportedAt || '') || 0)),
-    };
-  }
-
-  async function cloudUpload(rows, revision, token = cloudToken) {
-    const payload = {
-      app: 'Niji Research Helper',
-      version: '0.6.15',
-      dbVersion: 1,
-      exportedAt: new Date().toISOString(),
-      sourceOrigin: location.origin,
-      device: CLOUD_DEVICE,
-      stores: { videos: [], channels: [], wiki: [], pairs: [] },
-      preferences: {
-        savedSearchSync: {
-          app: 'Pixiv Saved Searches',
-          schemaVersion: 1,
-          revision: Math.max(0, Number(revision || Date.now())),
-          rows: cleanRows(rows),
-        },
-      },
-    };
-    const text = JSON.stringify(payload);
-    const bytes = new TextEncoder().encode(text);
-    const hash = await sha256(bytes);
-    const res = await gmRequest({
-      method: 'POST',
-      url: `${CLOUD_URL}/v1/backups`,
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: 'application/json',
-        'content-type': 'application/json',
-        'x-nrh-device': CLOUD_DEVICE,
-        'x-nrh-origin': location.origin,
-        'x-nrh-sha256': hash,
-        'x-nrh-version': '0.6.15',
-      },
-      data: text,
-      responseType: 'text',
-      timeout: 45000,
-    });
-    let body = {};
-    try { body = JSON.parse(res.responseText || res.response || '{}'); } catch { throw new Error('pCloud保存応答が不正です。'); }
-    if (res.status < 200 || res.status >= 300 || !body.ok) throw new Error(`pCloud保存 HTTP ${res.status}: ${body.error || '保存失敗'}`);
-    writeSyncMeta({ initialized: true, localRevision: revision, lastCloudRevision: revision });
-    return true;
-  }
-
-  function mergeInitial(localRows, remoteRows) {
-    const localByKey = new Map(localRows.map(row => [String(row.href || row.id || ''), row]));
-    const used = new Set();
-    const out = [];
-    for (const remote of remoteRows) {
-      const key = String(remote.href || remote.id || '');
-      const local = localByKey.get(key);
-      const chosen = local && Number(local.updatedAt || 0) > Number(remote.updatedAt || 0) ? local : remote;
-      if (key) used.add(key);
-      out.push(chosen);
-    }
-    for (const local of localRows) {
-      const key = String(local.href || local.id || '');
-      if (!used.has(key)) out.push(local);
-    }
-    return cleanRows(out);
-  }
-
-  async function cloudPushLatest() {
-    if (!cloudEnabled || !cloudToken) return;
-    if (cloudBusy) {
-      scheduleCloudSave(1200);
-      return;
-    }
-    cloudBusy = true;
-    updateCloudUi();
-    try {
-      const rows = readSaved();
-      const revision = Math.max(derivedRevision(rows), Date.now());
-      writeSyncMeta({ localRevision: revision });
-      setCloudStatus('☁️ pCloudへ自動保存中…');
-      await cloudUpload(rows, revision);
-      setCloudStatus(`☁️ 同期済み：${rows.length}件`);
-    } catch (e) {
-      setCloudStatus(`⚠️ pCloud保存失敗：${String(e?.message || e).slice(0, 90)}`);
-      console.warn('[Pixiv Saved Search] cloud push failed', e);
-    } finally {
-      cloudBusy = false;
-      updateCloudUi();
-    }
-  }
-
-  function scheduleCloudSave(delay = 700) {
-    if (!cloudEnabled || !cloudToken) return;
-    clearTimeout(cloudSaveTimer);
-    cloudSaveTimer = setTimeout(() => void cloudPushLatest(), delay);
-  }
-
-  async function syncCloud({ force = false } = {}) {
-    if (!cloudEnabled || !cloudToken || cloudBusy) return;
-    if (!force && Date.now() - lastCloudPullAt < 30000) return;
-    cloudBusy = true;
-    updateCloudUi();
-    setCloudStatus('☁️ pCloudから自動読込中…');
-    try {
-      const localRows = readSaved();
-      let meta = readSyncMeta();
-      let localRevision = derivedRevision(localRows);
-      const list = await cloudList();
-      lastCloudPullAt = Date.now();
-
-      if (!list.length) {
-        if (localRows.length) {
-          localRevision = Math.max(localRevision, Date.now());
-          writeSyncMeta({ initialized: true, localRevision });
-          await cloudUpload(localRows, localRevision);
-        } else {
-          writeSyncMeta({ initialized: true, localRevision: 0, lastCloudRevision: 0 });
-        }
-        setCloudStatus(`☁️ 同期済み：${localRows.length}件`);
-        return;
-      }
-
-      const remote = await cloudFetch(list[0]);
-      const remoteRevision = Number(remote.revision || 0);
-
-      if (!meta.initialized) {
-        if (!localRows.length) {
-          writeSaved(remote.rows, { fromCloud: true, revision: remoteRevision });
-          setCloudStatus(`☁️ pCloudから読込：${remote.rows.length}件`);
-          return;
-        }
-        const merged = mergeInitial(localRows, remote.rows);
-        const same = JSON.stringify(merged) === JSON.stringify(remote.rows);
-        if (same) {
-          writeSaved(merged, { fromCloud: true, revision: remoteRevision });
-        } else {
-          const revision = Math.max(Date.now(), localRevision + 1, remoteRevision + 1);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-          writeSyncMeta({ initialized: true, localRevision: revision });
-          await cloudUpload(merged, revision);
-          window.dispatchEvent(new Event('pixiv-saved-searches-changed'));
-          render();
-        }
-        setCloudStatus(`☁️ 初回統合・同期済み：${merged.length}件`);
-        return;
-      }
-
-      meta = readSyncMeta();
-      const currentRows = readSaved();
-      localRevision = derivedRevision(currentRows);
-      if (remoteRevision > localRevision) {
-        writeSaved(remote.rows, { fromCloud: true, revision: remoteRevision });
-        setCloudStatus(`☁️ pCloudから更新：${remote.rows.length}件`);
-      } else if (localRevision > remoteRevision) {
-        await cloudUpload(currentRows, localRevision);
-        setCloudStatus(`☁️ pCloudへ更新：${currentRows.length}件`);
-      } else {
-        writeSyncMeta({ initialized: true, localRevision, lastCloudRevision: remoteRevision });
-        setCloudStatus(`☁️ 同期済み：${localRows.length}件`);
-      }
-    } catch (e) {
-      setCloudStatus(`⚠️ pCloud同期失敗：${String(e?.message || e).slice(0, 90)}`);
-      console.warn('[Pixiv Saved Search] cloud sync failed', e);
-    } finally {
-      cloudBusy = false;
-      updateCloudUi();
-    }
-  }
-
-  async function connectCloud() {
-    const input = root?.querySelector('.pss-cloud-token');
-    const token = String(input?.value || '').trim();
-    if (token.length < 24) {
-      setCloudStatus('⚠️ バックアップ専用トークンを入力してください');
-      return;
-    }
-    cloudBusy = true;
-    updateCloudUi();
-    setCloudStatus('☁️ pCloud接続確認中…');
-    try {
-      const res = await gmRequest({
-        method: 'GET',
-        url: `${CLOUD_URL}/v1/status`,
-        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-        responseType: 'text',
-        timeout: 30000,
-      });
-      let body = {};
-      try { body = JSON.parse(res.responseText || res.response || '{}'); } catch {}
-      if (res.status < 200 || res.status >= 300 || !body.connected || !body.remoteOk) throw new Error(body.error || `HTTP ${res.status}`);
-      cloudEnabled = true;
-      cloudToken = token;
-      await gmSet(CLOUD_CONFIG_KEY, { enabled: true, token });
-      if (input) input.value = '';
-    } catch (e) {
-      cloudEnabled = false;
-      cloudToken = '';
-      setCloudStatus(`⚠️ pCloud接続失敗：${String(e?.message || e).slice(0, 90)}`);
-    } finally {
-      cloudBusy = false;
-      updateCloudUi();
-    }
-    if (cloudEnabled) await syncCloud({ force: true });
-  }
-
-  async function disconnectCloud() {
-    cloudEnabled = false;
-    cloudToken = '';
-    clearTimeout(cloudSaveTimer);
-    await gmSet(CLOUD_CONFIG_KEY, { enabled: false, token: '' }).catch(() => {});
-    setCloudStatus('☁️ pCloud未接続');
-    updateCloudUi();
-  }
-
-  async function initCloud() {
-    const cfg = await gmGet(CLOUD_CONFIG_KEY, { enabled: false, token: '' });
-    cloudEnabled = cfg?.enabled === true && typeof cfg?.token === 'string' && cfg.token.trim().length >= 24;
-    cloudToken = cloudEnabled ? cfg.token.trim() : '';
-    setCloudStatus(cloudEnabled ? '☁️ pCloud接続済み・自動同期ON' : '☁️ pCloud未接続');
-    if (cloudEnabled) await syncCloud({ force: true });
   }
 
   function kindLabel(kind) {
@@ -1579,13 +1193,9 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       #${ROOT_ID} .pss-head{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:#fff;border:1px solid #dde2e8;border-radius:12px;padding:14px;margin-bottom:12px}
       #${ROOT_ID} .pss-head h2{font-size:18px;margin:0}
       #${ROOT_ID} .pss-current-text{font-size:12px;color:#65707d;flex:1 1 100%}
-      #${ROOT_ID} .pss-cloud{display:flex;gap:7px;align-items:center;flex-wrap:wrap;flex:1 1 100%;padding:8px;border-radius:9px;background:#f7fbff;border:1px solid #d7e9f8}
-      #${ROOT_ID} .pss-cloud-status{font-size:12px;font-weight:700;flex:1 1 220px}
-      #${ROOT_ID} .pss-cloud-token{min-width:220px;flex:1 1 260px}
-      #${ROOT_ID} button,#${ROOT_ID} input{font:inherit;border:1px solid #ccd2d9;border-radius:8px;background:#fff;color:#202124;padding:9px 10px}
-      #${ROOT_ID} button:disabled,#${ROOT_ID} input:disabled{opacity:.45}
+      #${ROOT_ID} button{font:inherit;border:1px solid #ccd2d9;border-radius:8px;background:#fff;color:#202124;padding:9px 10px}
+      #${ROOT_ID} button:disabled{opacity:.45}
       #${ROOT_ID} .pss-save-current{background:#0096fa;color:#fff;border-color:#0096fa;font-weight:700}
-      #${ROOT_ID} .pss-cloud-connect{background:#1769aa;color:#fff;border-color:#1769aa;font-weight:700}
       #${ROOT_ID} .pss-card{background:#fff;border:1px solid #dde2e8;border-radius:12px;padding:10px;margin-bottom:10px}
       #${ROOT_ID} .pss-open{display:flex;width:100%;text-align:left;flex-direction:column;gap:4px;border:0;background:transparent;padding:5px}
       #${ROOT_ID} .pss-open strong{font-size:15px}
@@ -1599,13 +1209,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
     root = document.createElement('section');
     root.id = ROOT_ID;
-    root.innerHTML = '<div class="pss-wrap"><div class="pss-head"><h2>🔖 保存したPixiv検索</h2><button type="button" class="pss-save-current">現在の検索を保存</button><div class="pss-current-text"></div><div class="pss-cloud"><span class="pss-cloud-status">☁️ pCloud確認中…</span><input class="pss-cloud-token" type="password" autocomplete="off" placeholder="バックアップ専用トークン（初回のみ）"><button type="button" class="pss-cloud-connect">pCloud接続</button><button type="button" class="pss-cloud-disconnect">切断</button></div></div><div class="pss-list"></div></div>';
+    root.innerHTML = '<div class="pss-wrap"><div class="pss-head"><h2>🔖 保存したPixiv検索</h2><button type="button" class="pss-save-current">現在の検索を保存</button><div class="pss-current-text"></div></div><div class="pss-list"></div></div>';
     root.querySelector('.pss-save-current').addEventListener('click', saveCurrent);
-    root.querySelector('.pss-cloud-connect').addEventListener('click', () => void connectCloud());
-    root.querySelector('.pss-cloud-disconnect').addEventListener('click', () => void disconnectCloud());
     document.body.append(root);
     render();
-    updateCloudUi();
   }
 
   function open() {
@@ -1613,7 +1220,6 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     if (!root) return;
     render();
     root.classList.add('open');
-    if (cloudEnabled) void syncCloud({ force: false });
   }
 
   function close() {
@@ -1626,13 +1232,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
   window.__pixivSavedSearchesUi = {open, close, count, render, storageKey: STORAGE_KEY};
   window.addEventListener('pixiv-saved-searches-changed', render);
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && cloudEnabled) void syncCloud({ force: false });
-  });
-  setInterval(() => { if (cloudEnabled && !document.hidden) void syncCloud({ force: false }); }, 120000);
-
   if (document.body) build(); else addEventListener('DOMContentLoaded', build, {once:true});
-  void initCloud();
 })();
 
 
