@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.64
+// @version      1.0.65
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.64';
+  const VERSION = '1.0.65';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -1016,11 +1016,12 @@
 
   function isResearchCloudBackupItem(item) {
     const device = String(item?.device || '');
-    if (!device || device === FAV_CLOUD_DEVICE) return false;
+    if (!device || device === FAV_CLOUD_DEVICE || device === PREF_CLOUD_DEVICE) return false;
     // YouTubeメン限チャット検索は同じNRHバックアップゲートウェイを使うが、
     // 研究DBとは別データなのでNRH本体の復元一覧から除外する。
     if (device.startsWith('ytchat_')) return false;
-    // Pixiv / pictBLand の保存検索も同じゲートウェイに置くが、研究DBではない。
+    // Niji Cloud の他アプリ共通データと、移行期間中の保存検索専用データも別物。
+    if (device.startsWith('shared-')) return false;
     if (device === 'pixiv_saved_searches_v1' || device === 'pictbland_saved_searches_v1') return false;
     return true;
   }
@@ -1317,7 +1318,7 @@
     }
   }
 
-  async function cloudApplySharedResearch(data) {
+  async function cloudApplySharedResearch(data,{replace=false}={}) {
     if(data?.app!=='Niji Research Helper'||data?.dbVersion!==NRH_DB_VERSION||CLOUD_STORES.some(name=>!Array.isArray(data?.stores?.[name])))
       throw new Error('全端末共通DBの形式が違います');
     cloud.suppressMarks++;
@@ -1326,15 +1327,25 @@
       for(const name of CLOUD_STORES){
         await new Promise((resolve,reject)=>{
           const tx=db.transaction(name,'readwrite'),store=tx.objectStore(name);
-          for(const row of data.stores[name]){
-            if(!row||typeof row!=='object')continue;
-            const key=name==='videos'||name==='channels'?row.id:row.key;
-            if(typeof key!=='string'||!key)continue;
-            const req=store.get(key);
-            req.onsuccess=()=>{
-              const local=req.result;
-              if(!local||cloudRowStamp(row)>=cloudRowStamp(local))store.put(local?{...local,...row}:row);
-            };
+          if(replace){
+            store.clear();
+            for(const row of data.stores[name]){
+              if(!row||typeof row!=='object')continue;
+              const key=name==='videos'||name==='channels'?row.id:row.key;
+              if(typeof key!=='string'||!key)continue;
+              store.put(row);
+            }
+          }else{
+            for(const row of data.stores[name]){
+              if(!row||typeof row!=='object')continue;
+              const key=name==='videos'||name==='channels'?row.id:row.key;
+              if(typeof key!=='string'||!key)continue;
+              const req=store.get(key);
+              req.onsuccess=()=>{
+                const local=req.result;
+                if(!local||cloudRowStamp(row)>=cloudRowStamp(local))store.put(local?{...local,...row}:row);
+              };
+            }
           }
           tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('共通DB反映中断'));
         });
@@ -1354,16 +1365,31 @@
       const listed=await cloudRequest('GET','/v1/backups?device='+encodeURIComponent(RESEARCH_CLOUD_DEVICE));
       const rows=(Array.isArray(listed.backups)?listed.backups:[]).slice().sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0));
       const latest=rows[0]||null;
+      const remoteChanged=!!latest&&String(latest.id)!==String(cloud.lastRemoteId||'');
+      const localChanged=!!cloud.dirty;
+
       if(!latest){
         needUpload=true;
-      }else if(force||String(latest.id)!==String(cloud.lastRemoteId||'')){
+      }else if(remoteChanged){
         const data=await cloudFetchResearchSnapshot(latest);
-        await cloudApplySharedResearch(data);
+        // If both devices changed, merge. If only cloud changed, make this browser
+        // an exact copy so resets/deletions also propagate.
+        await cloudApplySharedResearch(data,{replace:!localChanged});
         cloud.lastRemoteId=String(latest.id||'');
         await GM.setValue(CLOUD_CONFIG_KEY,{enabled:true,token:cloud.token,lastSavedAt:cloud.lastSavedAt,lastRemoteId:cloud.lastRemoteId});
-        cloud.status='✅ 全端末共通DBを自動読込しました';cloudUpdateUi();
+        if(!localChanged){
+          cloud.dirty=false;cloud.writes=0;
+          await GM.setValue(CLOUD_PENDING_KEY,false);
+        }else{
+          needUpload=true;
+        }
+        cloud.status=localChanged?'☁️ 他端末の変更を統合しました。共通DBへ保存中…':'✅ 全端末共通DBを自動読込しました';
+        cloudUpdateUi();
+      }else if(localChanged){
+        needUpload=true;
+      }else if(force){
+        cloud.status='✅ 全端末共通DBは最新です';cloudUpdateUi();
       }
-      if(cloud.dirty)needUpload=true;
     }catch(e){
       cloud.status='⚠️ 共通DB同期失敗：'+String(e?.message||e).slice(0,110);cloudUpdateUi();
       console.warn('[NRH][shared research sync]',e);
@@ -1377,7 +1403,7 @@
   async function cloudEnable() {
     const input = document.getElementById('npf-cloud-token');
     const token = String(input?.value || '').trim();
-    if (token.length < 24) { toast('Cloudflareに設定したバックアップ専用トークンを入力してください'); return; }
+    if (token.length < 24) { toast('NIJI CLIENT TOKENを入力してください'); return; }
     const previous = cloud.token;
     cloud.token = token;
     cloud.status = '☁️ 接続を確認中…'; cloudUpdateUi();
@@ -1387,7 +1413,7 @@
       cloud.enabled = true;
       cloud.dirty = true;
       cloud.writes++;
-      cloud.status = '☁️ 接続済み。初回バックアップを作成します';
+      cloud.status = '☁️ 接続済み。既存データを全端末共通へ統合します';
       cloud.lastRemoteId='';
       await GM.setValue(CLOUD_CONFIG_KEY, { enabled:true, token, lastSavedAt:0, lastRemoteId:'' });
       await GM.setValue(CLOUD_PENDING_KEY, true);
@@ -1404,14 +1430,14 @@
   }
 
   async function cloudDisable() {
-    if (!confirm('この端末の自動バックアップを停止しますか？ pCloudのバックアップとローカルDBは削除されません。')) return;
+    if (!confirm('この端末のNiji Cloud同期を停止しますか？ クラウド上の共通データとローカルDBは削除されません。')) return;
     cloud.enabled = false; cloud.token = ''; cloud.dirty = false;
     state.favoriteCloudToken = ''; state.favoriteCloudReady = false;
     state.favoriteStorageStatus = '☁️ pCloud未接続';
     state.preferenceCloudToken=''; state.preferenceCloudReady=false; state.preferenceCloudBackupId='';
     clearTimeout(state.preferenceCloudTimer);
     clearTimeout(cloud.timer);
-    cloud.status = '自動バックアップは停止中。クラウド上のデータは残っています';
+    cloud.status = 'この端末の同期は停止中。クラウド上の共通データは残っています';
     await GM.setValue(CLOUD_CONFIG_KEY, { enabled:false, token:'', lastSavedAt:0, lastRemoteId:'' });
     cloudUpdateUi();
   }
@@ -1637,20 +1663,20 @@
   function createCloudBackupUi() {
     const wrap = document.createElement('section'); wrap.id = 'npf-cloud-backup';
     wrap.style.cssText = 'border:1px solid #63769a;border-radius:12px;padding:10px;margin:12px 0;';
-    const heading = document.createElement('div'); heading.textContent = '☁️ pCloud 自動バックアップ（任意）';
+    const heading = document.createElement('div'); heading.textContent = '☁️ Niji Cloud 全端末同期';
     heading.style.cssText = 'font-weight:700;margin-bottom:6px;';
     const status = document.createElement('div'); status.id = 'npf-cloud-status';
     status.style.cssText = 'font-size:12px;overflow-wrap:anywhere;margin-bottom:7px;';
     const setup = document.createElement('div'); setup.id = 'npf-cloud-setup';
     const token = document.createElement('input'); token.id = 'npf-cloud-token'; token.type = 'password';
-    token.className = 'npf-r-input'; token.placeholder = 'バックアップ専用トークン（pCloudのAPIキーではありません）';
+    token.className = 'npf-r-input'; token.placeholder = 'NIJI CLIENT TOKEN（pCloudのAPIキーではありません）';
     token.autocomplete = 'off'; token.style.cssText = 'display:block;width:100%;margin:5px 0;';
     const enable = document.createElement('button'); enable.type = 'button'; enable.className = 'npf-r-btn';
-    enable.textContent = '🔒 接続して自動保存を有効化'; enable.addEventListener('click', () => void cloudEnable());
+    enable.textContent = '🔒 接続して全端末同期を有効化'; enable.addEventListener('click', () => void cloudEnable());
     const note = document.createElement('div'); note.className = 'npf-r-note';
-    note.textContent = '専用Workerの導入後に有効化。Holodex APIキーは送信しません。ブラウザを閉じている間は自動実行されません。';
+    note.textContent = '研究DB・お気に入り・設定・同期位置・補正値をPC / iPhone / iPadで共通化します。Holodex / YouTube APIキーとNIJI CLIENT TOKEN自体はクラウドへ保存しません。';
     const verify = document.createElement('button'); verify.type = 'button'; verify.id = 'npf-cloud-verify';
-    verify.className = 'npf-r-btn'; verify.textContent = '🔎 保存済みバックアップを検証（復元なし）';
+    verify.className = 'npf-r-btn'; verify.textContent = '🔎 保存済み共通DBを検証（復元なし）';
     verify.addEventListener('click', () => void cloudVerifyLatest());
     setup.append(token, enable, verify, note);
     const actions = document.createElement('div'); actions.id = 'npf-cloud-actions';
@@ -1658,7 +1684,7 @@
     upload.className = 'npf-r-btn'; upload.textContent = '☁️ 今すぐ同期';
     upload.addEventListener('click', () => void cloudSyncShared({force:true}));
     const show = document.createElement('button'); show.type = 'button'; show.className = 'npf-r-btn';
-    show.textContent = '📥 バックアップ一覧・復元'; show.addEventListener('click', () => void cloudShowBackups());
+    show.textContent = '📥 履歴・復元'; show.addEventListener('click', () => void cloudShowBackups());
     const disable = document.createElement('button'); disable.type = 'button'; disable.className = 'npf-r-btn';
     disable.textContent = '⏸ この端末の同期を停止'; disable.addEventListener('click', () => void cloudDisable());
     actions.append(upload, show, disable);
