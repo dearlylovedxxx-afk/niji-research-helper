@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.71
+// @version      1.0.72
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.71';
+  const VERSION = '1.0.72';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5269,11 +5269,18 @@
 
     if (isMobileYoutubeUi()) {
       const tabs = make('div', { id: 'npf-yt-tabs', cls: 'npf-yt-tabs' });
-      for (const [tab, label] of [['pov', '👥 他視点・同期'], ['research', '🔎 アーカイブ調査']]) {
+      for (const [tab, label] of [['pov', '👥 他視点'], ['research', '🔎 アーカイブ'], ['chat', '💬 チャット']]) {
         const button = make('button', { cls: 'npf-yt-tab', text: label, type: 'button' });
         button.dataset.npfTab = tab;
         button.setAttribute('aria-pressed', String(tab === mobileYoutubeTab));
-        button.addEventListener('click', () => setMobileYoutubeTab(tab));
+        button.addEventListener('click', () => {
+          if (tab === 'chat') {
+            closeYoutubePanel();
+            document.dispatchEvent(new CustomEvent('niji-member-chat-open'));
+            return;
+          }
+          setMobileYoutubeTab(tab);
+        });
         tabs.appendChild(button);
       }
       panel.appendChild(tabs);
@@ -5311,7 +5318,7 @@
     const actions = make('div', { cls: 'npf-yt-actions' });
     const actionDefs = [
       ['npf-yt-other-pov', 'npf-yt-btn primary wide', isMobileYoutubeUi() ? '👥 この時刻の他視点を探す' : '👥 現在位置から他視点'],
-      ['npf-yt-comment-search', 'npf-yt-btn', '💬 コメント検索'],
+      ['npf-yt-comment-search', 'npf-yt-btn', '💬 チャット検索'],
       ['npf-yt-copy', 'npf-yt-btn', '📋 時刻付きコピー'],
       ['npf-yt-save-sync', 'npf-yt-btn', '⏱ 同期位置を保存'],
       ['npf-yt-clear-sync', 'npf-yt-btn', '同期を解除'],
@@ -5372,7 +5379,10 @@
     closeBtn.addEventListener('click', closeYoutubePanel);
     $$('[data-seek]', panel).forEach(btn => btn.addEventListener('click', () => seekYoutube(Number(btn.dataset.seek || 0))));
     $('#npf-yt-other-pov', panel)?.addEventListener('click', () => void searchOtherPovsFromYoutube());
-    $('#npf-yt-comment-search', panel)?.addEventListener('click', openComment2434ForCurrentVideo);
+    $('#npf-yt-comment-search', panel)?.addEventListener('click', () => {
+      document.dispatchEvent(new CustomEvent('niji-member-chat-open'));
+      if (isMobileYoutubeUi()) closeYoutubePanel();
+    });
     $('#npf-yt-copy', panel)?.addEventListener('click', () => void copyYoutubeTimestamp());
     $('#npf-yt-copy-mode', panel)?.addEventListener('change', async (e) => {
       state.settings.youtubeCopyMode = e.target.value === 'url-only' ? 'url-only' : 'title-url';
@@ -9238,10 +9248,19 @@ e.el.classList.toggle('npf-r-hidden', !show);
 
       clearInterval(youtubeTimer);
       youtubeTimer = setInterval(() => {
-        // Mobile YouTube can replace body content during navigation: reattach only if removed.
-        if (isMobileYoutubeUi() && (!$('#npf-fab') || !$('#npf-yt-panel'))) {
-          createShell();
-          ensureYoutubePanel();
+        // Mobile YouTube can rebuild large DOM branches during SPA navigation.
+        // NIJI is the single launcher, so restore both roots if either disappears.
+        if (isMobileYoutubeUi()) {
+          const fab = $('#npf-fab.npf-mobile-fab');
+          const panel = $('#npf-yt-panel');
+          if (!fab || !fab.isConnected || !panel || !panel.isConnected) {
+            $('#npf-fab')?.remove();
+            $('#npf-yt-panel')?.remove();
+            createShell();
+            ensureYoutubePanel();
+          }
+          const legacyChatFab = $('#marina-member-chat-search-button');
+          if (legacyChatFab) legacyChatFab.style.setProperty('display', 'none', 'important');
         }
         const id = currentYoutubeVideoId() || '';
         if (id !== youtubeLastVideoId) handleYoutubeNavigation();
