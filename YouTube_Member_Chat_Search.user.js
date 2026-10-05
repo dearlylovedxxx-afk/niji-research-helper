@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.5.6
+// @version      0.6.0
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.5.6';
+  const VERSION = '0.6.0';
 
   const state = {
     videoId: null,
@@ -66,6 +66,14 @@
     crossSearchSerial: 0,
     crossSearchTimer: null,
 
+    // iPhone Safari watch-page experience
+    mobileModeStarted: false,
+    pseudoFullscreen: false,
+    pseudoPlayer: null,
+    danmakuRaf: 0,
+    danmakuLastTime: null,
+    danmakuCursor: 0,
+    danmakuLaneUntil: [],
   };
 
   const CACHE_DB_NAME = 'MarinaMemberChatSearchDB';
@@ -84,6 +92,14 @@
   const CLOUD_SCHEMA_VERSION = 1;
   let cacheDbPromise = null;
   let archiveDbPromise = null;
+
+  const MOBILE_PHONE_CLASS = 'mcs-mobile-phone';
+  const MOBILE_PORTRAIT_CLASS = 'mcs-mobile-portrait';
+  const MOBILE_LANDSCAPE_CLASS = 'mcs-mobile-landscape';
+  const PSEUDO_FULLSCREEN_CLASS = 'mcs-pseudo-fullscreen';
+  const PSEUDO_PLAYER_CLASS = 'mcs-pseudo-player';
+  const DANMAKU_OVERLAY_ID = `${APP_ID}-danmaku-overlay`;
+  const DANMAKU_LANES = 7;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -3086,6 +3102,108 @@
         #${BUTTON_ID} { right:10px; bottom:76px; }
         #${PANEL_ID} { left:0; right:0; bottom:0; width:100vw; max-height:82vh; border-radius:16px 16px 0 0; border-left:0; border-right:0; }
       }
+
+      /* iPhone Safari: watchページだけYouTubeアプリ寄りに詰める。 */
+      html.mcs-mobile-phone.mcs-mobile-portrait [data-mcs-mobile-promo="1"],
+      html.mcs-mobile-phone.mcs-mobile-portrait ytm-app-promo,
+      html.mcs-mobile-phone.mcs-mobile-portrait ytm-open-app-button,
+      html.mcs-mobile-phone.mcs-mobile-portrait ytd-app-promo-renderer,
+      html.mcs-mobile-phone.mcs-mobile-portrait ytm-mobile-topbar-renderer,
+      html.mcs-mobile-phone.mcs-mobile-portrait ytd-masthead#masthead,
+      html.mcs-mobile-phone.mcs-mobile-portrait #masthead-container {
+        display: none !important;
+      }
+      html.mcs-mobile-phone.mcs-mobile-portrait ytd-app {
+        --ytd-masthead-height: 0px !important;
+      }
+      html.mcs-mobile-phone.mcs-mobile-portrait #page-manager,
+      html.mcs-mobile-phone.mcs-mobile-portrait ytd-watch-flexy {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+      }
+      html.mcs-mobile-phone.mcs-mobile-portrait #player-container-outer {
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 1000 !important;
+        margin-top: 0 !important;
+        background: #000 !important;
+      }
+      html.mcs-mobile-phone.mcs-mobile-portrait ytd-live-chat-frame#chat {
+        height: max(320px, calc(100dvh - 56.25vw - env(safe-area-inset-top, 0px) - 8px)) !important;
+        max-height: none !important;
+      }
+
+      /* 横向きでYouTubeの全画面ボタンを押した時はネイティブ全画面ではなく、
+         DOMを残した疑似全画面にしてコメントを動画上へ流す。 */
+      html.mcs-pseudo-fullscreen,
+      html.mcs-pseudo-fullscreen body {
+        overflow: hidden !important;
+        overscroll-behavior: none !important;
+        background: #000 !important;
+      }
+      html.mcs-pseudo-fullscreen #marina-member-chat-search-button,
+      html.mcs-pseudo-fullscreen #marina-member-chat-search-panel {
+        display: none !important;
+      }
+      .mcs-pseudo-player {
+        position: fixed !important;
+        inset: 0 !important;
+        width: 100vw !important;
+        height: 100dvh !important;
+        max-width: none !important;
+        max-height: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        z-index: 2147483646 !important;
+        background: #000 !important;
+      }
+      .mcs-pseudo-player video {
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: contain !important;
+      }
+      #marina-member-chat-search-danmaku-overlay {
+        position: absolute !important;
+        inset: 0 !important;
+        overflow: hidden !important;
+        pointer-events: none !important;
+        z-index: 20 !important;
+        contain: layout paint;
+      }
+      #marina-member-chat-search-danmaku-overlay .mcs-danmaku-item {
+        position: absolute !important;
+        left: 100% !important;
+        max-width: none !important;
+        white-space: nowrap !important;
+        color: #fff !important;
+        font: 800 clamp(18px, 3.2vw, 27px)/1.15 system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: .01em;
+        text-shadow:
+          -1px -1px 0 #000,
+           1px -1px 0 #000,
+          -1px  1px 0 #000,
+           1px  1px 0 #000,
+           0 2px 4px rgba(0,0,0,.9);
+        animation: mcs-danmaku-scroll var(--mcs-danmaku-duration, 6s) linear forwards !important;
+        will-change: transform;
+      }
+      #marina-member-chat-search-danmaku-overlay .mcs-danmaku-note {
+        position: absolute !important;
+        left: 50% !important;
+        top: 14px !important;
+        transform: translateX(-50%) !important;
+        padding: 7px 11px !important;
+        border-radius: 999px !important;
+        background: rgba(0,0,0,.62) !important;
+        color: #fff !important;
+        font: 600 12px/1.2 system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+        white-space: nowrap !important;
+      }
+      @keyframes mcs-danmaku-scroll {
+        from { transform: translateX(0); }
+        to { transform: translateX(calc(-100vw - 100%)); }
+      }
+
       html[dark] #${PANEL_ID}, ytd-app[dark] #${PANEL_ID} { background:#181818; color:#f1f1f1; border-color:#444; }
       html[dark] #${PANEL_ID} .mcs-row, ytd-app[dark] #${PANEL_ID} .mcs-row { background:#181818; color:#f1f1f1; border-color:#333; }
       html[dark] #${PANEL_ID} .mcs-results, ytd-app[dark] #${PANEL_ID} .mcs-results { border-color:#333; }
@@ -3110,6 +3228,281 @@
     for (const child of children) if (child) el.appendChild(child);
     return el;
   }
+
+
+  function isMobileWatchPhone() {
+    let coarse = true;
+    try {
+      coarse = window.matchMedia?.('(pointer: coarse)')?.matches ?? true;
+    } catch {}
+    const shortSide = Math.min(window.innerWidth || 0, window.innerHeight || 0);
+    return Boolean(getVideoId()) && coarse && shortSide > 0 && shortSide <= 640;
+  }
+
+  function isLandscapePhone() {
+    return isMobileWatchPhone() && window.innerWidth > window.innerHeight;
+  }
+
+  function markMobilePromoChrome() {
+    if (!isMobileWatchPhone()) return;
+    const candidates = document.querySelectorAll('a, button');
+    for (const el of candidates) {
+      const text = String(el.textContent || '').replace(/\s+/g, '');
+      if (!/YouTube.*アプリ.*開く|アプリで開く/.test(text)) continue;
+      const rect = el.getBoundingClientRect?.();
+      if (!rect || rect.top > 160) continue;
+
+      let node = el;
+      let best = null;
+      for (let i = 0; i < 5 && node?.parentElement; i++) {
+        node = node.parentElement;
+        const r = node.getBoundingClientRect?.();
+        if (!r) continue;
+        if (r.top < 180 && r.height >= 28 && r.height <= 120 && r.width >= window.innerWidth * 0.72) {
+          best = node;
+        }
+      }
+      (best || el).setAttribute('data-mcs-mobile-promo', '1');
+    }
+  }
+
+  function getPseudoPlayer() {
+    return document.querySelector('#movie_player.html5-video-player')
+      || document.querySelector('#movie_player')
+      || document.querySelector('.html5-video-player');
+  }
+
+  function ensureDanmakuOverlay(player = getPseudoPlayer()) {
+    if (!player) return null;
+    let overlay = player.querySelector(`#${DANMAKU_OVERLAY_ID}`);
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = DANMAKU_OVERLAY_ID;
+      overlay.setAttribute('aria-hidden', 'true');
+      player.appendChild(overlay);
+    }
+    return overlay;
+  }
+
+  function clearDanmakuOverlay() {
+    const overlay = document.getElementById(DANMAKU_OVERLAY_ID);
+    if (overlay) overlay.replaceChildren();
+  }
+
+  function danmakuLowerBound(seconds) {
+    const target = Math.max(0, Number(seconds) || 0);
+    const list = state.messages;
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (Number(list[mid]?.seconds || 0) < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function resetDanmakuClock(video, clear = true) {
+    const t = Math.max(0, Number(video?.currentTime) || 0);
+    state.danmakuLastTime = t;
+    state.danmakuCursor = danmakuLowerBound(Math.max(0, t - 0.12));
+    state.danmakuLaneUntil = Array(DANMAKU_LANES).fill(0);
+    if (clear) clearDanmakuOverlay();
+  }
+
+  function updateDanmakuNote(overlay) {
+    if (!overlay) return;
+    const existing = overlay.querySelector('.mcs-danmaku-note');
+    if (state.messages.length) {
+      existing?.remove();
+      return;
+    }
+    if (existing) return;
+    const note = document.createElement('div');
+    note.className = 'mcs-danmaku-note';
+    note.textContent = 'チャット未取得：縦画面で「チャットを取得」するとここに流れます';
+    overlay.appendChild(note);
+  }
+
+  function spawnDanmaku(message, overlay) {
+    const text = String(message?.message || '').trim();
+    if (!text || !overlay) return;
+
+    const now = performance.now();
+    if (!Array.isArray(state.danmakuLaneUntil) || state.danmakuLaneUntil.length !== DANMAKU_LANES) {
+      state.danmakuLaneUntil = Array(DANMAKU_LANES).fill(0);
+    }
+
+    let lane = 0;
+    for (let i = 1; i < DANMAKU_LANES; i++) {
+      if (state.danmakuLaneUntil[i] < state.danmakuLaneUntil[lane]) lane = i;
+    }
+
+    const item = document.createElement('div');
+    item.className = 'mcs-danmaku-item';
+    item.textContent = text;
+    item.style.top = `${5 + lane * 12.2}%`;
+
+    const lengthBonus = Math.min(2.4, Math.max(0, text.length - 8) * 0.035);
+    const duration = 5.4 + lengthBonus;
+    item.style.setProperty('--mcs-danmaku-duration', `${duration.toFixed(2)}s`);
+
+    // 同じレーンの次コメントは少し間隔を空ける。密集時も全体の流れは止めない。
+    state.danmakuLaneUntil[lane] = now + Math.min(1650, 650 + text.length * 13);
+
+    item.addEventListener('animationend', () => item.remove(), { once: true });
+    overlay.appendChild(item);
+  }
+
+  function danmakuFrame() {
+    state.danmakuRaf = 0;
+    if (!state.pseudoFullscreen) return;
+
+    const player = state.pseudoPlayer?.isConnected ? state.pseudoPlayer : getPseudoPlayer();
+    const video = player?.querySelector('video') || document.querySelector('video');
+    const overlay = ensureDanmakuOverlay(player);
+    if (!player || !video || !overlay) {
+      state.danmakuRaf = requestAnimationFrame(danmakuFrame);
+      return;
+    }
+
+    updateDanmakuNote(overlay);
+
+    const current = Number(video.currentTime);
+    if (!Number.isFinite(current)) {
+      state.danmakuRaf = requestAnimationFrame(danmakuFrame);
+      return;
+    }
+
+    if (state.danmakuLastTime === null) resetDanmakuClock(video, false);
+    const previous = Number(state.danmakuLastTime ?? current);
+    const jumped = current < previous - 0.45 || current > previous + 2.25;
+
+    if (jumped) {
+      resetDanmakuClock(video, true);
+      updateDanmakuNote(overlay);
+    } else if (!video.paused && state.messages.length) {
+      let emitted = 0;
+      while (state.danmakuCursor < state.messages.length) {
+        const msg = state.messages[state.danmakuCursor];
+        const at = Number(msg?.seconds || 0);
+        if (at > current + 0.16) break;
+        state.danmakuCursor++;
+        if (at < previous - 0.10) continue;
+        if (emitted < 18) {
+          spawnDanmaku(msg, overlay);
+          emitted++;
+        }
+      }
+    }
+
+    state.danmakuLastTime = current;
+    state.danmakuRaf = requestAnimationFrame(danmakuFrame);
+  }
+
+  function startDanmaku() {
+    if (state.danmakuRaf) cancelAnimationFrame(state.danmakuRaf);
+    const player = state.pseudoPlayer?.isConnected ? state.pseudoPlayer : getPseudoPlayer();
+    const video = player?.querySelector('video') || document.querySelector('video');
+    const overlay = ensureDanmakuOverlay(player);
+    if (video) resetDanmakuClock(video, true);
+    updateDanmakuNote(overlay);
+    state.danmakuRaf = requestAnimationFrame(danmakuFrame);
+  }
+
+  function stopDanmaku() {
+    if (state.danmakuRaf) cancelAnimationFrame(state.danmakuRaf);
+    state.danmakuRaf = 0;
+    state.danmakuLastTime = null;
+    state.danmakuCursor = 0;
+    state.danmakuLaneUntil = [];
+    clearDanmakuOverlay();
+  }
+
+  function enterPseudoFullscreen() {
+    if (!isLandscapePhone()) return false;
+    const player = getPseudoPlayer();
+    if (!player) return false;
+
+    state.pseudoFullscreen = true;
+    state.pseudoPlayer = player;
+    document.documentElement.classList.add(PSEUDO_FULLSCREEN_CLASS);
+    document.body?.classList.add(PSEUDO_FULLSCREEN_CLASS);
+    player.classList.add(PSEUDO_PLAYER_CLASS);
+
+    startDanmaku();
+    return true;
+  }
+
+  function exitPseudoFullscreen() {
+    state.pseudoFullscreen = false;
+    stopDanmaku();
+
+    document.documentElement.classList.remove(PSEUDO_FULLSCREEN_CLASS);
+    document.body?.classList.remove(PSEUDO_FULLSCREEN_CLASS);
+    state.pseudoPlayer?.classList?.remove(PSEUDO_PLAYER_CLASS);
+    document.querySelectorAll(`.${PSEUDO_PLAYER_CLASS}`).forEach((el) => el.classList.remove(PSEUDO_PLAYER_CLASS));
+    state.pseudoPlayer = null;
+  }
+
+  function togglePseudoFullscreen() {
+    if (state.pseudoFullscreen) exitPseudoFullscreen();
+    else enterPseudoFullscreen();
+  }
+
+  function refreshMobileExperience() {
+    const root = document.documentElement;
+    const phone = isMobileWatchPhone();
+    const landscape = phone && window.innerWidth > window.innerHeight;
+
+    root.classList.toggle(MOBILE_PHONE_CLASS, phone);
+    root.classList.toggle(MOBILE_PORTRAIT_CLASS, phone && !landscape);
+    root.classList.toggle(MOBILE_LANDSCAPE_CLASS, landscape);
+
+    if (phone && !landscape) markMobilePromoChrome();
+    if (state.pseudoFullscreen && !landscape) exitPseudoFullscreen();
+
+    if (state.pseudoFullscreen) {
+      const player = getPseudoPlayer();
+      if (player && player !== state.pseudoPlayer) {
+        state.pseudoPlayer?.classList?.remove(PSEUDO_PLAYER_CLASS);
+        state.pseudoPlayer = player;
+        player.classList.add(PSEUDO_PLAYER_CLASS);
+        startDanmaku();
+      }
+    }
+  }
+
+  function setupMobileExperience() {
+    if (state.mobileModeStarted) return;
+    state.mobileModeStarted = true;
+
+    const refreshSoon = () => {
+      requestAnimationFrame(() => {
+        refreshMobileExperience();
+        setTimeout(refreshMobileExperience, 180);
+      });
+    };
+
+    window.addEventListener('resize', refreshSoon, { passive: true });
+    window.addEventListener('orientationchange', refreshSoon, { passive: true });
+
+    // iPhone Safariのネイティブ動画全画面ではページ上のDOMを重ねられないため、
+    // 横画面時だけYouTube標準の全画面ボタンを疑似全画面へ差し替える。
+    document.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const fullscreenButton = target?.closest?.('.ytp-fullscreen-button');
+      if (!fullscreenButton || (!isLandscapePhone() && !state.pseudoFullscreen)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      togglePseudoFullscreen();
+    }, true);
+
+    refreshSoon();
+  }
+
 
   function createUi() {
     injectStyle();
@@ -4231,12 +4624,15 @@
     if (id) void initializeVideoStorage(id);
     applyUrlTimestampOnce();
     void applyTimestampHandoff();
+    requestAnimationFrame(refreshMobileExperience);
   }
 
   function boot() {
     if (!document.body) return;
     createUi();
+    setupMobileExperience();
     state.videoId = getVideoId();
+    refreshMobileExperience();
     applyUrlTimestampOnce();
     void applyTimestampHandoff();
 
@@ -4264,6 +4660,7 @@
 
     setInterval(() => {
       if (!document.getElementById(BUTTON_ID) || !document.getElementById(PANEL_ID)) createUi();
+      refreshMobileExperience();
       if (location.href !== state.lastUrl) {
         state.lastUrl = location.href;
         resetForNavigation();
