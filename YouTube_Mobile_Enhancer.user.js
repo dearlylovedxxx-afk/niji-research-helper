@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット
 // @namespace    marina-youtube-mobile-enhancer
-// @version      0.5.0
+// @version      0.6.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.5.0';
+  const VERSION = '0.6.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -40,6 +40,7 @@
     lastCommentAt: 0,
     refreshTimer: 0,
     browserFullscreen: false,
+    stageActive: false,
   };
 
   function isYouTubeOrigin(origin) {
@@ -367,6 +368,40 @@
       html.${CLASS_FULLSCREEN} #related {
         visibility: hidden !important;
         pointer-events: none !important;
+      }
+
+      html.${CLASS_FULLSCREEN} [data-ytme-stage-hidden="1"] {
+        display: none !important;
+      }
+
+      html.${CLASS_FULLSCREEN} [data-ytme-stage-path="1"] {
+        box-sizing: border-box !important;
+        width: 100vw !important;
+        min-width: 100vw !important;
+        max-width: 100vw !important;
+        height: var(--ytme-stage-height, 100dvh) !important;
+        min-height: var(--ytme-stage-height, 100dvh) !important;
+        max-height: var(--ytme-stage-height, 100dvh) !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        transform: none !important;
+      }
+
+      /* チャットDOMは画面外で生かしておく。display:noneにするとReplayが止まることがある。 */
+      html.${CLASS_FULLSCREEN} [data-ytme-stage-chat-host="1"] {
+        display: block !important;
+        position: fixed !important;
+        left: -250vw !important;
+        top: 0 !important;
+        width: 420px !important;
+        height: 640px !important;
+        max-width: 420px !important;
+        max-height: 640px !important;
+        opacity: .001 !important;
+        visibility: visible !important;
+        pointer-events: none !important;
+        overflow: hidden !important;
       }
 
       .${CLASS_PLAYER} {
@@ -804,6 +839,80 @@
     observe();
   }
 
+  function clearStageIsolation() {
+    for (const el of document.querySelectorAll(
+      '[data-ytme-stage-path], [data-ytme-stage-hidden], [data-ytme-stage-chat-host]'
+    )) {
+      el.removeAttribute('data-ytme-stage-path');
+      el.removeAttribute('data-ytme-stage-hidden');
+      el.removeAttribute('data-ytme-stage-chat-host');
+    }
+    topState.stageActive = false;
+  }
+
+  function isChatHostElement(el) {
+    if (!(el instanceof Element)) return false;
+    if (
+      el.matches?.(
+        'ytd-live-chat-frame#chat, ytm-live-chat-frame, #chatframe, iframe[src*="live_chat"], iframe[src*="live_chat_replay"]'
+      )
+    ) return true;
+
+    return Boolean(
+      el.querySelector?.(
+        'ytd-live-chat-frame#chat, ytm-live-chat-frame, #chatframe, iframe[src*="live_chat"], iframe[src*="live_chat_replay"]'
+      )
+    );
+  }
+
+  function applyStageIsolation(target) {
+    clearStageIsolation();
+    if (!(target instanceof Element) || !document.body) return;
+
+    const chain = [];
+    let node = target;
+    while (node && node instanceof Element) {
+      chain.push(node);
+      if (node === document.body) break;
+      node = node.parentElement;
+    }
+
+    for (const el of chain) el.setAttribute('data-ytme-stage-path', '1');
+
+    for (let i = 0; i < chain.length - 1; i++) {
+      const childOnPath = chain[i];
+      const parent = chain[i + 1];
+
+      for (const sibling of parent.children) {
+        if (sibling === childOnPath) continue;
+        if (sibling.tagName === 'SCRIPT' || sibling.tagName === 'STYLE' || sibling.tagName === 'LINK') continue;
+
+        if (isChatHostElement(sibling)) {
+          sibling.setAttribute('data-ytme-stage-chat-host', '1');
+        } else {
+          sibling.setAttribute('data-ytme-stage-hidden', '1');
+        }
+      }
+    }
+
+    // 遅れて生成されたChat Replayも画面外に残す。
+    for (const chat of document.querySelectorAll(
+      'ytd-live-chat-frame#chat, ytm-live-chat-frame, #chatframe, iframe[src*="live_chat"], iframe[src*="live_chat_replay"]'
+    )) {
+      let host = chat;
+      while (host.parentElement && host.parentElement !== document.body) {
+        if (chain.includes(host.parentElement)) break;
+        host = host.parentElement;
+      }
+      if (!chain.includes(host)) {
+        host.setAttribute('data-ytme-stage-chat-host', '1');
+        host.removeAttribute('data-ytme-stage-hidden');
+      }
+    }
+
+    topState.stageActive = true;
+  }
+
   function requestBrowserFullscreen(target) {
     if (!target) return false;
     const request =
@@ -859,7 +968,9 @@
     const vv = window.visualViewport;
     ROOT.style.setProperty('--ytme-stage-height', `${Math.round(vv?.height || window.innerHeight)}px`);
 
-    // fixedにはしない。外側レイアウトだけを1画面に畳む。
+    // WebKitの動画レイヤー自体は動かさず、動画までの祖先だけを画面一杯にする。
+    applyStageIsolation(target);
+
     for (const [prop, value] of [
       ['position', 'relative'],
       ['width', '100vw'],
@@ -911,6 +1022,7 @@
       }
     }
     ROOT.style.removeProperty('--ytme-stage-height');
+    clearStageIsolation();
 
     document.getElementById(OVERLAY_ID)?.remove();
     topState.player = null;
@@ -931,16 +1043,20 @@
 
     if (active && !landscape) markAppPromo();
 
-    // 横向き + 全画面ボタンで専用モードへ。
-    // ブラウザのURL/タブUIを消すにはユーザー操作からFullscreen APIを呼ぶ必要がある。
-    if (topState.pseudoFullscreen && !landscape) {
-      exitBrowserFullscreen();
+    // iPhone Safariでは任意DOMの真のfullscreenが使えないため、
+    // 横向きになったら「ページ内疑似全画面」を確実に有効化する。
+    if (landscape && !topState.pseudoFullscreen) {
+      enterPseudoFullscreen();
+    } else if (topState.pseudoFullscreen && !landscape) {
       exitPseudoFullscreen();
     }
 
     if (topState.pseudoFullscreen) {
       const vv = window.visualViewport;
       ROOT.style.setProperty('--ytme-stage-height', `${Math.round(vv?.height || window.innerHeight)}px`);
+      if (!topState.stageActive) {
+        applyStageIsolation(topState.fullscreenTarget || getFullscreenTarget(topState.player || getPlayer()));
+      }
     }
 
     topState.enabled = active;
@@ -994,10 +1110,8 @@
 
     if (!topState.pseudoFullscreen) enterPseudoFullscreen();
 
-    // Safari上部のURL欄・タブ列はWebページのCSSでは消せないため、
-    // ユーザーが全画面を押したこの瞬間だけブラウザFullscreen APIを試す。
-    const fullscreenTarget = topState.fullscreenTarget || getFullscreenTarget(topState.player || getPlayer());
-    requestBrowserFullscreen(fullscreenTarget);
+    // iPhone Safariのネイティブ動画全画面に入るとDOMコメントを重ねられないため、
+    // ここではページ内疑似全画面を維持する。
   }, true);
 
   document.addEventListener('fullscreenchange', () => {
