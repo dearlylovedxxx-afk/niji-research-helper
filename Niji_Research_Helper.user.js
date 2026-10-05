@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.63
+// @version      1.0.64
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.63';
+  const VERSION = '1.0.64';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -70,6 +70,7 @@
   const KEY_SYNC = 'npf_sync_points';
   const KEY_YT_SEEK_HANDOFF = 'npf_youtube_seek_handoff_v1';
   const KEY_CAL = 'npf_video_sync_calibration';
+  const KEY_PREF_REV = 'npf_preferences_revision_v1';
   const KEY_WIKI_CACHE = 'npf_wiki_cache_v11';
   const WIKI_BASE = 'https://wikiwiki.jp/nijisanji';
   const WIKI_CACHE_TTL = 12 * 60 * 60 * 1000;
@@ -81,12 +82,15 @@
   const NRH_PAIR_TTL = 12 * 60 * 60 * 1000;
   let nrhDbPromise = null;
   // Cloud backup is off until the user explicitly connects the separate gateway.
-  const cloud = { enabled:false, token:'', busy:false, dirty:false, writes:0, timer:null,
-    lastSavedAt:0, nextRetryAt:0, suppressMarks:0, initialized:false, status:'未接続' };
+  const cloud = { enabled:false, token:'', busy:false, syncBusy:false, dirty:false, writes:0, timer:null,
+    lastSavedAt:0, lastRemoteId:'', nextRetryAt:0, suppressMarks:0, initialized:false, status:'未接続' };
   const CLOUD_CONFIG_KEY = 'npf_cloud_backup_config_v1';
   const CLOUD_PENDING_KEY = 'npf_cloud_backup_pending_v1';
   const CLOUD_URL = 'https://niji-research-backup.dearlylovedxxx.workers.dev';
   const CLOUD_STORES = ['videos','channels','wiki','pairs'];
+  const RESEARCH_CLOUD_DEVICE = 'nrh-research-global';
+  const PREF_CLOUD_DEVICE = 'nrh-preferences-global';
+  const PREF_CLOUD_ORIGIN = 'https://www.youtube.com';
 
   function nrhDbEnabled() {
     // Same original DB name/schema, scoped naturally to each browser origin.
@@ -439,6 +443,13 @@
     observerTimer: null,
     syncPoints: {},
     calibration: {},
+    preferenceRevision: 0,
+    preferenceCloudBusy: false,
+    preferenceCloudReady: false,
+    preferenceCloudToken: '',
+    preferenceCloudBackupId: '',
+    preferenceCloudTimer: null,
+    preferenceCloudSuppress: 0,
     wikiCache: {},
   };
 
@@ -457,6 +468,11 @@
     try {
       await GM.setValue(key, value);
       if ([KEY_LIVER_FAVS, KEY_SETTINGS, KEY_SYNC, KEY_CAL].includes(key)) cloudMarkChanged();
+      if ([KEY_SETTINGS, KEY_SYNC, KEY_CAL].includes(key) && !state.preferenceCloudSuppress) {
+        state.preferenceRevision = Math.max(Date.now(), Number(state.preferenceRevision || 0) + 1);
+        await GM.setValue(KEY_PREF_REV, state.preferenceRevision);
+        preferenceCloudSchedule();
+      }
     } catch (e) {
       console.warn('[NPF] GM.setValue failed', e);
       throw e;
@@ -844,15 +860,158 @@
     });
   }
 
+  // ---------- Niji Cloud: settings / sync points / calibration (all-device canonical data) ----------
+  async function preferenceCloudList(token=state.preferenceCloudToken) {
+    if (!token) return [];
+    const res=await gmRequest({
+      method:'GET',url:CLOUD_URL+'/v1/backups?device='+encodeURIComponent(PREF_CLOUD_DEVICE),
+      headers:{authorization:'Bearer '+token,accept:'application/json'},responseType:'text',timeout:45000
+    });
+    let body={};try{body=JSON.parse(res.responseText||res.response||'{}');}catch{}
+    if(res.status<200||res.status>=300||!body.ok)throw new Error('設定同期一覧 HTTP '+res.status+'：'+String(body.error||'取得失敗'));
+    return (Array.isArray(body.backups)?body.backups:[]).slice().sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0));
+  }
+
+  async function preferenceCloudFetch(item,token=state.preferenceCloudToken) {
+    if(!item?.id||!item?.sha256)throw new Error('設定同期バックアップ情報が不正です');
+    const res=await gmRequest({
+      method:'GET',url:CLOUD_URL+'/v1/backups/'+encodeURIComponent(item.id),
+      headers:{authorization:'Bearer '+token},responseType:'arraybuffer',timeout:45000
+    });
+    if(res.status!==200)throw new Error('設定同期読込 HTTP '+res.status);
+    const raw=res.response instanceof ArrayBuffer?new Uint8Array(res.response)
+      :ArrayBuffer.isView(res.response)?new Uint8Array(res.response.buffer,res.response.byteOffset,res.response.byteLength)
+        :new TextEncoder().encode(res.responseText||String(res.response||''));
+    if(Number(item.size||0)&&raw.byteLength!==Number(item.size))throw new Error('設定同期サイズ不一致');
+    if(await favoriteCloudSha(raw)!==item.sha256)throw new Error('設定同期SHA-256不一致');
+    const data=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw));
+    const p=data?.preferences||{};
+    if(data?.app!=='Niji Research Helper'||data?.device!==PREF_CLOUD_DEVICE||Number(p.preferenceBundleVersion)!==1)
+      throw new Error('設定同期バックアップ形式が違います');
+    return {
+      revision:Math.max(0,Number(p.preferenceRevision||0)),
+      settings:p.settings&&typeof p.settings==='object'&&!Array.isArray(p.settings)?p.settings:{},
+      syncPoints:p.syncPoints&&typeof p.syncPoints==='object'&&!Array.isArray(p.syncPoints)?p.syncPoints:{},
+      calibration:p.calibration&&typeof p.calibration==='object'&&!Array.isArray(p.calibration)?p.calibration:{},
+    };
+  }
+
+  function preferenceCloudPayload(revision) {
+    const stores={};for(const name of CLOUD_STORES)stores[name]=[];
+    return {
+      app:'Niji Research Helper',version:VERSION,dbVersion:NRH_DB_VERSION,
+      exportedAt:new Date().toISOString(),sourceOrigin:PREF_CLOUD_ORIGIN,device:PREF_CLOUD_DEVICE,stores,
+      preferences:{
+        preferenceBundleVersion:1,preferenceRevision:Math.max(1,Number(revision||Date.now())),
+        settings:{...(state.settings||{})},syncPoints:{...(state.syncPoints||{})},calibration:{...(state.calibration||{})}
+      }
+    };
+  }
+
+  async function preferenceCloudUpload(revision,token=state.preferenceCloudToken) {
+    const payload=preferenceCloudPayload(revision),text=JSON.stringify(payload),bytes=new TextEncoder().encode(text);
+    const digest=await favoriteCloudSha(bytes);
+    const res=await gmRequest({
+      method:'POST',url:CLOUD_URL+'/v1/backups',
+      headers:{authorization:'Bearer '+token,accept:'application/json','content-type':'application/json',
+        'x-nrh-device':PREF_CLOUD_DEVICE,'x-nrh-origin':PREF_CLOUD_ORIGIN,'x-nrh-sha256':digest,'x-nrh-version':VERSION},
+      data:text,responseType:'text',timeout:45000
+    });
+    let body={};try{body=JSON.parse(res.responseText||res.response||'{}');}catch{}
+    if(res.status<200||res.status>=300||!body.ok)throw new Error('設定同期保存 HTTP '+res.status+'：'+String(body.error||'保存失敗'));
+    const list=await preferenceCloudList(token);
+    const item=(body.backup?.id?list.find(x=>x.id===body.backup.id):null)||list[0];
+    if(!item)throw new Error('設定同期の保存世代を確認できません');
+    const verify=await preferenceCloudFetch(item,token);
+    if(verify.revision!==revision)throw new Error('設定同期の保存後照合に失敗しました');
+    state.preferenceCloudBackupId=String(item.id||'');
+    state.preferenceCloudReady=true;
+    return {item,data:verify};
+  }
+
+  async function preferenceCloudApply(item,data,note='読込済み') {
+    state.preferenceCloudSuppress++;
+    try {
+      state.settings={...DEFAULT_SETTINGS,...(data.settings||{})};
+      state.syncPoints={...(data.syncPoints||{})};
+      state.calibration={...(data.calibration||{})};
+      state.preferenceRevision=Math.max(1,Number(data.revision||0));
+      await GM.setValue(KEY_SETTINGS,state.settings);
+      await GM.setValue(KEY_SYNC,state.syncPoints);
+      await GM.setValue(KEY_CAL,state.calibration);
+      await GM.setValue(KEY_PREF_REV,state.preferenceRevision);
+      state.preferenceCloudBackupId=String(item?.id||'');
+      state.preferenceCloudReady=true;
+      if(isYoutubeHost())try{updateYoutubePanel();}catch{}
+      else{try{bindCommentTimestamps();}catch{}}
+      console.info('[NRH] Niji Cloud preferences '+note, state.preferenceRevision);
+    } finally {
+      state.preferenceCloudSuppress=Math.max(0,state.preferenceCloudSuppress-1);
+    }
+  }
+
+  function preferenceCloudSchedule(delay=1200) {
+    clearTimeout(state.preferenceCloudTimer);
+    if(!state.preferenceCloudToken)return;
+    state.preferenceCloudTimer=setTimeout(()=>void preferenceCloudSync(),delay);
+  }
+
+  async function preferenceCloudSync({force=false,initial=false}={}) {
+    if(state.preferenceCloudBusy||!state.preferenceCloudToken)return;
+    state.preferenceCloudBusy=true;
+    try{
+      const list=await preferenceCloudList(),latest=list[0]||null;
+      let localRev=Math.max(0,Number(state.preferenceRevision||0));
+      if(!latest){
+        if(localRev<=0)localRev=Date.now();
+        state.preferenceRevision=localRev;await GM.setValue(KEY_PREF_REV,localRev);
+        await preferenceCloudUpload(localRev);
+        return;
+      }
+      const remote=await preferenceCloudFetch(latest);
+      if(initial&&localRev<=0){
+        // 初回移行だけは既存端末データを捨てずに統合してから共通化する。
+        const localSettings={...(state.settings||{})};
+        const localSync={...(state.syncPoints||{})};
+        const localCal={...(state.calibration||{})};
+        const settingsAreDefault=JSON.stringify({...DEFAULT_SETTINGS,...localSettings})===JSON.stringify(DEFAULT_SETTINGS);
+        state.settings=settingsAreDefault?{...DEFAULT_SETTINGS,...remote.settings}:{...DEFAULT_SETTINGS,...remote.settings,...localSettings};
+        state.syncPoints={...(remote.syncPoints||{}),...localSync};
+        state.calibration={...(remote.calibration||{}),...localCal};
+        state.preferenceRevision=Math.max(Date.now(),remote.revision+1);
+        await GM.setValue(KEY_SETTINGS,state.settings);await GM.setValue(KEY_SYNC,state.syncPoints);await GM.setValue(KEY_CAL,state.calibration);await GM.setValue(KEY_PREF_REV,state.preferenceRevision);
+        await preferenceCloudUpload(state.preferenceRevision);
+        return;
+      }
+      if(remote.revision>localRev){
+        await preferenceCloudApply(latest,remote,'から自動読込');
+      }else if(localRev>remote.revision){
+        await preferenceCloudUpload(localRev);
+      }else{
+        state.preferenceCloudBackupId=String(latest.id||'');state.preferenceCloudReady=true;
+      }
+    }catch(e){
+      console.warn('[NRH][preference cloud sync]',e);
+    }finally{state.preferenceCloudBusy=false;}
+  }
+
+  async function preferenceCloudInitialize() {
+    try{
+      const cfg=await GM.getValue(CLOUD_CONFIG_KEY,{enabled:false});
+      const token=cfg?.enabled===true&&typeof cfg.token==='string'?cfg.token.trim():'';
+      state.preferenceCloudToken=token;
+      if(!token){state.preferenceCloudReady=false;return;}
+      await preferenceCloudSync({force:true,initial:true});
+    }catch(e){console.warn('[NRH][preference cloud init]',e);}
+  }
+
   // ---------- optional pCloud backup through the dedicated, access-limited gateway ----------
   // The gateway has its own limited client token. A pCloud OAuth token and other apps'
   // shared-storage tokens never enter the userscript. No upload or remote delete
   // occurs until explicit opt-in. All cloud restoration requires confirmation.
   function cloudDevice() {
-    const ua = navigator.userAgent || '';
-    const platform = /iPhone|iPod/i.test(ua) ? 'iphone' : /iPad/i.test(ua) ? 'ipad'
-      : /Android/i.test(ua) ? 'android' : 'desktop';
-    return `${platform}-${location.hostname.replace(/[^a-z0-9.-]/gi, '-')}`.slice(0, 96);
+    // 研究DBの正本は端末別ではなく、全端末共通の1ストリーム。
+    return RESEARCH_CLOUD_DEVICE;
   }
 
   function isResearchCloudBackupItem(item) {
@@ -1009,11 +1168,19 @@
 
   async function cloudBuildCompleteSnapshot(localPayload) {
     const listed = await cloudRequest('GET', '/v1/backups');
-    const candidates = (Array.isArray(listed.backups) ? listed.backups : [])
-      .filter(isResearchCloudBackupItem)
+    const allResearch = (Array.isArray(listed.backups) ? listed.backups : [])
+      .filter(isResearchCloudBackupItem);
+    const latestByDevice = new Map();
+    for (const item of allResearch) {
+      const key = String(item?.device || '');
+      if (!key) continue;
+      const prev = latestByDevice.get(key);
+      if (!prev || Date.parse(item.createdAt || 0) > Date.parse(prev.createdAt || 0)) latestByDevice.set(key, item);
+    }
+    const candidates = [...latestByDevice.values()]
       .sort((a, b) => (Number(b.size || 0) - Number(a.size || 0)) ||
         (Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0)))
-      .slice(0, 5);
+      .slice(0, 12);
 
     let merged = {
       ...localPayload,
@@ -1080,12 +1247,19 @@
         'x-nrh-origin':location.origin, 'x-nrh-sha256':sha, 'x-nrh-version':VERSION,
       });
       cloud.lastSavedAt = Date.now(); cloud.nextRetryAt = 0;
-      cloud.status = `☁️ ${new Date().toLocaleString('ja-JP')} 完全版を保存済み${result.cleanupPending ? '（古い世代の削除が保留中）' : ''}`;
+      cloud.lastRemoteId = String(result?.backup?.id || cloud.lastRemoteId || '');
+      if (!cloud.lastRemoteId) {
+        try {
+          const listed = await cloudRequest('GET', '/v1/backups?device=' + encodeURIComponent(RESEARCH_CLOUD_DEVICE));
+          cloud.lastRemoteId = String(listed.backups?.[0]?.id || '');
+        } catch {}
+      }
+      cloud.status = `☁️ ${new Date().toLocaleString('ja-JP')} 全端末共通DBを保存済み${result.cleanupPending ? '（古い世代の削除が保留中）' : ''}`;
       if (initialWrites === cloud.writes) {
         cloud.dirty = false; cloud.writes = 0;
         await GM.setValue(CLOUD_PENDING_KEY, false);
       }
-      await GM.setValue(CLOUD_CONFIG_KEY, { enabled:true, token:cloud.token, lastSavedAt:cloud.lastSavedAt });
+      await GM.setValue(CLOUD_CONFIG_KEY, { enabled:true, token:cloud.token, lastSavedAt:cloud.lastSavedAt, lastRemoteId:cloud.lastRemoteId });
       if (force) toast('☁️ pCloudへ最新の完全版DBを保存しました');
     } catch (e) {
   // A Macaque POST error may arrive after the Worker has stored the data.
@@ -1124,7 +1298,7 @@
       void GM.setValue(CLOUD_PENDING_KEY, false).catch(() => {});
     }
     void GM.setValue(CLOUD_CONFIG_KEY, { enabled:true, token:cloud.token,
-      lastSavedAt:cloud.lastSavedAt }).catch(() => {});
+      lastSavedAt:cloud.lastSavedAt, lastRemoteId:cloud.lastRemoteId }).catch(() => {});
     if (force) toast('☁️ pCloudの保存済みファイルを照合しました');
   } else {
     const detail = typeof e?.message === 'string' && e.message ? e.message
@@ -1143,6 +1317,63 @@
     }
   }
 
+  async function cloudApplySharedResearch(data) {
+    if(data?.app!=='Niji Research Helper'||data?.dbVersion!==NRH_DB_VERSION||CLOUD_STORES.some(name=>!Array.isArray(data?.stores?.[name])))
+      throw new Error('全端末共通DBの形式が違います');
+    cloud.suppressMarks++;
+    try{
+      const db=await nrhDbOpen();
+      for(const name of CLOUD_STORES){
+        await new Promise((resolve,reject)=>{
+          const tx=db.transaction(name,'readwrite'),store=tx.objectStore(name);
+          for(const row of data.stores[name]){
+            if(!row||typeof row!=='object')continue;
+            const key=name==='videos'||name==='channels'?row.id:row.key;
+            if(typeof key!=='string'||!key)continue;
+            const req=store.get(key);
+            req.onsuccess=()=>{
+              const local=req.result;
+              if(!local||cloudRowStamp(row)>=cloudRowStamp(local))store.put(local?{...local,...row}:row);
+            };
+          }
+          tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('共通DB反映中断'));
+        });
+      }
+      state.wikiCache={...state.wikiCache,...await nrhDbLoadWikiCache()};
+      research.metaCache.clear();
+      await updateResearchDbStatus();
+    }finally{cloud.suppressMarks=Math.max(0,cloud.suppressMarks-1);}
+  }
+
+  async function cloudSyncShared({force=false}={}) {
+    if(!nrhDbEnabled()||!cloud.enabled||!cloud.token||cloud.busy||cloud.syncBusy)return;
+    cloud.syncBusy=true;
+    let needUpload=false;
+    try{
+      cloud.status='☁️ 全端末共通DBを確認中…';cloudUpdateUi();
+      const listed=await cloudRequest('GET','/v1/backups?device='+encodeURIComponent(RESEARCH_CLOUD_DEVICE));
+      const rows=(Array.isArray(listed.backups)?listed.backups:[]).slice().sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0));
+      const latest=rows[0]||null;
+      if(!latest){
+        needUpload=true;
+      }else if(force||String(latest.id)!==String(cloud.lastRemoteId||'')){
+        const data=await cloudFetchResearchSnapshot(latest);
+        await cloudApplySharedResearch(data);
+        cloud.lastRemoteId=String(latest.id||'');
+        await GM.setValue(CLOUD_CONFIG_KEY,{enabled:true,token:cloud.token,lastSavedAt:cloud.lastSavedAt,lastRemoteId:cloud.lastRemoteId});
+        cloud.status='✅ 全端末共通DBを自動読込しました';cloudUpdateUi();
+      }
+      if(cloud.dirty)needUpload=true;
+    }catch(e){
+      cloud.status='⚠️ 共通DB同期失敗：'+String(e?.message||e).slice(0,110);cloudUpdateUi();
+      console.warn('[NRH][shared research sync]',e);
+    }finally{cloud.syncBusy=false;}
+    if(needUpload&&!cloud.busy){
+      cloud.dirty=true;cloud.writes=Math.max(1,cloud.writes);
+      await cloudBackup(true);
+    }
+  }
+
   async function cloudEnable() {
     const input = document.getElementById('npf-cloud-token');
     const token = String(input?.value || '').trim();
@@ -1157,12 +1388,14 @@
       cloud.dirty = true;
       cloud.writes++;
       cloud.status = '☁️ 接続済み。初回バックアップを作成します';
-      await GM.setValue(CLOUD_CONFIG_KEY, { enabled:true, token, lastSavedAt:0 });
+      cloud.lastRemoteId='';
+      await GM.setValue(CLOUD_CONFIG_KEY, { enabled:true, token, lastSavedAt:0, lastRemoteId:'' });
       await GM.setValue(CLOUD_PENDING_KEY, true);
       if (input) input.value = '';
       cloudUpdateUi();
       await favoriteCloudInitialize();
-      await cloudBackup(true);
+      await preferenceCloudInitialize();
+      await cloudSyncShared({force:true});
     } catch (e) {
       cloud.token = previous;
       cloud.status = `⚠️ 接続できません：${String(e?.message || e).slice(0, 100)}`;
@@ -1175,9 +1408,11 @@
     cloud.enabled = false; cloud.token = ''; cloud.dirty = false;
     state.favoriteCloudToken = ''; state.favoriteCloudReady = false;
     state.favoriteStorageStatus = '☁️ pCloud未接続';
+    state.preferenceCloudToken=''; state.preferenceCloudReady=false; state.preferenceCloudBackupId='';
+    clearTimeout(state.preferenceCloudTimer);
     clearTimeout(cloud.timer);
     cloud.status = '自動バックアップは停止中。クラウド上のデータは残っています';
-    await GM.setValue(CLOUD_CONFIG_KEY, { enabled:false, token:'', lastSavedAt:0 });
+    await GM.setValue(CLOUD_CONFIG_KEY, { enabled:false, token:'', lastSavedAt:0, lastRemoteId:'' });
     cloudUpdateUi();
   }
 
@@ -1420,12 +1655,12 @@
     setup.append(token, enable, verify, note);
     const actions = document.createElement('div'); actions.id = 'npf-cloud-actions';
     const upload = document.createElement('button'); upload.id = 'npf-cloud-upload'; upload.type = 'button';
-    upload.className = 'npf-r-btn'; upload.textContent = '☁️ 今すぐ保存';
-    upload.addEventListener('click', () => void cloudBackup(true));
+    upload.className = 'npf-r-btn'; upload.textContent = '☁️ 今すぐ同期';
+    upload.addEventListener('click', () => void cloudSyncShared({force:true}));
     const show = document.createElement('button'); show.type = 'button'; show.className = 'npf-r-btn';
     show.textContent = '📥 バックアップ一覧・復元'; show.addEventListener('click', () => void cloudShowBackups());
     const disable = document.createElement('button'); disable.type = 'button'; disable.className = 'npf-r-btn';
-    disable.textContent = '⏸ 自動保存を停止'; disable.addEventListener('click', () => void cloudDisable());
+    disable.textContent = '⏸ この端末の同期を停止'; disable.addEventListener('click', () => void cloudDisable());
     actions.append(upload, show, disable);
     const list = document.createElement('div'); list.id = 'npf-cloud-list';
     wrap.append(heading, status, setup, actions, list);
@@ -1439,11 +1674,12 @@
     cloud.enabled = saved?.enabled === true && typeof saved.token === 'string' && !!saved.token;
     cloud.token = cloud.enabled ? saved.token : '';
     cloud.lastSavedAt = Number(saved?.lastSavedAt || 0);
+    cloud.lastRemoteId = String(saved?.lastRemoteId || '');
     cloud.dirty = cloud.enabled && (await gmGet(CLOUD_PENDING_KEY, false) === true || !cloud.lastSavedAt);
     cloud.initialized = true;
-    cloud.status = cloud.enabled ? '☁️ 自動保存オン' : '未接続（ローカルDBはそのまま）';
+    cloud.status = cloud.enabled ? '☁️ 全端末共通同期オン' : '未接続（ローカルDBはそのまま）';
     cloudUpdateUi();
-    if (cloud.dirty) cloudSchedule(5000);
+    if (cloud.enabled) await cloudSyncShared({force:true});
   }
 
   async function apiGet(path) {
@@ -8545,9 +8781,11 @@ e.el.classList.toggle('npf-r-hidden', !show);
     ? state.settings.autoResearchChannels.filter(x => typeof x === 'string') : []);
   state.syncPoints = await gmGet(KEY_SYNC, {});
   state.calibration = await gmGet(KEY_CAL, {});
+  state.preferenceRevision = Number(await gmGet(KEY_PREF_REV, 0) || 0);
   state.wikiCache = await gmGet(KEY_WIKI_CACHE, {});
   if (isYoutubeHost()) void cloudInitialize().catch(err => console.warn('[NRH][cloud init]', err));
   void favoriteCloudInitialize().catch(err => console.warn('[NRH][favorite cloud init]', err));
+  void preferenceCloudInitialize().catch(err => console.warn('[NRH][preference cloud init]', err));
 
   if (!Array.isArray(state.favorites)) state.favorites = [];
   if (!Array.isArray(state.liverFavorites)) state.liverFavorites = [];
@@ -8575,6 +8813,17 @@ e.el.classList.toggle('npf-r-hidden', !show);
     injectLiverFavorites();
     startObserver();
   }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    if (state.preferenceCloudToken) void preferenceCloudSync({force:true});
+    if (isYoutubeHost() && cloud.enabled) void cloudSyncShared({force:true});
+  });
+  setInterval(() => {
+    if (document.hidden) return;
+    if (state.preferenceCloudToken) void preferenceCloudSync();
+    if (isYoutubeHost() && cloud.enabled) void cloudSyncShared();
+  }, 120000);
 
   console.info(`[Niji Research Helper] v${VERSION} ready on ${location.hostname}`);
 })();
