@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.18
+// @version      0.6.19
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1239,12 +1239,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
-// ---- Pixiv home recommendation visibility (v0.6.18) ----
+// ---- Pixiv home recommendation visibility (v0.6.19) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivHomeRecommendationVisibilityV0618) return;
-  window.__pixivHomeRecommendationVisibilityV0618 = true;
+  if (window.__pixivHomeRecommendationVisibilityV0619) return;
+  window.__pixivHomeRecommendationVisibilityV0619 = true;
 
   const KEY = 'pixiv-hide-home-recommendations-v1';
   const ROOT_ID = 'pixiv-home-display-settings-v1';
@@ -1280,25 +1280,35 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     return /おすすめ(?:作品|イラスト|マンガ|漫画|小説)?|あなたへのおすすめ|recommended(?: works?| illustrations?| manga| novels?)?|for you/i.test(t);
   }
 
+  function protectedHeading(el) {
+    const t = textOf(el);
+    return /フォロー中の新着|フォロー(?:中)?|following|新着作品|new works?/i.test(t);
+  }
+
   function artworkLinks(el) {
     if (!el?.querySelectorAll) return 0;
     return el.querySelectorAll('a[href*="/artworks/"],a[href*="/novel/show.php?id="]').length;
   }
 
-  function candidateBlock(heading) {
-    const section = heading.closest?.('section');
-    if (section && artworkLinks(section) >= 1) return section;
+  function hasProtectedHeading(el, sourceHeading) {
+    if (!el?.querySelectorAll) return false;
+    for (const h of el.querySelectorAll('h1,h2,h3,[role="heading"]')) {
+      if (h === sourceHeading) continue;
+      if (protectedHeading(h)) return true;
+    }
+    return false;
+  }
 
+  function candidateBlock(heading) {
+    // Pixiv mobile often puts the heading and the following recommended cards
+    // in separate sibling wrappers. Hiding the nearest section removes only the
+    // first card, so climb to the largest recommendation-only ancestor.
     let node = heading.parentElement;
     let best = null;
-    for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+    for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
       if (node === document.body || node === document.documentElement) break;
-      const links = artworkLinks(node);
-      if (links >= 2) {
-        best = node;
-        const headings = node.querySelectorAll?.('h1,h2,h3,[role="heading"]').length || 0;
-        if (headings <= 2) break;
-      }
+      if (hasProtectedHeading(node, heading)) break;
+      if (artworkLinks(node) >= 1) best = node;
     }
     return best;
   }
@@ -1324,8 +1334,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       if (!recommendationHeading(heading)) continue;
       const block = candidateBlock(heading);
       if (!block) continue;
-      const allText = textOf(block).slice(0, 500);
-      if (/フォロー中の新着|following.*new|new.*following/i.test(allText)) continue;
+      if (hasProtectedHeading(block, heading)) continue;
       block.setAttribute(HIDDEN_ATTR, '1');
       block.style.setProperty('display', 'none', 'important');
     }
