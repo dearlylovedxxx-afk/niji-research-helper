@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.69
+// @version      1.0.70
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.69';
+  const VERSION = '1.0.70';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -69,6 +69,7 @@
   const KEY_SETTINGS = 'npf_settings';
   const KEY_SYNC = 'npf_sync_points';
   const KEY_YT_SEEK_HANDOFF = 'npf_youtube_seek_handoff_v1';
+  const KEY_YT_TS_PINS = 'npf_youtube_timestamp_pins_v1';
   const KEY_CAL = 'npf_video_sync_calibration';
   const KEY_PREF_REV = 'npf_preferences_revision_v1';
   const KEY_WIKI_CACHE = 'npf_wiki_cache_v11';
@@ -447,6 +448,7 @@
     toastTimer: null,
     observerTimer: null,
     syncPoints: {},
+    youtubeTimestampPins: {},
     calibration: {},
     preferenceRevision: 0,
     preferenceCloudBusy: false,
@@ -4400,6 +4402,383 @@
     const video = youtubeVideoElement();
     const n = Number(video?.currentTime || 0);
     return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  }
+
+  const YT_TS_MAX_SAVED_VIDEOS = 80;
+  const YT_TS_MAX_ITEMS = 180;
+  const youtubeTimestampUi = {
+    boundVideo: null,
+    manualOpen: false,
+    manualClosed: false,
+    videoId: '',
+    lastActiveSecond: -1,
+  };
+
+  function youtubeTimestampSecondsFromAnchor(anchor) {
+    if (!anchor) return null;
+    const clockText = String(anchor.textContent || '').trim().match(/\d{1,3}:\d{2}(?::\d{2})?/g)?.[0] || '';
+    const fromText = parseClockText(clockText);
+    if (Number.isFinite(fromText)) return fromText;
+    try {
+      const url = new URL(anchor.href || anchor.getAttribute('href') || '', location.href);
+      const token = String(url.searchParams.get('t') || url.searchParams.get('start') || '').trim().toLowerCase();
+      if (/^\d+$/.test(token)) return Number(token);
+      if (/^\d+s$/.test(token)) return Number(token.slice(0, -1));
+      if (/^\d{1,3}:\d{2}(?::\d{2})?$/.test(token)) return parseClockText(token);
+      const m = token.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/);
+      if (m && m[0]) return Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0);
+    } catch {}
+    return null;
+  }
+
+  function youtubeTimestampCommentItems(body) {
+    if (!body) return [];
+    const anchorSeconds = new Set();
+    for (const a of $$('a[href]', body)) {
+      const sec = youtubeTimestampSecondsFromAnchor(a);
+      if (Number.isFinite(sec) && sec >= 0) anchorSeconds.add(Math.floor(sec));
+    }
+    if (anchorSeconds.size < 2) return [];
+
+    const text = String(body.textContent || body.innerText || '').replace(/\r/g, '');
+    const items = [];
+    const seen = new Set();
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.replace(/[\t\u00a0]+/g, ' ').trim();
+      if (!line) continue;
+      const matches = [...line.matchAll(/\d{1,3}:\d{2}(?::\d{2})?/g)];
+      for (let i = 0; i < matches.length; i++) {
+        const match = matches[i];
+        const sec = parseClockText(match[0]);
+        if (!Number.isFinite(sec) || !anchorSeconds.has(Math.floor(sec)) || seen.has(Math.floor(sec))) continue;
+        const nextIndex = matches[i + 1]?.index ?? line.length;
+        let label = line.slice((match.index || 0) + match[0].length, nextIndex)
+          .replace(/^[\s　・･|｜:：\-–—~〜→⇒▶▷]+/, '')
+          .replace(/[\s　]+$/g, '')
+          .trim();
+        if (label.length > 110) label = label.slice(0, 107) + '…';
+        seen.add(Math.floor(sec));
+        items.push({ seconds: Math.floor(sec), label });
+      }
+    }
+
+    // YouTubeのDOM都合で改行が失われた場合でも、クリック可能な時刻自体は救済する。
+    for (const sec of anchorSeconds) {
+      if (!seen.has(sec)) items.push({ seconds: sec, label: '' });
+    }
+    return items.sort((a, b) => a.seconds - b.seconds).slice(0, YT_TS_MAX_ITEMS);
+  }
+
+  function youtubeTimestampCommentAuthor(body) {
+    const root = body?.closest?.('ytd-comment-thread-renderer, ytd-comment-view-model, ytd-comment-renderer, ytm-comment-thread-renderer, ytm-comment-renderer');
+    const author = root?.querySelector?.('#author-text span, #author-text, a#author-text, .author-text');
+    return String(author?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  }
+
+  async function saveYoutubeTimestampPin(videoId, items, author = '') {
+    if (!videoId || !Array.isArray(items) || items.length < 2) return false;
+    const now = Date.now();
+    state.youtubeTimestampPins = {
+      ...(state.youtubeTimestampPins || {}),
+      [videoId]: {
+        videoId,
+        items: items.slice(0, YT_TS_MAX_ITEMS).map(x => ({
+          seconds: Math.max(0, Math.floor(Number(x?.seconds) || 0)),
+          label: String(x?.label || '').slice(0, 110),
+        })),
+        author: String(author || '').slice(0, 80),
+        savedAt: now,
+      },
+    };
+    // GM領域が無制限に増えないよう、最近使った動画だけ保持する。
+    state.youtubeTimestampPins = Object.fromEntries(
+      Object.entries(state.youtubeTimestampPins)
+        .sort((a, b) => Number(b[1]?.savedAt || 0) - Number(a[1]?.savedAt || 0))
+        .slice(0, YT_TS_MAX_SAVED_VIDEOS)
+    );
+    await gmSet(KEY_YT_TS_PINS, state.youtubeTimestampPins);
+    youtubeTimestampUi.manualOpen = true;
+    youtubeTimestampUi.manualClosed = false;
+    youtubeTimestampUi.videoId = videoId;
+    ensureYoutubeTimestampOverlay(true);
+    return true;
+  }
+
+  async function clearYoutubeTimestampPin(videoId = currentYoutubeVideoId()) {
+    if (!videoId || !state.youtubeTimestampPins?.[videoId]) return;
+    delete state.youtubeTimestampPins[videoId];
+    await gmSet(KEY_YT_TS_PINS, state.youtubeTimestampPins);
+    youtubeTimestampUi.manualOpen = false;
+    youtubeTimestampUi.manualClosed = false;
+    $('#npf-yt-ts-overlay')?.remove();
+    toast('📌 この動画の固定タイムスタンプを解除しました');
+  }
+
+  function pinYoutubeTimestampComment(body) {
+    const videoId = currentYoutubeVideoId();
+    const items = youtubeTimestampCommentItems(body);
+    if (!videoId || items.length < 2) return toast('固定できるタイムスタンプが2件以上見つかりません');
+    const author = youtubeTimestampCommentAuthor(body);
+    void saveYoutubeTimestampPin(videoId, items, author).then(ok => {
+      if (ok) toast(`📌 タイムスタンプ ${items.length}件を固定しました`);
+    });
+  }
+
+  function scanYoutubeTimestampComments() {
+    if (!currentYoutubeVideoId()) return;
+    const bodies = $$(
+      'ytd-comment-thread-renderer #content-text, ytd-comment-view-model #content-text, ytd-comment-renderer #content-text, ' +
+      'ytm-comment-thread-renderer #content-text, ytm-comment-renderer #content-text'
+    );
+    for (const body of bodies) {
+      if (!(body instanceof Element)) continue;
+      if (body.querySelector?.('.npf-yt-ts-pin-btn')) continue;
+      const items = youtubeTimestampCommentItems(body);
+      if (items.length < 2) continue;
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'npf-yt-ts-pin-btn';
+      button.textContent = `📌 目次を固定（${items.length}）`;
+      button.title = 'このコメントのタイムスタンプを動画上の目次として固定';
+      button.style.cssText = [
+        'appearance:none','-webkit-appearance:none','display:inline-flex','align-items:center','gap:4px',
+        'margin:7px 0 2px 8px','padding:5px 9px','border-radius:999px',
+        'border:1px solid rgba(128,128,128,.38)','background:rgba(127,127,127,.10)',
+        'color:inherit','font:700 12px/1.25 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif',
+        'cursor:pointer','vertical-align:middle'
+      ].join(';');
+      button.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        pinYoutubeTimestampComment(body);
+      });
+
+      const mount = body.closest('ytd-comment-thread-renderer, ytd-comment-view-model, ytd-comment-renderer, ytm-comment-thread-renderer, ytm-comment-renderer')
+        ?.querySelector?.('#toolbar, #action-buttons, .toolbar');
+      if (mount) mount.appendChild(button);
+      else body.insertAdjacentElement('afterend', button);
+    }
+  }
+
+  function youtubeTimestampPlayerHost() {
+    const video = youtubeVideoElement();
+    return video?.closest?.('#movie_player, .html5-video-player')
+      || $('#movie_player')
+      || $('.html5-video-player')
+      || video?.parentElement
+      || null;
+  }
+
+  function styleYoutubeTimestampOverlay(root) {
+    if (!root) return;
+    const mobile = isMobileYoutubeUi();
+    root.style.cssText = [
+      'position:absolute',
+      `right:${mobile ? '7px' : '12px'}`,
+      `top:${mobile ? '10%' : '12%'}`,
+      'z-index:80','display:flex','flex-direction:column','align-items:flex-end','gap:5px',
+      `max-width:${mobile ? '72%' : '46%'}`,
+      'pointer-events:none','font-family:-apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif',
+      'color:#fff','text-shadow:0 1px 3px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.85)'
+    ].join(';');
+  }
+
+  function bindYoutubeTimestampVideo(video) {
+    if (!video || youtubeTimestampUi.boundVideo === video) return;
+    youtubeTimestampUi.boundVideo = video;
+    video.addEventListener('play', () => {
+      youtubeTimestampUi.manualOpen = false;
+      youtubeTimestampUi.manualClosed = false;
+      updateYoutubeTimestampOverlayState();
+    });
+    video.addEventListener('pause', () => {
+      youtubeTimestampUi.manualOpen = false;
+      youtubeTimestampUi.manualClosed = false;
+      updateYoutubeTimestampOverlayState();
+    });
+    video.addEventListener('timeupdate', updateYoutubeTimestampActiveRow, { passive: true });
+  }
+
+  function updateYoutubeTimestampActiveRow() {
+    const root = $('#npf-yt-ts-overlay');
+    if (!root) return;
+    const current = youtubeCurrentSeconds();
+    if (current === youtubeTimestampUi.lastActiveSecond) return;
+    youtubeTimestampUi.lastActiveSecond = current;
+    const rows = $$('.npf-yt-ts-row', root);
+    let active = null;
+    for (const row of rows) {
+      const sec = Number(row.dataset.seconds);
+      if (Number.isFinite(sec) && sec <= current + 1) active = row;
+    }
+    for (const row of rows) {
+      const on = row === active;
+      row.setAttribute('aria-current', on ? 'true' : 'false');
+      row.style.setProperty('background', on ? 'rgba(0,0,0,.36)' : 'rgba(0,0,0,.16)');
+      row.style.setProperty('font-weight', on ? '850' : '700');
+      row.style.setProperty('opacity', on ? '1' : '.92');
+    }
+  }
+
+  function updateYoutubeTimestampOverlayState() {
+    const root = $('#npf-yt-ts-overlay');
+    if (!root) return;
+    const video = youtubeVideoElement();
+    bindYoutubeTimestampVideo(video);
+    const playing = !!video && !video.paused && !video.ended;
+    const open = playing ? youtubeTimestampUi.manualOpen : !youtubeTimestampUi.manualClosed;
+    root.dataset.open = open ? '1' : '0';
+
+    const list = $('.npf-yt-ts-list', root);
+    const source = $('.npf-yt-ts-source', root);
+    const clear = $('.npf-yt-ts-clear', root);
+    const toggle = $('.npf-yt-ts-toggle', root);
+    if (list) list.style.setProperty('display', open ? 'flex' : 'none');
+    if (source) source.style.setProperty('display', open ? 'block' : 'none');
+    if (clear) clear.style.setProperty('display', open ? 'inline-flex' : 'none');
+    if (toggle) {
+      toggle.style.setProperty('opacity', playing && !open ? '.48' : '.96');
+      toggle.style.setProperty('background', open ? 'rgba(0,0,0,.20)' : 'rgba(0,0,0,.10)');
+      toggle.title = open ? 'タイムスタンプ目次を畳む' : 'タイムスタンプ目次を開く';
+    }
+    updateYoutubeTimestampActiveRow();
+  }
+
+  function ensureYoutubeTimestampOverlay(forceRender = false) {
+    const videoId = currentYoutubeVideoId();
+    const saved = videoId ? state.youtubeTimestampPins?.[videoId] : null;
+    const existing = $('#npf-yt-ts-overlay');
+    if (!videoId || !saved?.items?.length) {
+      existing?.remove();
+      return null;
+    }
+    const host = youtubeTimestampPlayerHost();
+    if (!host) return existing || null;
+
+    let root = existing;
+    if (!root) {
+      root = document.createElement('div');
+      root.id = 'npf-yt-ts-overlay';
+      host.appendChild(root);
+    } else if (root.parentElement !== host) {
+      host.appendChild(root);
+    }
+    styleYoutubeTimestampOverlay(root);
+
+    const stamp = String(saved.savedAt || 0);
+    if (forceRender || root.dataset.videoId !== videoId || root.dataset.savedAt !== stamp) {
+      root.dataset.videoId = videoId;
+      root.dataset.savedAt = stamp;
+      root.replaceChildren();
+
+      const top = document.createElement('div');
+      top.style.cssText = 'display:flex;align-items:center;gap:5px;pointer-events:auto;';
+
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'npf-yt-ts-toggle';
+      toggle.textContent = `📌 目次 ${saved.items.length}`;
+      toggle.style.cssText = [
+        'appearance:none','-webkit-appearance:none','border:1px solid rgba(255,255,255,.24)',
+        'border-radius:999px','padding:5px 9px','background:rgba(0,0,0,.10)','color:#fff',
+        'font:800 12px/1.2 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif',
+        'text-shadow:0 1px 3px rgba(0,0,0,.95)','box-shadow:0 1px 5px rgba(0,0,0,.18)','cursor:pointer'
+      ].join(';');
+      toggle.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        const video = youtubeVideoElement();
+        const currentlyOpen = root.dataset.open === '1';
+        if (video && !video.paused && !video.ended) {
+          youtubeTimestampUi.manualOpen = !currentlyOpen;
+        } else {
+          youtubeTimestampUi.manualClosed = currentlyOpen;
+        }
+        updateYoutubeTimestampOverlayState();
+      });
+
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'npf-yt-ts-clear';
+      clear.textContent = '×';
+      clear.title = 'この動画の固定タイムスタンプを解除';
+      clear.style.cssText = [
+        'appearance:none','-webkit-appearance:none','display:none','width:27px','height:27px',
+        'align-items:center','justify-content:center','border-radius:999px',
+        'border:1px solid rgba(255,255,255,.20)','background:rgba(0,0,0,.14)','color:#fff',
+        'font:800 15px/1 sans-serif','cursor:pointer','text-shadow:0 1px 3px rgba(0,0,0,.95)'
+      ].join(';');
+      clear.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (confirm('この動画の固定タイムスタンプを解除しますか？')) void clearYoutubeTimestampPin(videoId);
+      });
+      top.append(toggle, clear);
+      root.appendChild(top);
+
+      const source = document.createElement('div');
+      source.className = 'npf-yt-ts-source';
+      source.textContent = saved.author ? `📌 ${saved.author} のタイムスタンプ` : '📌 固定したタイムスタンプ';
+      source.style.cssText = [
+        'display:none','max-width:100%','padding:1px 5px','font-size:11px','font-weight:750',
+        'line-height:1.35','opacity:.82','pointer-events:none','white-space:nowrap',
+        'overflow:hidden','text-overflow:ellipsis'
+      ].join(';');
+      root.appendChild(source);
+
+      const list = document.createElement('div');
+      list.className = 'npf-yt-ts-list';
+      list.style.cssText = [
+        'display:none','flex-direction:column','align-items:stretch','gap:3px',
+        'max-height:min(52vh,430px)','max-width:100%','overflow:auto','overscroll-behavior:contain',
+        'scrollbar-width:thin','pointer-events:auto','padding:1px'
+      ].join(';');
+
+      for (const item of saved.items.slice(0, YT_TS_MAX_ITEMS)) {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'npf-yt-ts-row';
+        row.dataset.seconds = String(item.seconds);
+        const label = String(item.label || '').trim();
+        row.textContent = label ? `${formatClock(item.seconds)}　${label}` : formatClock(item.seconds);
+        row.title = `${formatClock(item.seconds)} へ移動`;
+        row.style.cssText = [
+          'appearance:none','-webkit-appearance:none','display:block','width:100%',
+          'max-width:100%','border:0','border-radius:6px','padding:4px 7px',
+          'background:rgba(0,0,0,.16)','color:#fff','text-align:left',
+          'font:700 12px/1.35 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif',
+          'text-shadow:0 1px 3px rgba(0,0,0,.98),0 0 2px rgba(0,0,0,.9)',
+          'white-space:normal','overflow-wrap:anywhere','cursor:pointer','opacity:.92'
+        ].join(';');
+        row.addEventListener('click', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          const video = youtubeVideoElement();
+          if (!video) return toast('動画プレイヤーが見つかりません');
+          const duration = Number.isFinite(video.duration) ? video.duration : Infinity;
+          video.currentTime = Math.max(0, Math.min(duration, Number(item.seconds) || 0));
+          youtubeTimestampUi.manualOpen = false;
+          youtubeTimestampUi.manualClosed = false;
+          const play = video.play();
+          if (play?.catch) play.catch(() => updateYoutubeTimestampOverlayState());
+          updateYoutubeTimestampOverlayState();
+        });
+        list.appendChild(row);
+      }
+      root.appendChild(list);
+    }
+
+    youtubeTimestampUi.videoId = videoId;
+    bindYoutubeTimestampVideo(youtubeVideoElement());
+    updateYoutubeTimestampOverlayState();
+    return root;
+  }
+
+  function syncYoutubeTimestampFeature() {
+    if (!isYoutubeHost()) return;
+    scanYoutubeTimestampComments();
+    ensureYoutubeTimestampOverlay();
   }
 
   let youtubeSeekHandoffRun = 0;
@@ -8826,6 +9205,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       ensureYoutubePanel();
       syncYoutubePanelVisibility();
       updateYoutubePanel();
+      syncYoutubeTimestampFeature();
     }, 180);
   }
 
@@ -8864,6 +9244,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
         }
         syncYoutubePanelVisibility();
         updateYoutubePanel();
+        syncYoutubeTimestampFeature();
         if (research.holodexPaused || wikiRequestsPaused) updateResearchCooldownDisplay();
       }, 1000);
       ytBootBadge?.remove();
@@ -8895,6 +9276,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
   state.settings = { ...DEFAULT_SETTINGS, ...(await gmGet(KEY_SETTINGS, DEFAULT_SETTINGS)) };
   refreshResearchSettingsFromState();
   state.syncPoints = await gmGet(KEY_SYNC, {});
+  state.youtubeTimestampPins = await gmGet(KEY_YT_TS_PINS, {});
   state.calibration = await gmGet(KEY_CAL, {});
   state.preferenceRevision = Number(await gmGet(KEY_PREF_REV, 0) || 0);
   state.wikiCache = await gmGet(KEY_WIKI_CACHE, {});
@@ -8905,6 +9287,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
   if (!Array.isArray(state.favorites)) state.favorites = [];
   if (!Array.isArray(state.liverFavorites)) state.liverFavorites = [];
   if (!state.syncPoints || typeof state.syncPoints !== 'object' || Array.isArray(state.syncPoints)) state.syncPoints = {};
+  if (!state.youtubeTimestampPins || typeof state.youtubeTimestampPins !== 'object' || Array.isArray(state.youtubeTimestampPins)) state.youtubeTimestampPins = {};
   if (!state.calibration || typeof state.calibration !== 'object' || Array.isArray(state.calibration)) state.calibration = {};
   if (!state.wikiCache || typeof state.wikiCache !== 'object' || Array.isArray(state.wikiCache)) state.wikiCache = {};
 
