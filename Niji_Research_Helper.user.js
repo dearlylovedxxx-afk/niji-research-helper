@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.68
+// @version      1.0.69
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.68';
+  const VERSION = '1.0.69';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -74,6 +74,7 @@
   const KEY_WIKI_CACHE = 'npf_wiki_cache_v11';
   const WIKI_BASE = 'https://wikiwiki.jp/nijisanji';
   const WIKI_CACHE_TTL = 12 * 60 * 60 * 1000;
+  const WIKI_CACHE_FORMAT_VERSION = 2; // v2: successful Wiki datasets/per-video checks expire and can refresh
 
   // ---------- persistent local research DB (IndexedDB) ----------
   // YouTube上の調査データだけをブラウザ内へ保存する。画像・動画本体は保存しない。
@@ -264,6 +265,7 @@
       wikiInfo: info || null,
       wikiSourceUrl: sourceUrl || info?.sourceUrl || '',
       wikiFetchedAt: Date.now(),
+      wikiCacheVersion: WIKI_CACHE_FORMAT_VERSION,
     });
   }
 
@@ -300,9 +302,12 @@
       if (rec.wikiInfo) {
         entry.wikiInfo = rec.wikiInfo;
         entry.wikiSourceUrl = rec.wikiSourceUrl || rec.wikiInfo?.sourceUrl || '';
-        entry.wikiChecked = true;
+        const wikiFetchedAt = Number(rec.wikiFetchedAt || 0);
+        entry.wikiChecked = Number(rec.wikiCacheVersion || 0) >= WIKI_CACHE_FORMAT_VERSION
+          && wikiFetchedAt > 0 && wikiFetchedAt + WIKI_CACHE_TTL > Date.now();
       }
-      if (rec.meta || rec.wikiInfo) renderResearchEntry(entry, !!rec.wikiInfo);
+      // 古いWiki結果は画面には残すが「照合済み」扱いにはせず、取得ONなら裏で再照合する。
+      if (rec.meta || rec.wikiInfo) renderResearchEntry(entry, entry.wikiChecked);
       return { found: !!rec.meta, fresh: nrhVideoRecordFresh(rec), record: rec };
     } catch (err) {
       console.debug('[NRH][DB hydrate]', entry.id, err?.message || err);
@@ -5832,14 +5837,32 @@
     return prefix || '';
   }
 
+  function wikiDatasetFresh(dataset) {
+    const fetchedAt = Number(dataset?.fetchedAt || 0);
+    return fetchedAt > 0 && fetchedAt + WIKI_CACHE_TTL > Date.now();
+  }
+
+  function wikiDatasetCurrent(dataset) {
+    return !!dataset && dataset.fetchOk !== false
+      && Number(dataset.cacheVersion || 0) >= WIKI_CACHE_FORMAT_VERSION
+      && wikiDatasetFresh(dataset);
+  }
+
+  function wikiCachePredatesEntry(dataset, entry) {
+    if (!wikiDatasetCurrent(dataset) || !entry?.id || dataset.entries?.[entry.id]) return false;
+    const fetchedAt = Number(dataset.fetchedAt || 0);
+    const started = entry.meta ? startOf(entry.meta) : null;
+    return !!(fetchedAt && started && !Number.isNaN(started.getTime()) && started.getTime() > fetchedAt);
+  }
+
   function wikiFindCachedVideo(entry) {
-    // 成功した本人×年のキャッシュを横断して動画IDだけで照合する。
-    // IDが保存済みならチャンネル名を推測したりWikiへ通信したりしない。
+    // 成功した本人×年の「現行かつ期限内」キャッシュだけを動画IDで照合する。
+    // 古いキャッシュは既存表示を壊さず、取得ON時に最新版へ差分更新する。
     if (!entry?.id) return null;
     const year = wikiEntryYear(entry, entry.meta);
     let fallback = null;
     for (const dataset of Object.values(state.wikiCache || {})) {
-      if (!dataset || dataset.fetchOk === false) continue;
+      if (!wikiDatasetCurrent(dataset)) continue;
       const info = dataset.entries?.[entry.id];
       if (!info) continue;
       const row = { info, dataset };
@@ -6040,6 +6063,7 @@
 
     const fetchOk = yearPageSuccess > 0 || (Number(year) === new Date().getFullYear() && mainFetchOk && mainEntryCount > 0);
     return { entries: merged, sourceUrl, fetchedAt: Date.now(), channel: clean, year,
+      cacheVersion: WIKI_CACHE_FORMAT_VERSION,
       fetchOk, mainFetchOk, mainEntryCount, yearPageSuccess, yearPageEntryCount, errors: errors.slice(0, 6) };
   }
 
@@ -6048,18 +6072,20 @@
     const key = wikiCacheKey(channel, year);
     const cached = state.wikiCache?.[key];
     if (!cached) return null;
-    // 旧形式でも動画IDがあれば成功済みの年別DBとして使える。
-    if (typeof cached.fetchOk !== 'boolean' && Object.keys(cached.entries || {}).length) {
-      return { ...cached, fetchOk: true };
-    }
-    // 失敗した年も「取得失敗」として再利用し、起動ごとに再試行しない。
-    // 成功済みの年には12時間経過だけを理由にアクセスしない。
+    // 失敗セットは連続アクセス防止のため保持する。成功セットだけは、
+    // キャッシュ形式更新またはTTL超過時にネット上の最新版へ更新する。
+    if (cached.fetchOk === false) return cached;
+    const hasEntries = Object.keys(cached.entries || {}).length > 0;
+    const successful = cached.fetchOk === true || hasEntries;
+    if (successful && !wikiDatasetCurrent(cached)) return null;
+    if (typeof cached.fetchOk !== 'boolean' && hasEntries) return { ...cached, fetchOk: true };
     return cached;
   }
 
   function wikiUnavailableDataset(channel, year, error = '') {
     return {
       entries: {}, channel, year, fetchedAt: Date.now(), fetchOk: false,
+      cacheVersion: WIKI_CACHE_FORMAT_VERSION,
       sourceUrl: '', errors: [error || 'Wikiアクセスが停止中です'],
     };
   }
@@ -6166,7 +6192,11 @@
     entry.wikiLoading = true;
     entry.wikiChannel = channel;
     entry.wikiYear = year;
-    requestWikiDataset(channel, year, force, !force)
+    const cachedDataset = state.wikiCache?.[wikiCacheKey(channel, year)] || null;
+    // 同じ年別キャッシュがまだTTL内でも、そのキャッシュ作成後に公開された新規アーカイブなら
+    // キャッシュだけでは答えられないため即時に年別ページを差分更新する。
+    const refreshForNewArchive = !force && wikiCachePredatesEntry(cachedDataset, entry);
+    requestWikiDataset(channel, year, force || refreshForNewArchive, !(force || refreshForNewArchive))
       .then(dataset => {
         // 停止時に未着手キューを破棄しても、既存のDB/失敗状態は書き換えない。
         if (dataset?.errors?.includes('手動停止')) return;
