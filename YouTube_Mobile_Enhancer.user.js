@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット
 // @namespace    marina-youtube-mobile-enhancer
-// @version      0.4.0
+// @version      0.5.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.4.0';
+  const VERSION = '0.5.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -39,6 +39,7 @@
     frameSeenAt: 0,
     lastCommentAt: 0,
     refreshTimer: 0,
+    browserFullscreen: false,
   };
 
   function isYouTubeOrigin(origin) {
@@ -109,6 +110,50 @@
       'yt-live-chat-viewer-engagement-message-renderer',
     ].join(',');
 
+    function richParts(root) {
+      if (!root) return [];
+      const parts = [];
+
+      const pushText = (value) => {
+        const text = String(value || '').replace(/\s+/g, ' ');
+        if (!text) return;
+        const last = parts[parts.length - 1];
+        if (last?.type === 'text') last.text += text;
+        else parts.push({ type: 'text', text });
+      };
+
+      const walk = (node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          pushText(node.nodeValue || '');
+          return;
+        }
+        if (!(node instanceof Element)) return;
+
+        if (node.tagName === 'IMG') {
+          const src =
+            node.currentSrc ||
+            node.getAttribute('src') ||
+            node.getAttribute('data-src') ||
+            '';
+          const alt =
+            node.getAttribute('alt') ||
+            node.getAttribute('aria-label') ||
+            '';
+          if (src) parts.push({ type: 'image', src, alt });
+          else if (alt) pushText(alt);
+          return;
+        }
+
+        for (const child of node.childNodes) walk(child);
+      };
+
+      walk(root);
+      for (const part of parts) {
+        if (part.type === 'text') part.text = part.text.trim();
+      }
+      return parts.filter((part) => part.type !== 'text' || part.text);
+    }
+
     function makePayload(renderer) {
       if (!(renderer instanceof Element)) return null;
 
@@ -122,23 +167,29 @@
         renderer.querySelector('#header-subtext') ||
         renderer.querySelector('#primary-text');
 
-      let message = textWithEmoji(messageEl);
+      let parts = richParts(messageEl);
 
-      if (!message) {
-        const sticker = renderer.querySelector('img[alt], img[aria-label]');
-        message = sticker?.getAttribute('alt') || sticker?.getAttribute('aria-label') || '';
+      if (!parts.length) {
+        const sticker = renderer.querySelector('img[alt], img[aria-label], img[src]');
+        const src = sticker?.currentSrc || sticker?.getAttribute('src') || '';
+        const alt = sticker?.getAttribute('alt') || sticker?.getAttribute('aria-label') || '';
+        if (src) parts = [{ type: 'image', src, alt }];
+        else if (alt) parts = [{ type: 'text', text: alt }];
       }
 
       const amount =
         textWithEmoji(renderer.querySelector('#purchase-amount')) ||
         textWithEmoji(renderer.querySelector('#purchase-amount-chip'));
 
-      if (amount && !message.includes(amount)) {
-        message = message ? `${message} ${amount}` : amount;
-      }
+      if (amount) parts.push({ type: 'text', text: ` ${amount}` });
 
-      message = String(message || '').trim();
-      if (!message) return null;
+      const message = parts
+        .map((part) => part.type === 'image' ? (part.alt || '[スタンプ]') : part.text)
+        .join('')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (!message && !parts.some((part) => part.type === 'image')) return null;
 
       const author = textWithEmoji(authorEl);
       const rawId =
@@ -157,6 +208,7 @@
         id,
         author,
         message,
+        parts,
         kind,
         at: Date.now(),
       };
@@ -366,7 +418,7 @@
         max-width: none !important;
         white-space: nowrap !important;
         color: #fff !important;
-        font: 800 clamp(18px, 3.1vw, 28px)/1.15 system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+        font: 800 clamp(14px, 1.75vw, 20px)/1.15 system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
         text-shadow:
           -1px -1px 0 #000,
            1px -1px 0 #000,
@@ -375,6 +427,18 @@
            0 2px 4px rgba(0,0,0,.9);
         animation: ytme-scroll var(--ytme-duration, 6s) linear forwards !important;
         will-change: transform;
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: .12em !important;
+      }
+
+      #${OVERLAY_ID} .ytme-danmaku img {
+        width: 1.55em !important;
+        height: 1.55em !important;
+        object-fit: contain !important;
+        vertical-align: middle !important;
+        flex: 0 0 auto !important;
+        filter: drop-shadow(0 1px 1px rgba(0,0,0,.65));
       }
 
       #${NOTE_ID} {
@@ -546,10 +610,31 @@
     return best;
   }
 
+  function appendRichComment(item, payload) {
+    const parts = Array.isArray(payload?.parts) && payload.parts.length
+      ? payload.parts
+      : [{ type: 'text', text: String(payload?.message || '') }];
+
+    for (const part of parts) {
+      if (part?.type === 'image' && part.src) {
+        const img = document.createElement('img');
+        img.src = String(part.src);
+        img.alt = String(part.alt || '');
+        img.referrerPolicy = 'no-referrer';
+        item.appendChild(img);
+        continue;
+      }
+
+      const text = String(part?.text || '');
+      if (text) item.appendChild(document.createTextNode(text));
+    }
+  }
+
   function spawnComment(payload) {
     if (!topState.pseudoFullscreen) return;
     const text = String(payload?.message || '').trim();
-    if (!text) return;
+    const hasImage = Array.isArray(payload?.parts) && payload.parts.some((part) => part?.type === 'image' && part.src);
+    if (!text && !hasImage) return;
 
     const now = Date.now();
     const id = String(payload.id || `${payload.author || ''}|${text}|${Math.floor(now / 1000)}`);
@@ -561,13 +646,14 @@
     if (!overlay) return;
     hideNote();
 
-    const lane = chooseLane(text);
+    const densityText = text || 'stamp';
+    const lane = chooseLane(densityText);
     const item = document.createElement('div');
     item.className = 'ytme-danmaku';
-    item.textContent = text;
-    item.style.top = `${4.5 + lane * 10.7}%`;
+    appendRichComment(item, payload);
+    item.style.top = `${5 + lane * 10.4}%`;
 
-    const duration = Math.min(9.2, 5.6 + Math.max(0, text.length - 8) * 0.035);
+    const duration = Math.min(8.3, 5.2 + Math.max(0, densityText.length - 8) * 0.03);
     item.style.setProperty('--ytme-duration', `${duration.toFixed(2)}s`);
     item.addEventListener('animationend', () => item.remove(), { once: true });
     overlay.appendChild(item);
@@ -587,6 +673,38 @@
 
     const seen = new Set();
 
+    const richParts = (root) => {
+      if (!root) return [];
+      const parts = [];
+
+      const pushText = (value) => {
+        const text = String(value || '').replace(/\s+/g, ' ');
+        if (!text) return;
+        const last = parts[parts.length - 1];
+        if (last?.type === 'text') last.text += text;
+        else parts.push({ type: 'text', text });
+      };
+
+      const walk = (node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          pushText(node.nodeValue || '');
+          return;
+        }
+        if (!(node instanceof Element)) return;
+        if (node.tagName === 'IMG') {
+          const src = node.currentSrc || node.getAttribute('src') || node.getAttribute('data-src') || '';
+          const alt = node.getAttribute('alt') || node.getAttribute('aria-label') || '';
+          if (src) parts.push({ type: 'image', src, alt });
+          else if (alt) pushText(alt);
+          return;
+        }
+        for (const child of node.childNodes) walk(child);
+      };
+
+      walk(root);
+      return parts.filter((part) => part.type !== 'text' || String(part.text || '').trim());
+    };
+
     const makePayload = (renderer) => {
       if (!(renderer instanceof Element)) return null;
       const authorEl = renderer.querySelector('#author-name') || renderer.querySelector('.author-name');
@@ -596,19 +714,27 @@
         renderer.querySelector('#header-subtext') ||
         renderer.querySelector('#primary-text');
 
-      let message = textWithEmoji(messageEl);
-      if (!message) {
-        const sticker = renderer.querySelector('img[alt], img[aria-label]');
-        message = sticker?.getAttribute('alt') || sticker?.getAttribute('aria-label') || '';
+      let parts = richParts(messageEl);
+      if (!parts.length) {
+        const sticker = renderer.querySelector('img[alt], img[aria-label], img[src]');
+        const src = sticker?.currentSrc || sticker?.getAttribute('src') || '';
+        const alt = sticker?.getAttribute('alt') || sticker?.getAttribute('aria-label') || '';
+        if (src) parts = [{ type: 'image', src, alt }];
+        else if (alt) parts = [{ type: 'text', text: alt }];
       }
 
       const amount =
         textWithEmoji(renderer.querySelector('#purchase-amount')) ||
         textWithEmoji(renderer.querySelector('#purchase-amount-chip'));
-      if (amount && !message.includes(amount)) message = message ? `${message} ${amount}` : amount;
+      if (amount) parts.push({ type: 'text', text: ` ${amount}` });
 
-      message = String(message || '').trim();
-      if (!message) return null;
+      const message = parts
+        .map((part) => part.type === 'image' ? (part.alt || '[スタンプ]') : part.text)
+        .join('')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (!message && !parts.some((part) => part.type === 'image')) return null;
 
       const author = textWithEmoji(authorEl);
       const id =
@@ -617,7 +743,7 @@
         renderer.dataset?.id ||
         `${renderer.tagName.toLowerCase()}|${author}|${message}`;
 
-      return { type: MESSAGE_TYPE, version: VERSION, id, author, message, at: Date.now() };
+      return { type: MESSAGE_TYPE, version: VERSION, id, author, message, parts, at: Date.now() };
     };
 
     const rememberExisting = () => {
@@ -676,6 +802,39 @@
     };
 
     observe();
+  }
+
+  function requestBrowserFullscreen(target) {
+    if (!target) return false;
+    const request =
+      target.requestFullscreen ||
+      target.webkitRequestFullscreen ||
+      target.webkitRequestFullScreen;
+
+    if (typeof request !== 'function') return false;
+
+    try {
+      const result = request.call(target, { navigationUI: 'hide' });
+      topState.browserFullscreen = true;
+      Promise.resolve(result).catch(() => {
+        topState.browserFullscreen = false;
+      });
+      return true;
+    } catch {
+      topState.browserFullscreen = false;
+      return false;
+    }
+  }
+
+  function exitBrowserFullscreen() {
+    try {
+      const fn =
+        document.exitFullscreen ||
+        document.webkitExitFullscreen ||
+        document.webkitCancelFullScreen;
+      if (typeof fn === 'function') fn.call(document);
+    } catch {}
+    topState.browserFullscreen = false;
   }
 
   function enterPseudoFullscreen() {
@@ -738,6 +897,7 @@
 
   function exitPseudoFullscreen() {
     topState.pseudoFullscreen = false;
+    if (topState.browserFullscreen) exitBrowserFullscreen();
     ROOT.classList.remove(CLASS_FULLSCREEN);
     document.body?.classList.remove(CLASS_FULLSCREEN);
 
@@ -771,11 +931,10 @@
 
     if (active && !landscape) markAppPromo();
 
-    // iPhone横向きはそのまま専用モードへ。
-    // v0.2のfixed方式ではなく、v0.3以降の「通常フローのまま1画面に畳む」方式なので映像レイヤーは触らない。
-    if (landscape && !topState.pseudoFullscreen) {
-      enterPseudoFullscreen();
-    } else if (topState.pseudoFullscreen && !landscape) {
+    // 横向き + 全画面ボタンで専用モードへ。
+    // ブラウザのURL/タブUIを消すにはユーザー操作からFullscreen APIを呼ぶ必要がある。
+    if (topState.pseudoFullscreen && !landscape) {
+      exitBrowserFullscreen();
       exitPseudoFullscreen();
     }
 
@@ -834,7 +993,21 @@
     event.stopImmediatePropagation();
 
     if (!topState.pseudoFullscreen) enterPseudoFullscreen();
+
+    // Safari上部のURL欄・タブ列はWebページのCSSでは消せないため、
+    // ユーザーが全画面を押したこの瞬間だけブラウザFullscreen APIを試す。
+    const fullscreenTarget = topState.fullscreenTarget || getFullscreenTarget(topState.player || getPlayer());
+    requestBrowserFullscreen(fullscreenTarget);
   }, true);
+
+  document.addEventListener('fullscreenchange', () => {
+    topState.browserFullscreen = Boolean(document.fullscreenElement);
+    scheduleRefresh();
+  });
+  document.addEventListener('webkitfullscreenchange', () => {
+    topState.browserFullscreen = Boolean(document.webkitFullscreenElement);
+    scheduleRefresh();
+  });
 
   window.addEventListener('resize', scheduleRefresh, { passive: true });
   window.visualViewport?.addEventListener('resize', scheduleRefresh, { passive: true });
