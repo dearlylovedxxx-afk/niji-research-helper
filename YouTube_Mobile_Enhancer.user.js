@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Safari アプリ風 + 流れるチャット
 // @namespace    marina-youtube-mobile-enhancer
-// @version      0.8.0
+// @version      0.9.0
 // @description  iPhone SafariのYouTube視聴ページを縦画面ではアプリ寄りに整理し、横向き全画面ではチャットリプレイを動画上へ流します。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Mobile_Enhancer.user.js
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.8.0';
+  const VERSION = '0.9.0';
   const ROOT = document.documentElement;
   const CLASS_PHONE = 'ytme-phone';
   const CLASS_PORTRAIT = 'ytme-portrait';
@@ -61,12 +61,32 @@
   }
 
   function isPhoneViewport() {
-    const shortSide = Math.min(window.innerWidth || 0, window.innerHeight || 0);
-    let coarse = true;
-    try {
-      coarse = matchMedia('(pointer: coarse)').matches;
-    } catch {}
-    return coarse && shortSide > 0 && shortSide <= 700;
+    const viewportShort = Math.min(window.innerWidth || 0, window.innerHeight || 0);
+    const screenShort = Math.min(screen?.width || 0, screen?.height || 0);
+    const ua = String(navigator.userAgent || '');
+    const platform = String(navigator.platform || '');
+    const touch = Number(navigator.maxTouchPoints || 0) > 0;
+
+    // iPhone Safariで「デスクトップ用Webサイト」を表示すると
+    // pointer:coarse が false になることがあるため、それだけには依存しない。
+    const explicitIPhone = /iPhone|iPod/i.test(ua);
+    const touchPhoneLike =
+      touch &&
+      screenShort > 0 &&
+      screenShort <= 600 &&
+      !/iPad/i.test(ua);
+
+    const macTouchPhoneLike =
+      platform === 'MacIntel' &&
+      touch &&
+      screenShort > 0 &&
+      screenShort <= 600;
+
+    return Boolean(
+      (explicitIPhone || touchPhoneLike || macTouchPhoneLike) &&
+      viewportShort > 0 &&
+      viewportShort <= 900
+    );
   }
 
   function isLandscapePhone() {
@@ -395,11 +415,16 @@
       }
 
       /* 右側チャット欄は消す。ただしReplay自体は止めないため、
-         display:none ではなく画面外で生かす。 */
+         display:none ではなく画面外で生かす。
+         orientation直後の一瞬も消えるようLANDSCAPEでも適用。 */
       html.${CLASS_FULLSCREEN} #secondary,
       html.${CLASS_FULLSCREEN} ytd-live-chat-frame#chat,
       html.${CLASS_FULLSCREEN} #chat-container,
-      html.${CLASS_FULLSCREEN} ytm-live-chat-frame {
+      html.${CLASS_FULLSCREEN} ytm-live-chat-frame,
+      html.${CLASS_LANDSCAPE} #secondary,
+      html.${CLASS_LANDSCAPE} ytd-live-chat-frame#chat,
+      html.${CLASS_LANDSCAPE} #chat-container,
+      html.${CLASS_LANDSCAPE} ytm-live-chat-frame {
         display: block !important;
         visibility: visible !important;
         position: fixed !important;
@@ -418,7 +443,8 @@
         z-index: -1 !important;
       }
 
-      html.${CLASS_FULLSCREEN} #columns {
+      html.${CLASS_FULLSCREEN} #columns,
+      html.${CLASS_LANDSCAPE} #columns {
         display: block !important;
         width: 100vw !important;
         max-width: 100vw !important;
@@ -427,7 +453,9 @@
       }
 
       html.${CLASS_FULLSCREEN} #primary,
-      html.${CLASS_FULLSCREEN} #primary-inner {
+      html.${CLASS_FULLSCREEN} #primary-inner,
+      html.${CLASS_LANDSCAPE} #primary,
+      html.${CLASS_LANDSCAPE} #primary-inner {
         width: 100vw !important;
         min-width: 100vw !important;
         max-width: 100vw !important;
@@ -1020,11 +1048,13 @@
     const active = isWatchPage() && isPhoneViewport();
     const landscape = active && window.innerWidth > window.innerHeight;
 
+    // YouTube SPA遷移や「デスクトップ表示」でDOMが差し替わっても、
+    // 毎回アプリ誘導バナーを再マーキングする。
+    if (active) markAppPromo();
+
     ROOT.classList.toggle(CLASS_PHONE, active);
     ROOT.classList.toggle(CLASS_PORTRAIT, active && !landscape);
     ROOT.classList.toggle(CLASS_LANDSCAPE, landscape);
-
-    if (active && !landscape) markAppPromo();
 
     // iPhone Safariでは任意DOMの真のfullscreenが使えないため、
     // 横向きになったら「ページ内疑似全画面」を確実に有効化する。
@@ -1032,6 +1062,21 @@
       enterPseudoFullscreen();
     } else if (topState.pseudoFullscreen && !landscape) {
       exitPseudoFullscreen();
+
+      // 横画面中にYouTubeがチャット位置へスクロールしていても、
+      // 縦へ戻したら動画を先頭へ戻す。
+      requestAnimationFrame(() => {
+        const player =
+          document.querySelector('#player-container-outer') ||
+          document.querySelector('#player-container') ||
+          document.querySelector('#movie_player') ||
+          document.querySelector('video');
+        try {
+          player?.scrollIntoView?.({ block: 'start', inline: 'nearest', behavior: 'instant' });
+        } catch {
+          try { window.scrollTo(0, 0); } catch {}
+        }
+      });
     }
 
     if (topState.pseudoFullscreen) {
