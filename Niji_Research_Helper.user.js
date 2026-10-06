@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.76
+// @version      1.0.77
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.76';
+  const VERSION = '1.0.77';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -4830,8 +4830,9 @@
     link.className = 'npf-yt-priority-timestamp-link';
     link.title = (label || formatClock(sec)) + ' へ移動';
     link.style.cssText = [
-      'color:#3ea6ff','font-weight:750','text-decoration:underline',
-      'text-underline-offset:2px','cursor:pointer','touch-action:manipulation'
+      'color:#3ea6ff !important','font-weight:750 !important','text-decoration:underline !important',
+      'text-underline-offset:2px','cursor:pointer !important','touch-action:manipulation',
+      'pointer-events:auto !important','display:inline !important'
     ].join(';');
     link.addEventListener('click', e => {
       const video = youtubeVideoElement();
@@ -4865,6 +4866,23 @@
     appendYoutubePriorityLinkedText(container, text);
   }
 
+  function forceYoutubePriorityTimestampLinks(container) {
+    if (!container) return;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      if (node.parentElement?.closest('a.npf-yt-priority-timestamp-link')) continue;
+      if (node.parentElement?.closest('script,style')) continue;
+      if (/\d{1,3}:\d{2}(?::\d{2})?/.test(node.nodeValue || '')) nodes.push(node);
+    }
+    for (const textNode of nodes) {
+      const frag = document.createDocumentFragment();
+      appendYoutubePriorityLinkedText(frag, textNode.nodeValue || '');
+      textNode.replaceWith(frag);
+    }
+  }
+
   function decorateYoutubePriorityRichNode(container) {
     if (!container) return;
     for (const img of container.querySelectorAll('img')) {
@@ -4875,9 +4893,14 @@
       }
       img.removeAttribute('srcset');
       img.removeAttribute('loading');
+      const alt = String(img.getAttribute('alt') || img.getAttribute('title') || '').trim();
+      if (alt) {
+        img.alt = alt;
+        img.title = alt;
+      }
       img.style.cssText = [
-        'display:inline-block','width:20px','height:20px','object-fit:contain',
-        'vertical-align:-4px','margin:0 1px'
+        'display:inline-block !important','width:20px !important','height:20px !important','object-fit:contain',
+        'vertical-align:-4px','margin:0 1px','max-width:none !important','max-height:none !important'
       ].join(';');
     }
     for (const a of container.querySelectorAll('a[href]')) {
@@ -4950,11 +4973,22 @@
           }
           continue;
         }
-        appendYoutubePriorityLinkedText(container, node.textContent || '');
+        const nestedImages = [...node.querySelectorAll?.('img') || []];
+        if (nestedImages.length) {
+          const clone = node.cloneNode(true);
+          clone.querySelectorAll?.('script,style,button').forEach(el => el.remove());
+          clone.querySelectorAll?.('[id]').forEach(el => el.removeAttribute('id'));
+          clone.removeAttribute?.('id');
+          container.appendChild(clone);
+        } else {
+          appendYoutubePriorityLinkedText(container, node.textContent || '');
+        }
       }
       decorateYoutubePriorityRichNode(container);
+      forceYoutubePriorityTimestampLinks(container);
     } catch {
       appendYoutubePriorityLinkedText(container, snapshot?.text || '');
+      forceYoutubePriorityTimestampLinks(container);
     }
   }
 
@@ -4972,20 +5006,7 @@
       container.appendChild(clone);
     }
     decorateYoutubePriorityRichNode(container);
-
-    // Any bare timestamp text not already linked still becomes clickable.
-    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-    const textNodes = [];
-    let node;
-    while ((node = walker.nextNode())) {
-      if (node.parentElement?.closest('a')) continue;
-      if (/\d{1,3}:\d{2}(?::\d{2})?/.test(node.nodeValue || '')) textNodes.push(node);
-    }
-    for (const textNode of textNodes) {
-      const frag = document.createDocumentFragment();
-      appendYoutubePriorityLinkedText(frag, textNode.nodeValue || '');
-      textNode.replaceWith(frag);
-    }
+    forceYoutubePriorityTimestampLinks(container);
   }
 
   function makeYoutubePriorityApiCard(snapshot) {
