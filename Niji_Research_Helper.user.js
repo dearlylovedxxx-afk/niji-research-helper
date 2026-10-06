@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.80
+// @version      1.0.81
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.80';
+  const VERSION = '1.0.81';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -4844,6 +4844,65 @@
     return link;
   }
 
+  const youtubePriorityEmojiSegmenter =
+    typeof Intl?.Segmenter === 'function' ? new Intl.Segmenter(undefined, {granularity:'grapheme'}) : null;
+
+  function youtubePriorityEmojiCode(cluster) {
+    return [...String(cluster || '')]
+      .map(ch => ch.codePointAt(0))
+      .filter(cp => cp !== 0xFE0E && cp !== 0xFE0F)
+      .map(cp => cp.toString(16).toLowerCase())
+      .join('-');
+  }
+
+  function youtubePriorityIsEmojiCluster(cluster) {
+    try {
+      return /\p{Extended_Pictographic}/u.test(String(cluster || ''));
+    } catch {
+      return false;
+    }
+  }
+
+  function makeYoutubePriorityEmojiImage(cluster) {
+    const code = youtubePriorityEmojiCode(cluster);
+    if (!code) return null;
+    const img = document.createElement('img');
+    img.className = 'npf-yt-priority-unicode-emoji';
+    img.alt = cluster;
+    img.title = cluster;
+    img.src = 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/svg/' + code + '.svg';
+    img.style.cssText = [
+      'display:inline-block !important',
+      'width:1.15em !important','height:1.15em !important',
+      'min-width:1.15em !important','min-height:1.15em !important',
+      'max-width:1.15em !important','max-height:1.15em !important',
+      'vertical-align:-0.18em','object-fit:contain','margin:0 .03em'
+    ].join(';');
+    img.addEventListener('error', () => {
+      img.replaceWith(document.createTextNode(cluster));
+    }, {once:true});
+    return img;
+  }
+
+  function appendYoutubePriorityEmojiText(container, text) {
+    const raw = String(text || '');
+    if (!raw) return;
+    if (!youtubePriorityEmojiSegmenter) {
+      container.appendChild(document.createTextNode(raw));
+      return;
+    }
+    for (const part of youtubePriorityEmojiSegmenter.segment(raw)) {
+      const cluster = String(part.segment || '');
+      if (youtubePriorityIsEmojiCluster(cluster)) {
+        const img = makeYoutubePriorityEmojiImage(cluster);
+        if (img) container.appendChild(img);
+        else container.appendChild(document.createTextNode(cluster));
+      } else {
+        container.appendChild(document.createTextNode(cluster));
+      }
+    }
+  }
+
   function appendYoutubePriorityLinkedText(container, text) {
     if (!container) return;
     const raw = String(text || '').replace(/\r/g, '');
@@ -4851,13 +4910,13 @@
     let last = 0;
     for (const match of raw.matchAll(re)) {
       const index = Number(match.index || 0);
-      if (index > last) container.appendChild(document.createTextNode(raw.slice(last, index)));
+      if (index > last) appendYoutubePriorityEmojiText(container, raw.slice(last, index));
       const sec = parseClockText(match[0]);
       if (Number.isFinite(sec)) container.appendChild(makeYoutubePriorityTimestampLink(match[0], sec));
       else container.appendChild(document.createTextNode(match[0]));
       last = index + match[0].length;
     }
-    if (last < raw.length) container.appendChild(document.createTextNode(raw.slice(last)));
+    if (last < raw.length) appendYoutubePriorityEmojiText(container, raw.slice(last));
   }
 
   function renderYoutubePriorityLinkedText(container, text) {
