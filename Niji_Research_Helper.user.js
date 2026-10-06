@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.81
+// @version      1.0.82
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.81';
+  const VERSION = '1.0.82';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -4828,6 +4828,7 @@
     link.href = youtubePriorityTimestampHref(sec);
     link.textContent = label || formatClock(sec);
     link.className = 'npf-yt-priority-timestamp-link';
+    link.dataset.seconds = String(sec);
     link.title = (label || formatClock(sec)) + ' へ移動';
     link.style.cssText = [
       'color:#3ea6ff !important','font-weight:750 !important','text-decoration:underline !important',
@@ -5258,6 +5259,220 @@
     return card;
   }
 
+  const youtubePriorityOverlayUi = {
+    collapsed: false,
+    stamp: '',
+    videoId: '',
+    lastActive: -1,
+  };
+
+  function youtubePriorityOverlayEntries() {
+    const favorites = preferredCommentAuthors();
+    if (!favorites.length) return [];
+
+    const entries = [];
+    const seen = new Set();
+
+    if (youtubePriorityBackground.videoId === currentYoutubeVideoId()) {
+      for (const snapshot of youtubePriorityBackground.found || []) {
+        const key = String(snapshot.info?.key || '');
+        const text = String(snapshot.text || '').replace(/\s+/g, ' ').trim();
+        const sig = key + '\u0000' + text;
+        if (!key || seen.has(sig)) continue;
+        seen.add(sig);
+        entries.push({type:'api', snapshot, info:snapshot.info || {}, signature:sig});
+      }
+    }
+
+    for (const root of youtubeCommentRoots()) {
+      const info = youtubeCommentAuthorInfo(root);
+      if (!info || !favorites.some(x => x.key === info.key)) continue;
+      const body = youtubeCommentBody(root);
+      const text = String(body?.textContent || '').replace(/\s+/g, ' ').trim();
+      const sig = info.key + '\u0000' + text;
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      entries.push({type:'dom', root, body, info, signature:sig});
+    }
+
+    return entries.slice(0, 8);
+  }
+
+  function youtubePriorityOverlayStamp(entries) {
+    return [
+      currentYoutubeVideoId() || '',
+      entries.map(e => e.signature).join('\u0001'),
+      youtubePriorityBackground.running ? 'running' : youtubePriorityBackground.done ? 'done' : 'idle'
+    ].join('\u0002');
+  }
+
+  function styleYoutubePriorityOverlay(root) {
+    if (!root) return;
+    const mobile = isMobileYoutubeUi();
+    root.style.cssText = [
+      'position:absolute',
+      `left:${mobile ? '6px' : '10px'}`,
+      `top:${mobile ? '8%' : '7%'}`,
+      'z-index:86',
+      'display:flex','flex-direction:column',
+      `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : mobile ? 'min(58%,320px)' : 'min(34%,360px)'}`,
+      `max-height:${mobile ? '58%' : '72%'}`,
+      'border:1px solid rgba(255,255,255,.20)',
+      'border-radius:10px',
+      'background:rgba(12,12,12,.46)',
+      '-webkit-backdrop-filter:blur(5px)',
+      'backdrop-filter:blur(5px)',
+      'box-shadow:0 3px 14px rgba(0,0,0,.28)',
+      'color:#fff',
+      'font-family:inherit',
+      'pointer-events:auto',
+      'overflow:hidden'
+    ].join(';');
+  }
+
+  function updateYoutubePriorityOverlayActive() {
+    const root = $('#npf-yt-priority-overlay');
+    if (!root || youtubePriorityOverlayUi.collapsed) return;
+    const sec = youtubeCurrentSeconds();
+    if (sec === youtubePriorityOverlayUi.lastActive) return;
+    youtubePriorityOverlayUi.lastActive = sec;
+
+    const links = $$('.npf-yt-priority-timestamp-link[data-seconds]', root);
+    let active = null;
+    let activeSec = -1;
+    for (const link of links) {
+      const n = Number(link.dataset.seconds);
+      if (Number.isFinite(n) && n <= sec + 1 && n >= activeSec) {
+        active = link;
+        activeSec = n;
+      }
+    }
+    for (const link of links) {
+      const on = link === active;
+      link.style.setProperty('background', on ? 'rgba(62,166,255,.34)' : 'transparent', 'important');
+      link.style.setProperty('border-radius', on ? '4px' : '0', 'important');
+      link.style.setProperty('padding', on ? '0 2px' : '0', 'important');
+    }
+  }
+
+  function ensureYoutubePriorityOverlay(force = false) {
+    const videoId = currentYoutubeVideoId();
+    const existing = $('#npf-yt-priority-overlay');
+    if (!videoId || !preferredCommentAuthors().length) {
+      existing?.remove();
+      youtubePriorityOverlayUi.stamp = '';
+      return null;
+    }
+
+    const entries = youtubePriorityOverlayEntries();
+    if (!entries.length) {
+      existing?.remove();
+      youtubePriorityOverlayUi.stamp = '';
+      return null;
+    }
+
+    const host = youtubeTimestampPlayerHost();
+    if (!host) return existing || null;
+
+    let root = existing;
+    if (!root) {
+      root = document.createElement('section');
+      root.id = 'npf-yt-priority-overlay';
+      host.appendChild(root);
+    } else if (root.parentElement !== host) {
+      host.appendChild(root);
+    }
+
+    styleYoutubePriorityOverlay(root);
+    const stamp = youtubePriorityOverlayStamp(entries);
+    if (force || youtubePriorityOverlayUi.videoId !== videoId || youtubePriorityOverlayUi.stamp !== stamp) {
+      youtubePriorityOverlayUi.videoId = videoId;
+      youtubePriorityOverlayUi.stamp = stamp;
+      youtubePriorityOverlayUi.lastActive = -1;
+      root.replaceChildren();
+
+      const head = document.createElement('div');
+      head.style.cssText = [
+        'display:flex','align-items:center','gap:6px',
+        'padding:7px 8px','background:rgba(0,0,0,.20)',
+        'font-size:12px','font-weight:800','line-height:1.2',
+        'user-select:none'
+      ].join(';');
+
+      const title = document.createElement('button');
+      title.type = 'button';
+      title.textContent = youtubePriorityOverlayUi.collapsed ? '⭐ 優先' : '⭐ 優先コメント';
+      title.title = youtubePriorityOverlayUi.collapsed ? '優先コメントを開く' : '優先コメントを折りたたむ';
+      title.style.cssText = [
+        'appearance:none','-webkit-appearance:none','border:0','background:transparent',
+        'color:#fff','padding:0','margin:0','font:inherit','font-weight:850',
+        'cursor:pointer','text-align:left','flex:1'
+      ].join(';');
+
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.textContent = youtubePriorityOverlayUi.collapsed ? '▶' : '◀';
+      toggle.title = youtubePriorityOverlayUi.collapsed ? '開く' : '折りたたむ';
+      toggle.style.cssText = [
+        'appearance:none','-webkit-appearance:none','border:0','background:transparent',
+        'color:#fff','padding:2px 3px','font:800 12px/1 sans-serif','cursor:pointer'
+      ].join(';');
+
+      const toggleCollapsed = () => {
+        youtubePriorityOverlayUi.collapsed = !youtubePriorityOverlayUi.collapsed;
+        youtubePriorityOverlayUi.stamp = '';
+        ensureYoutubePriorityOverlay(true);
+      };
+      title.addEventListener('click', toggleCollapsed);
+      toggle.addEventListener('click', toggleCollapsed);
+      head.append(title, toggle);
+      root.appendChild(head);
+
+      if (!youtubePriorityOverlayUi.collapsed) {
+        const body = document.createElement('div');
+        body.className = 'npf-yt-priority-overlay-body';
+        body.style.cssText = [
+          'overflow:auto','overscroll-behavior:contain','-webkit-overflow-scrolling:touch',
+          'padding:7px 8px 9px','display:grid','gap:8px',
+          'max-height:calc(100% - 32px)','font-size:12px','line-height:1.45',
+          'text-shadow:0 1px 2px rgba(0,0,0,.92)'
+        ].join(';');
+
+        for (const entry of entries) {
+          const block = document.createElement('div');
+          block.className = 'npf-yt-priority-overlay-entry';
+          block.style.cssText = [
+            'padding:6px 7px','border-radius:7px',
+            'background:rgba(0,0,0,.22)','border:1px solid rgba(255,255,255,.08)'
+          ].join(';');
+
+          const author = document.createElement('div');
+          author.textContent = entry.info?.name ? '⭐ ' + entry.info.name : '⭐ 優先ユーザー';
+          author.style.cssText = 'font-size:11px;font-weight:850;margin-bottom:4px;opacity:.92;';
+          block.appendChild(author);
+
+          const text = document.createElement('div');
+          text.className = 'npf-yt-priority-overlay-text';
+          text.style.cssText = [
+            'white-space:pre-wrap','overflow-wrap:anywhere','color:#fff',
+            'font-family:inherit','font-size:12px','line-height:1.45'
+          ].join(';');
+
+          if (entry.type === 'api') renderYoutubePriorityApiRichText(text, entry.snapshot);
+          else renderYoutubePriorityDomRichText(text, entry.body);
+          block.appendChild(text);
+          body.appendChild(block);
+        }
+
+        root.appendChild(body);
+      }
+    }
+
+    styleYoutubePriorityOverlay(root);
+    updateYoutubePriorityOverlayActive();
+    return root;
+  }
+
   function youtubeCommentRoots() {
     return $$(YT_COMMENT_ROOT_SELECTOR).filter(root => {
       if (!(root instanceof Element) || !root.isConnected) return false;
@@ -5409,6 +5624,7 @@
     const roots = youtubeCommentRoots();
     for (const root of roots) bindYoutubePriorityButton(root);
     renderYoutubePriorityComments();
+    ensureYoutubePriorityOverlay();
     if (preferredCommentAuthors().length) void startYoutubePriorityBackgroundSearch();
   }
 
@@ -5718,6 +5934,8 @@
     if (!isYoutubeHost()) return;
     scanYoutubeTimestampComments();
     scanYoutubePreferredComments();
+    ensureYoutubePriorityOverlay();
+    updateYoutubePriorityOverlayActive();
     ensureYoutubeTimestampOverlay();
   }
 
@@ -10154,6 +10372,10 @@ e.el.classList.toggle('npf-r-hidden', !show);
       youtubeTimestampUi.lastActiveSecond = -1;
       $('#npf-yt-ts-overlay')?.remove();
       $('#npf-yt-priority-comments')?.remove();
+      $('#npf-yt-priority-overlay')?.remove();
+      youtubePriorityOverlayUi.stamp = '';
+      youtubePriorityOverlayUi.videoId = id;
+      youtubePriorityOverlayUi.lastActive = -1;
       resetYoutubePriorityBackground(id);
       closeYoutubePanel();
     }
