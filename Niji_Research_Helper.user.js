@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.82
+// @version      1.0.83
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.82';
+  const VERSION = '1.0.83';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -70,6 +70,7 @@
   const KEY_SYNC = 'npf_sync_points';
   const KEY_YT_SEEK_HANDOFF = 'npf_youtube_seek_handoff_v1';
   const KEY_YT_TS_PINS = 'npf_youtube_timestamp_pins_v1';
+  const KEY_YT_PRIORITY_OVERLAY_UI = 'npf_youtube_priority_overlay_ui_v1'; // device-local; do not cloud-sync
   const KEY_CAL = 'npf_video_sync_calibration';
   const KEY_PREF_REV = 'npf_preferences_revision_v1';
   const KEY_WIKI_CACHE = 'npf_wiki_cache_v11';
@@ -5264,7 +5265,48 @@
     stamp: '',
     videoId: '',
     lastActive: -1,
+    width: 360,
+    widthLoaded: false,
+    resizing: false,
   };
+
+  function youtubePriorityOverlayWidthBounds(host = youtubeTimestampPlayerHost()) {
+    const playerWidth = Math.max(240, Number(host?.getBoundingClientRect?.().width || 0));
+    const mobile = isMobileYoutubeUi();
+    const min = mobile ? 170 : 220;
+    const max = Math.max(min, Math.floor(playerWidth * (mobile ? 0.82 : 0.72)));
+    return {min, max};
+  }
+
+  function clampYoutubePriorityOverlayWidth(value, host = youtubeTimestampPlayerHost()) {
+    const {min, max} = youtubePriorityOverlayWidthBounds(host);
+    const n = Number(value);
+    return Math.max(min, Math.min(max, Number.isFinite(n) ? Math.round(n) : 360));
+  }
+
+  async function loadYoutubePriorityOverlayUi() {
+    if (youtubePriorityOverlayUi.widthLoaded) return;
+    youtubePriorityOverlayUi.widthLoaded = true;
+    try {
+      const saved = await gmGet(KEY_YT_PRIORITY_OVERLAY_UI, {});
+      if (saved && typeof saved === 'object') {
+        youtubePriorityOverlayUi.width = clampYoutubePriorityOverlayWidth(saved.width);
+      }
+    } catch {}
+    const root = $('#npf-yt-priority-overlay');
+    if (root) styleYoutubePriorityOverlay(root);
+  }
+
+  async function saveYoutubePriorityOverlayWidth() {
+    try {
+      await GM.setValue(KEY_YT_PRIORITY_OVERLAY_UI, {
+        width: Math.round(youtubePriorityOverlayUi.width),
+        savedAt: Date.now(),
+      });
+    } catch (e) {
+      console.warn('[NRH][priority overlay width]', e);
+    }
+  }
 
   function youtubePriorityOverlayEntries() {
     const favorites = preferredCommentAuthors();
@@ -5315,7 +5357,9 @@
       `top:${mobile ? '8%' : '7%'}`,
       'z-index:86',
       'display:flex','flex-direction:column',
-      `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : mobile ? 'min(58%,320px)' : 'min(34%,360px)'}`,
+      `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : clampYoutubePriorityOverlayWidth(youtubePriorityOverlayUi.width, root.parentElement) + 'px'}`,
+      `max-width:${mobile ? '82%' : '72%'}`,
+      `min-width:${youtubePriorityOverlayUi.collapsed ? '0' : mobile ? '170px' : '220px'}`,
       `max-height:${mobile ? '58%' : '72%'}`,
       'border:1px solid rgba(255,255,255,.20)',
       'border-radius:10px',
@@ -5326,7 +5370,8 @@
       'color:#fff',
       'font-family:inherit',
       'pointer-events:auto',
-      'overflow:hidden'
+      'overflow:hidden',
+      'box-sizing:border-box'
     ].join(';');
   }
 
@@ -5429,11 +5474,52 @@
       root.appendChild(head);
 
       if (!youtubePriorityOverlayUi.collapsed) {
+        const resize = document.createElement('div');
+        resize.className = 'npf-yt-priority-overlay-resize';
+        resize.title = '左右にドラッグして幅を変更';
+        resize.setAttribute('aria-label', '優先コメントの幅を変更');
+        resize.style.cssText = [
+          'position:absolute','top:0','right:0','bottom:0','width:10px',
+          'z-index:4','cursor:ew-resize','touch-action:none','user-select:none',
+          'background:linear-gradient(to left,rgba(255,255,255,.12),transparent)',
+          'opacity:.55'
+        ].join(';');
+
+        let startX = 0;
+        let startWidth = 0;
+        const onMove = e => {
+          if (!youtubePriorityOverlayUi.resizing) return;
+          const next = startWidth + (Number(e.clientX) - startX);
+          youtubePriorityOverlayUi.width = clampYoutubePriorityOverlayWidth(next, root.parentElement);
+          root.style.setProperty('width', youtubePriorityOverlayUi.width + 'px', 'important');
+          root.querySelector('.npf-yt-priority-overlay-body')?.style.setProperty('width', '100%', 'important');
+          e.preventDefault();
+        };
+        const onEnd = e => {
+          if (!youtubePriorityOverlayUi.resizing) return;
+          youtubePriorityOverlayUi.resizing = false;
+          try { resize.releasePointerCapture?.(e.pointerId); } catch {}
+          void saveYoutubePriorityOverlayWidth();
+          e.preventDefault();
+        };
+        resize.addEventListener('pointerdown', e => {
+          youtubePriorityOverlayUi.resizing = true;
+          startX = Number(e.clientX);
+          startWidth = root.getBoundingClientRect().width;
+          resize.setPointerCapture?.(e.pointerId);
+          e.preventDefault();
+          e.stopPropagation();
+        });
+        resize.addEventListener('pointermove', onMove);
+        resize.addEventListener('pointerup', onEnd);
+        resize.addEventListener('pointercancel', onEnd);
+        root.appendChild(resize);
         const body = document.createElement('div');
         body.className = 'npf-yt-priority-overlay-body';
         body.style.cssText = [
           'overflow:auto','overscroll-behavior:contain','-webkit-overflow-scrolling:touch',
-          'padding:7px 8px 9px','display:grid','gap:8px',
+          'padding:7px 12px 9px 8px','display:grid','gap:8px',
+          'width:100%','min-width:0','box-sizing:border-box',
           'max-height:calc(100% - 32px)','font-size:12px','line-height:1.45',
           'text-shadow:0 1px 2px rgba(0,0,0,.92)'
         ].join(';');
@@ -5442,19 +5528,20 @@
           const block = document.createElement('div');
           block.className = 'npf-yt-priority-overlay-entry';
           block.style.cssText = [
-            'padding:6px 7px','border-radius:7px',
+            'padding:6px 7px','border-radius:7px','min-width:0','width:100%','box-sizing:border-box',
             'background:rgba(0,0,0,.22)','border:1px solid rgba(255,255,255,.08)'
           ].join(';');
 
           const author = document.createElement('div');
           author.textContent = entry.info?.name ? '⭐ ' + entry.info.name : '⭐ 優先ユーザー';
-          author.style.cssText = 'font-size:11px;font-weight:850;margin-bottom:4px;opacity:.92;';
+          author.style.cssText = 'font-size:11px;font-weight:850;margin-bottom:4px;opacity:.92;min-width:0;overflow-wrap:anywhere;word-break:break-word;';
           block.appendChild(author);
 
           const text = document.createElement('div');
           text.className = 'npf-yt-priority-overlay-text';
           text.style.cssText = [
-            'white-space:pre-wrap','overflow-wrap:anywhere','color:#fff',
+            'white-space:pre-wrap','overflow-wrap:anywhere','word-break:break-word','color:#fff',
+            'width:100%','min-width:0','max-width:100%','box-sizing:border-box',
             'font-family:inherit','font-size:12px','line-height:1.45'
           ].join(';');
 
@@ -10463,6 +10550,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
   state.liverFavorites = await gmGet(KEY_LIVER_FAVS, []);
   state.settings = { ...DEFAULT_SETTINGS, ...(await gmGet(KEY_SETTINGS, DEFAULT_SETTINGS)) };
   refreshResearchSettingsFromState();
+  await loadYoutubePriorityOverlayUi();
   state.syncPoints = await gmGet(KEY_SYNC, {});
   state.youtubeTimestampPins = await gmGet(KEY_YT_TS_PINS, {});
   state.calibration = await gmGet(KEY_CAL, {});
