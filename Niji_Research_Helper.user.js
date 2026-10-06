@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.83
+// @version      1.0.84
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.83';
+  const VERSION = '1.0.84';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5268,6 +5268,7 @@
     width: 360,
     widthLoaded: false,
     resizing: false,
+    scrollTop: 0,
   };
 
   function youtubePriorityOverlayWidthBounds(host = youtubeTimestampPlayerHost()) {
@@ -5431,6 +5432,8 @@
     styleYoutubePriorityOverlay(root);
     const stamp = youtubePriorityOverlayStamp(entries);
     if (force || youtubePriorityOverlayUi.videoId !== videoId || youtubePriorityOverlayUi.stamp !== stamp) {
+      const previousBody = root.querySelector('.npf-yt-priority-overlay-body');
+      if (previousBody) youtubePriorityOverlayUi.scrollTop = previousBody.scrollTop;
       youtubePriorityOverlayUi.videoId = videoId;
       youtubePriorityOverlayUi.stamp = stamp;
       youtubePriorityOverlayUi.lastActive = -1;
@@ -5464,6 +5467,8 @@
       ].join(';');
 
       const toggleCollapsed = () => {
+        const currentBody = root.querySelector('.npf-yt-priority-overlay-body');
+        if (currentBody) youtubePriorityOverlayUi.scrollTop = currentBody.scrollTop;
         youtubePriorityOverlayUi.collapsed = !youtubePriorityOverlayUi.collapsed;
         youtubePriorityOverlayUi.stamp = '';
         ensureYoutubePriorityOverlay(true);
@@ -5551,7 +5556,17 @@
           body.appendChild(block);
         }
 
+        body.addEventListener('scroll', () => {
+          youtubePriorityOverlayUi.scrollTop = body.scrollTop;
+        }, {passive:true});
+
         root.appendChild(body);
+        const restoreScrollTop = Math.max(0, Number(youtubePriorityOverlayUi.scrollTop) || 0);
+        requestAnimationFrame(() => {
+          if (!body.isConnected) return;
+          const maxScroll = Math.max(0, body.scrollHeight - body.clientHeight);
+          body.scrollTop = Math.min(restoreScrollTop, maxScroll);
+        });
       }
     }
 
@@ -10463,6 +10478,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       youtubePriorityOverlayUi.stamp = '';
       youtubePriorityOverlayUi.videoId = id;
       youtubePriorityOverlayUi.lastActive = -1;
+      youtubePriorityOverlayUi.scrollTop = 0;
       resetYoutubePriorityBackground(id);
       closeYoutubePanel();
     }
