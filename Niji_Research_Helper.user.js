@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.78
+// @version      1.0.79
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.78';
+  const VERSION = '1.0.79';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -4832,7 +4832,7 @@
     link.style.cssText = [
       'color:#3ea6ff !important','font-weight:750 !important','text-decoration:underline !important',
       'text-underline-offset:2px','cursor:pointer !important','touch-action:manipulation',
-      'pointer-events:auto !important','display:inline !important'
+      'pointer-events:auto !important','display:inline !important','font-variant-emoji:text !important'
     ].join(';');
     link.addEventListener('click', e => {
       const video = youtubeVideoElement();
@@ -5055,7 +5055,7 @@
     card.className = 'npf-yt-priority-card npf-yt-priority-api-card';
     card.style.cssText = [
       'border:1px solid rgba(128,128,128,.28)','border-radius:12px','padding:10px 11px',
-      'background:rgba(127,127,127,.08)','color:inherit','font-family:Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif'
+      'background:rgba(127,127,127,.08)','color:inherit','font-family:Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji",sans-serif'
     ].join(';');
 
     const head = document.createElement('div');
@@ -5071,7 +5071,7 @@
     card.appendChild(head);
 
     const text = document.createElement('div');
-    text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;font-family:Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;font-variant-emoji:emoji;';
+    text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;font-family:Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji",sans-serif;';
     renderYoutubePriorityApiRichText(text, snapshot);
     card.appendChild(text);
 
@@ -5122,7 +5122,7 @@
     card.className = 'npf-yt-priority-card';
     card.style.cssText = [
       'border:1px solid rgba(128,128,128,.28)','border-radius:12px','padding:10px 11px',
-      'background:rgba(127,127,127,.08)','color:inherit','font-family:Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif'
+      'background:rgba(127,127,127,.08)','color:inherit','font-family:Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji",sans-serif'
     ].join(';');
 
     const head = document.createElement('div');
@@ -5153,7 +5153,7 @@
 
     const text = document.createElement('div');
     text.className = 'npf-yt-priority-text';
-    text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;font-family:Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;font-variant-emoji:emoji;';
+    text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;font-family:Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji",sans-serif;';
     renderYoutubePriorityDomRichText(text, body);
     card.appendChild(text);
 
