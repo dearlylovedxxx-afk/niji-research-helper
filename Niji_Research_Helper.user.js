@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.75
+// @version      1.0.76
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.75';
+  const VERSION = '1.0.76';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -4658,6 +4658,7 @@
       id,
       info,
       text,
+      html: String(snippet.textDisplay || ''),
       items: youtubePriorityTextItems(text),
       likeCount: Number(snippet.likeCount || 0),
       publishedAt: String(snippet.publishedAt || ''),
@@ -4739,7 +4740,7 @@
           videoId,
           maxResults:'100',
           order:'time',
-          textFormat:'plainText'
+          textFormat:'html'
         });
         if (pageToken) params.set('pageToken', pageToken);
         const data = await youtubePriorityDataApi('commentThreads?' + params, apiKey);
@@ -4821,40 +4822,170 @@
     }
   }
 
-  function renderYoutubePriorityLinkedText(container, text) {
+  function makeYoutubePriorityTimestampLink(label, seconds) {
+    const sec = Math.max(0, Math.floor(Number(seconds) || 0));
+    const link = document.createElement('a');
+    link.href = youtubePriorityTimestampHref(sec);
+    link.textContent = label || formatClock(sec);
+    link.className = 'npf-yt-priority-timestamp-link';
+    link.title = (label || formatClock(sec)) + ' へ移動';
+    link.style.cssText = [
+      'color:#3ea6ff','font-weight:750','text-decoration:underline',
+      'text-underline-offset:2px','cursor:pointer','touch-action:manipulation'
+    ].join(';');
+    link.addEventListener('click', e => {
+      const video = youtubeVideoElement();
+      if (!video) return; // Safari fallback: follow the real ?t= link.
+      e.preventDefault();
+      e.stopPropagation();
+      seekYoutubeFromPriority(sec);
+    });
+    return link;
+  }
+
+  function appendYoutubePriorityLinkedText(container, text) {
     if (!container) return;
     const raw = String(text || '').replace(/\r/g, '');
-    container.replaceChildren();
     const re = /\d{1,3}:\d{2}(?::\d{2})?/g;
     let last = 0;
     for (const match of raw.matchAll(re)) {
       const index = Number(match.index || 0);
       if (index > last) container.appendChild(document.createTextNode(raw.slice(last, index)));
       const sec = parseClockText(match[0]);
-      if (Number.isFinite(sec)) {
-        const link = document.createElement('a');
-        link.href = youtubePriorityTimestampHref(sec);
-        link.textContent = match[0];
-        link.className = 'npf-yt-priority-timestamp-link';
-        link.title = match[0] + ' へ移動';
-        link.style.cssText = [
-          'color:#3ea6ff','font-weight:750','text-decoration:underline',
-          'text-underline-offset:2px','cursor:pointer','touch-action:manipulation'
-        ].join(';');
-        link.addEventListener('click', e => {
-          const video = youtubeVideoElement();
-          if (!video) return; // Safari fallback: follow the real ?t= link.
-          e.preventDefault();
-          e.stopPropagation();
-          seekYoutubeFromPriority(sec);
-        });
-        container.appendChild(link);
-      } else {
-        container.appendChild(document.createTextNode(match[0]));
-      }
+      if (Number.isFinite(sec)) container.appendChild(makeYoutubePriorityTimestampLink(match[0], sec));
+      else container.appendChild(document.createTextNode(match[0]));
       last = index + match[0].length;
     }
     if (last < raw.length) container.appendChild(document.createTextNode(raw.slice(last)));
+  }
+
+  function renderYoutubePriorityLinkedText(container, text) {
+    if (!container) return;
+    container.replaceChildren();
+    appendYoutubePriorityLinkedText(container, text);
+  }
+
+  function decorateYoutubePriorityRichNode(container) {
+    if (!container) return;
+    for (const img of container.querySelectorAll('img')) {
+      const src = String(img.getAttribute('src') || '');
+      if (!/^https:\/\//i.test(src)) {
+        img.remove();
+        continue;
+      }
+      img.removeAttribute('srcset');
+      img.removeAttribute('loading');
+      img.style.cssText = [
+        'display:inline-block','width:20px','height:20px','object-fit:contain',
+        'vertical-align:-4px','margin:0 1px'
+      ].join(';');
+    }
+    for (const a of container.querySelectorAll('a[href]')) {
+      const sec = youtubeTimestampSecondsFromAnchor(a);
+      if (Number.isFinite(sec)) {
+        const replacement = makeYoutubePriorityTimestampLink(String(a.textContent || '').trim() || formatClock(sec), sec);
+        a.replaceWith(replacement);
+        continue;
+      }
+      try {
+        const u = new URL(a.getAttribute('href') || '', location.href);
+        if (!/^https?:$/i.test(u.protocol)) throw new Error('bad protocol');
+        a.href = u.href;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.style.setProperty('color', '#3ea6ff');
+      } catch {
+        a.replaceWith(document.createTextNode(a.textContent || ''));
+      }
+    }
+  }
+
+  function renderYoutubePriorityApiRichText(container, snapshot) {
+    if (!container) return;
+    container.replaceChildren();
+    const html = String(snapshot?.html || '');
+    if (!html) {
+      appendYoutubePriorityLinkedText(container, snapshot?.text || '');
+      return;
+    }
+    try {
+      const doc = new DOMParser().parseFromString('<div>' + html + '</div>', 'text/html');
+      const source = doc.body.firstElementChild;
+      if (!source) throw new Error('empty');
+      for (const node of [...source.childNodes]) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          appendYoutubePriorityLinkedText(container, node.textContent || '');
+          continue;
+        }
+        if (!(node instanceof Element)) continue;
+        if (node.matches('img')) {
+          const img = document.createElement('img');
+          const src = String(node.getAttribute('src') || '');
+          if (/^https:\/\//i.test(src)) {
+            img.src = src;
+            img.alt = String(node.getAttribute('alt') || node.getAttribute('title') || '');
+            container.appendChild(img);
+          } else if (node.getAttribute('alt')) {
+            container.appendChild(document.createTextNode(node.getAttribute('alt')));
+          }
+          continue;
+        }
+        if (node.matches('a')) {
+          const href = String(node.getAttribute('href') || '');
+          const label = String(node.textContent || '');
+          const sec = parseClockText(label.trim());
+          if (Number.isFinite(sec)) {
+            container.appendChild(makeYoutubePriorityTimestampLink(label.trim(), sec));
+          } else {
+            try {
+              const u = new URL(href, location.href);
+              if (!/^https?:$/i.test(u.protocol)) throw new Error('bad');
+              const a = document.createElement('a');
+              a.href = u.href; a.textContent = label; a.target = '_blank'; a.rel = 'noopener noreferrer';
+              a.style.setProperty('color','#3ea6ff');
+              container.appendChild(a);
+            } catch {
+              appendYoutubePriorityLinkedText(container, label);
+            }
+          }
+          continue;
+        }
+        appendYoutubePriorityLinkedText(container, node.textContent || '');
+      }
+      decorateYoutubePriorityRichNode(container);
+    } catch {
+      appendYoutubePriorityLinkedText(container, snapshot?.text || '');
+    }
+  }
+
+  function renderYoutubePriorityDomRichText(container, body) {
+    if (!container) return;
+    container.replaceChildren();
+    if (!(body instanceof Element)) return;
+    for (const node of [...body.childNodes]) {
+      const clone = node.cloneNode(true);
+      if (clone.nodeType === Node.ELEMENT_NODE) {
+        clone.querySelectorAll?.('[id]').forEach(el => el.removeAttribute('id'));
+        clone.removeAttribute?.('id');
+        clone.querySelectorAll?.('script,style,button').forEach(el => el.remove());
+      }
+      container.appendChild(clone);
+    }
+    decorateYoutubePriorityRichNode(container);
+
+    // Any bare timestamp text not already linked still becomes clickable.
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      if (node.parentElement?.closest('a')) continue;
+      if (/\d{1,3}:\d{2}(?::\d{2})?/.test(node.nodeValue || '')) textNodes.push(node);
+    }
+    for (const textNode of textNodes) {
+      const frag = document.createDocumentFragment();
+      appendYoutubePriorityLinkedText(frag, textNode.nodeValue || '');
+      textNode.replaceWith(frag);
+    }
   }
 
   function makeYoutubePriorityApiCard(snapshot) {
@@ -4880,7 +5011,7 @@
 
     const text = document.createElement('div');
     text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;';
-    renderYoutubePriorityLinkedText(text, snapshot.text || '');
+    renderYoutubePriorityApiRichText(text, snapshot);
     card.appendChild(text);
 
     if (snapshot.items?.length) {
@@ -4962,10 +5093,7 @@
     const text = document.createElement('div');
     text.className = 'npf-yt-priority-text';
     text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;';
-    renderYoutubePriorityLinkedText(
-      text,
-      String(body?.textContent || body?.innerText || '').replace(/\r/g, '').trim()
-    );
+    renderYoutubePriorityDomRichText(text, body);
     card.appendChild(text);
 
     const items = youtubeTimestampCommentItems(body);
