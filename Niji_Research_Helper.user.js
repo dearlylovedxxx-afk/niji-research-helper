@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.74
+// @version      1.0.75
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.74';
+  const VERSION = '1.0.75';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -4808,6 +4808,55 @@
     if (play?.catch) play.catch(() => {});
   }
 
+  function youtubePriorityTimestampHref(seconds) {
+    const id = currentYoutubeVideoId();
+    const sec = Math.max(0, Math.floor(Number(seconds) || 0));
+    try {
+      const url = new URL('/watch', location.origin);
+      if (id) url.searchParams.set('v', id);
+      url.searchParams.set('t', sec + 's');
+      return url.href;
+    } catch {
+      return '#';
+    }
+  }
+
+  function renderYoutubePriorityLinkedText(container, text) {
+    if (!container) return;
+    const raw = String(text || '').replace(/\r/g, '');
+    container.replaceChildren();
+    const re = /\d{1,3}:\d{2}(?::\d{2})?/g;
+    let last = 0;
+    for (const match of raw.matchAll(re)) {
+      const index = Number(match.index || 0);
+      if (index > last) container.appendChild(document.createTextNode(raw.slice(last, index)));
+      const sec = parseClockText(match[0]);
+      if (Number.isFinite(sec)) {
+        const link = document.createElement('a');
+        link.href = youtubePriorityTimestampHref(sec);
+        link.textContent = match[0];
+        link.className = 'npf-yt-priority-timestamp-link';
+        link.title = match[0] + ' へ移動';
+        link.style.cssText = [
+          'color:#3ea6ff','font-weight:750','text-decoration:underline',
+          'text-underline-offset:2px','cursor:pointer','touch-action:manipulation'
+        ].join(';');
+        link.addEventListener('click', e => {
+          const video = youtubeVideoElement();
+          if (!video) return; // Safari fallback: follow the real ?t= link.
+          e.preventDefault();
+          e.stopPropagation();
+          seekYoutubeFromPriority(sec);
+        });
+        container.appendChild(link);
+      } else {
+        container.appendChild(document.createTextNode(match[0]));
+      }
+      last = index + match[0].length;
+    }
+    if (last < raw.length) container.appendChild(document.createTextNode(raw.slice(last)));
+  }
+
   function makeYoutubePriorityApiCard(snapshot) {
     const info = snapshot.info || {};
     const card = document.createElement('div');
@@ -4830,8 +4879,8 @@
     card.appendChild(head);
 
     const text = document.createElement('div');
-    text.textContent = snapshot.text || '';
     text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;';
+    renderYoutubePriorityLinkedText(text, snapshot.text || '');
     card.appendChild(text);
 
     if (snapshot.items?.length) {
@@ -4912,8 +4961,11 @@
 
     const text = document.createElement('div');
     text.className = 'npf-yt-priority-text';
-    text.textContent = String(body?.textContent || body?.innerText || '').replace(/\r/g, '').trim();
     text.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;';
+    renderYoutubePriorityLinkedText(
+      text,
+      String(body?.textContent || body?.innerText || '').replace(/\r/g, '').trim()
+    );
     card.appendChild(text);
 
     const items = youtubeTimestampCommentItems(body);
