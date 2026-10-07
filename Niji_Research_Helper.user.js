@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.86
+// @version      1.0.87
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.86';
+  const VERSION = '1.0.87';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -3610,6 +3610,52 @@
     return [...found.values()];
   }
 
+  async function fetchYoutubePovFastCandidates(source, syncOffset = null) {
+    const ss = startOf(source), se = endOf(source);
+    if (!ss || !se || Number.isNaN(+ss) || Number.isNaN(+se))
+      throw new Error('元アーカイブの開始・終了時刻を取得できませんでした');
+
+    const targetMoment = syncOffset != null && Number.isFinite(Number(syncOffset))
+      ? new Date(+ss + Number(syncOffset) * 1000)
+      : new Date(Math.min(+se, +ss + 3 * 3600000));
+
+    // First paint should be quick. Search a focused window around the source
+    // start/current moment and only fetch the first page from each strong lead.
+    const from = new Date(+ss - 2 * 3600000);
+    const to = new Date(Math.min(+se + 3600000, +targetMoment + 2 * 3600000));
+    const defs = [
+      {org:'Nijisanji'},
+      {topic:String(source.topic_id || '').trim()},
+    ].filter(x => x.org || x.topic);
+
+    const jobs = defs.map(async query => {
+      const q = new URLSearchParams({
+        type:'stream',
+        status:'past',
+        include:'live_info,mentions',
+        sort:'available_at',
+        order:'asc',
+        limit:'50',
+        offset:'0',
+        from:from.toISOString(),
+        to:to.toISOString(),
+      });
+      if (query.org) q.set('org', query.org);
+      if (query.topic) q.set('topic', query.topic);
+      const arr = await apiGet('/videos?' + q.toString());
+      return Array.isArray(arr) ? arr : [];
+    });
+
+    const settled = await Promise.allSettled(jobs);
+    const found = new Map();
+    for (const row of settled) {
+      if (row.status !== 'fulfilled') continue;
+      for (const v of row.value) if (v?.id) found.set(v.id, v);
+    }
+    return [...found.values()];
+  }
+
+
   function buildMatches(source, videos, syncOffset = null) {
     const ss = startOf(source), se = endOf(source);
     const sourceDuration = Math.max(1, (se - ss) / 1000);
@@ -6328,12 +6374,19 @@
       results.appendChild(loading);
     }
 
+    const searchToken = (searchOtherPovsFromYoutube._runToken = Number(searchOtherPovsFromYoutube._runToken || 0) + 1);
     try {
       const source = await apiGet(`/videos/${encodeURIComponent(id)}?lang=ja`);
-      const candidates = await fetchCandidates(source);
-      const matches = buildMatches(source, candidates, sec);
+      if (searchToken !== searchOtherPovsFromYoutube._runToken) return;
+
+      // Fast first paint: two focused first-page requests in parallel.
+      const fastCandidates = await fetchYoutubePovFastCandidates(source, sec);
+      if (searchToken !== searchOtherPovsFromYoutube._runToken) return;
+      let currentCandidates = fastCandidates;
+      let matches = buildMatches(source, currentCandidates, sec);
       renderYoutubeMatches(source, matches, sec);
-      attachPovSupplement(source, matches, sec, true, candidates);
+      attachPovSupplement(source, matches, sec, true, currentCandidates);
+
       if (isMobileYoutubeUi()) {
         const panel = $('#npf-yt-panel');
         if (panel && results) {
@@ -6341,6 +6394,25 @@
           panel.scrollTop += position - 64;
         }
       }
+
+      // Expand in the background. Never keep the user on a loading screen while
+      // the broad 24h/page search completes.
+      void fetchCandidates(source).then(async broad => {
+        if (searchToken !== searchOtherPovsFromYoutube._runToken) return;
+        const mergedMap = new Map(currentCandidates.map(v => [v.id, v]));
+        for (const v of broad) if (v?.id) mergedMap.set(v.id, v);
+        currentCandidates = [...mergedMap.values()];
+        matches = buildMatches(source, currentCandidates, sec);
+        renderYoutubeMatches(source, matches, sec);
+
+        // Explicit participant recovery is also background-only.
+        const extra = await fetchPovExplicitGapCandidates(source, currentCandidates).catch(() => []);
+        if (searchToken !== searchOtherPovsFromYoutube._runToken || !extra.length) return;
+        for (const v of extra) if (v?.id) mergedMap.set(v.id, v);
+        currentCandidates = [...mergedMap.values()];
+        matches = buildMatches(source, currentCandidates, sec);
+        renderYoutubeMatches(source, matches, sec);
+      }).catch(e => console.debug('[NRH][YouTube POV broad background]', String(e?.message || e)));
     } catch (err) {
       console.error('[NPF][YouTube POV]', err);
       if (results) {
