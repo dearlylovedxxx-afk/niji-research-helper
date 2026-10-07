@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.92
+// @version      1.0.93
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.92';
+  const VERSION = '1.0.93';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2820,11 +2820,11 @@
 
     for (const fav of state.liverFavorites || []) {
       const rawValue = String(fav?.value || '');
+      const display = collaboratorDisplayName(fav?.name || '');
       if (/^UC[A-Za-z0-9_-]{22}$/.test(rawValue) && rawValue !== sourceChannel) {
         addId(rawValue, display, 'ライバーお気に入り値');
         continue;
       }
-      const display = collaboratorDisplayName(fav?.name || '');
       const key = normalizeCollaboratorName(display);
       if (key) unresolved.set(key, display);
     }
@@ -3873,79 +3873,120 @@
     const ss = startOf(source), se = endOf(source);
     if (!ss || !se) return [];
     const sourceChannel = channelId(source);
-    const favoriteRows = await resolvePovFavoriteChannelIds(sourceChannel, row => {
+    const found = new Map();
+    const queried = new Set();
+    const from = new Date(+ss - 2 * 3600000).toISOString();
+    const to = new Date(+se + 2 * 3600000).toISOString();
+
+    const directRows = [];
+    const directSeen = new Set();
+    const addDirect = (id, name, via) => {
+      id = String(id || '');
+      if (!/^UC[A-Za-z0-9_-]{22}$/.test(id) || id === sourceChannel || directSeen.has(id)) return;
+      directSeen.add(id);
+      directRows.push({id,name:String(name || ''),via});
+      pushYoutubePovDiagnostic({
+        name:String(name || ''),
+        channelId:id,
+        queryStatus:'即時検索対象（' + via + '）',
+      });
+    };
+
+    // IMPORTANT: IDs already stored in channel favorites must be queried
+    // immediately. Never wait for name->channel resolution of liver favorites.
+    for (const fav of state.favorites || []) {
+      addDirect(fav?.id, fav?.name, 'チャンネルお気に入り');
+    }
+    for (const fav of state.liverFavorites || []) {
+      const raw = String(fav?.value || '');
+      if (/^UC[A-Za-z0-9_-]{22}$/.test(raw)) {
+        addDirect(raw, collaboratorDisplayName(fav?.name || ''), 'ライバーお気に入りID');
+      }
+    }
+
+    const queryRows = async rows => {
+      const jobs = rows.map(async favRow => {
+        const ch = String(favRow?.id || '');
+        if (!ch || queried.has(ch)) return;
+        queried.add(ch);
+        pushYoutubePovDiagnostic({
+          name:favRow.name,
+          channelId:ch,
+          queryStatus:'Holodex検索開始',
+        });
+        try {
+          const q = new URLSearchParams({
+            channel_id:ch,
+            type:'stream',
+            status:'past',
+            include:'live_info,mentions',
+            sort:'available_at',
+            order:'asc',
+            limit:'50',
+            from,
+            to,
+          });
+          const arr = await apiGet('/videos?' + q.toString());
+          const batch = [];
+          pushYoutubePovDiagnostic({
+            name:favRow.name,
+            channelId:ch,
+            queryStatus:'Holodex時間帯検索 ' + (Array.isArray(arr) ? arr.length : 0) + '件',
+          });
+          if (Array.isArray(arr)) {
+            for (const v of arr) {
+              if (!v?.id || v.id === source.id) continue;
+              v._npfFavoriteTarget = true;
+              const cs = startOf(v), ce = endOf(v);
+              const targetMoment = syncOffset != null && Number.isFinite(Number(syncOffset))
+                ? new Date(+ss + Number(syncOffset) * 1000) : null;
+              const timeOk = !!(cs && ce && (!targetMoment || (targetMoment >= cs && targetMoment <= ce)));
+              const single = buildMatches(source, [v], syncOffset)[0] || null;
+              pushYoutubePovDiagnostic({
+                name:channelName(v) || favRow.name,
+                channelId:ch,
+                queryStatus:'Holodex候補取得',
+                videoId:v.id,
+                title:String(v.title || ''),
+                timeStatus:timeOk ? '時刻○' : '時刻×',
+                gameStatus:single?.sameGame ? '同ゲーム○' : '同ゲーム×',
+                relatedStatus:single?.related ? '関連○' : '関連×',
+                bucket:single ? (single.related ? '表示:関連候補' : (single.sameGame ? '表示:その他候補' : '表示対象外')) : 'buildMatchesで除外',
+              });
+              found.set(v.id, v);
+              batch.push(v);
+            }
+          }
+          if (batch.length && typeof onBatch === 'function') onBatch(batch, ch);
+        } catch (e) {
+          pushYoutubePovDiagnostic({
+            name:favRow.name,
+            channelId:ch,
+            queryStatus:'Holodex取得失敗: ' + String(e?.message || e).slice(0,90),
+          });
+          console.debug('[NRH POV favorite channel]', ch, String(e?.message || e));
+        }
+      });
+      await Promise.allSettled(jobs);
+    };
+
+    // Start known IDs NOW.
+    const directJob = queryRows(directRows);
+
+    // In parallel, resolve numeric/name-only liver favorites. This may scan the
+    // channel directory, but it can no longer delay already-known favorite IDs.
+    const lateResolveJob = resolvePovFavoriteChannelIds(sourceChannel, row => {
       pushYoutubePovDiagnostic({
         name:row.name,
         channelId:row.id,
         queryStatus:'ID解決済み（' + row.via + '）',
       });
-    });
-    if (!favoriteRows.length) return [];
+    }).then(rows => queryRows(rows.filter(row => !directSeen.has(String(row?.id || '')))))
+      .catch(e => console.debug('[NRH POV late favorite resolve]', String(e?.message || e)));
 
-    const found = new Map();
-    const from = new Date(+ss - 2 * 3600000).toISOString();
-    const to = new Date(+se + 2 * 3600000).toISOString();
-
-    const jobs = favoriteRows.map(async favRow => {
-      const ch = favRow.id;
-      try {
-        const q = new URLSearchParams({
-          channel_id:ch,
-          type:'stream',
-          status:'past',
-          include:'live_info,mentions',
-          sort:'available_at',
-          order:'asc',
-          limit:'50',
-          from,
-          to,
-        });
-        const arr = await apiGet('/videos?' + q.toString());
-        const batch = [];
-        pushYoutubePovDiagnostic({
-          name:favRow.name,
-          channelId:ch,
-          queryStatus:'Holodex時間帯検索 ' + (Array.isArray(arr) ? arr.length : 0) + '件',
-        });
-        if (Array.isArray(arr)) {
-          for (const v of arr) {
-            if (!v?.id || v.id === source.id) continue;
-            v._npfFavoriteTarget = true;
-            const cs = startOf(v), ce = endOf(v);
-            const targetMoment = syncOffset != null && Number.isFinite(Number(syncOffset))
-              ? new Date(+ss + Number(syncOffset) * 1000) : null;
-            const timeOk = !!(cs && ce && (!targetMoment || (targetMoment >= cs && targetMoment <= ce)));
-            const single = buildMatches(source, [v], syncOffset)[0] || null;
-            pushYoutubePovDiagnostic({
-              name:channelName(v) || favRow.name,
-              channelId:ch,
-              queryStatus:'Holodex候補取得',
-              videoId:v.id,
-              title:String(v.title || ''),
-              timeStatus:timeOk ? '時刻○' : '時刻×',
-              gameStatus:single?.sameGame ? '同ゲーム○' : '同ゲーム×',
-              relatedStatus:single?.related ? '関連○' : '関連×',
-              bucket:single ? (single.related ? '表示:関連候補' : (single.sameGame ? '表示:その他候補' : '表示対象外')) : 'buildMatchesで除外',
-            });
-            found.set(v.id, v);
-            batch.push(v);
-          }
-        }
-        if (batch.length && typeof onBatch === 'function') onBatch(batch, ch);
-      } catch (e) {
-        pushYoutubePovDiagnostic({
-          name:favRow.name,
-          channelId:ch,
-          queryStatus:'Holodex取得失敗: ' + String(e?.message || e).slice(0,90),
-        });
-        console.debug('[NRH POV favorite channel]', ch, String(e?.message || e));
-      }
-    });
-
-    await Promise.allSettled(jobs);
+    await Promise.allSettled([directJob, lateResolveJob]);
     return [...found.values()];
   }
-
 
   function buildMatches(source, videos, syncOffset = null) {
     const ss = startOf(source), se = endOf(source);
