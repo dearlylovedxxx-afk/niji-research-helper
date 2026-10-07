@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.31
+// @version      0.6.32
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1039,12 +1039,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
 
 
-// ---- Saved Pixiv searches + cross-search newest feed (v0.6.12) ----
+// ---- Saved Pixiv searches + cross-search newest feed (v0.6.13) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivSavedSearchesV0612) return;
-  window.__pixivSavedSearchesV0612 = true;
+  if (window.__pixivSavedSearchesV0613) return;
+  window.__pixivSavedSearchesV0613 = true;
 
   const STORAGE_KEY = 'pixiv-saved-searches-v1';
   const FEED_EXCLUDE_TAGS_KEY = 'pixiv-saved-searches-feed-exclude-tags-v1';
@@ -1066,6 +1066,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   let feedObserver = null;
   let detailQueue = [];
   let detailActive = 0;
+  let feedAutoExpandTimer = null;
   let feedExcludeTags = readExcludeTags();
 
   function isSearchUrl(u) {
@@ -1443,20 +1444,89 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
 
   async function fetchStatePage(state, page, generation) {
-    if (!state?.ctx || feedAbort?.signal.aborted || generation !== feedGeneration) return;
+    if (!state?.ctx || feedAbort?.signal.aborted || generation !== feedGeneration) return false;
+    state.loadedIds ||= new Set();
+    state.seenPages ||= new Set();
+
+    const pageNo = Math.max(1, Number(page) || 1);
+    if (state.seenPages.has(pageNo)) {
+      state.done = true;
+      return false;
+    }
+    state.seenPages.add(pageNo);
+
+    const before = state.loadedIds.size;
     try {
-      const result = await fetchSearchPage(state, page, feedAbort.signal);
-      if (generation !== feedGeneration) return;
+      const result = await fetchSearchPage(state, pageNo, feedAbort.signal);
+      if (generation !== feedGeneration) return false;
+
       state.total = result.total;
       state.lastPage = result.lastPage;
-      state.nextPage = page + 1;
-      state.done = page >= result.lastPage;
+      for (const raw of result.data || []) {
+        const id = String(raw?.id || '');
+        if (/^\d+$/.test(id)) state.loadedIds.add(id);
+      }
+      state.pagesFetched = Number(state.pagesFetched || 0) + 1;
+      state.nextPage = pageNo + 1;
+      state.done = pageNo >= result.lastPage || !result.data?.length;
       state.error = '';
       mergeWorks(result.data, state.ctx);
+
+      // A repeated page with no new work IDs means pagination is looping.
+      if (result.data?.length && state.loadedIds.size === before) {
+        state.done = true;
+      }
+      return state.loadedIds.size > before;
     } catch (e) {
-      if (e?.name === 'AbortError') return;
+      if (e?.name === 'AbortError') return false;
       state.error = String(e?.message || e);
+      return false;
     }
+  }
+
+  function stateCoverage(state) {
+    return Number(state?.loadedIds?.size || 0);
+  }
+
+  function coverageComplete(target) {
+    return feedStates.every(state =>
+      !state.ctx || !!state.error || !!state.done || stateCoverage(state) >= target
+    );
+  }
+
+  async function ensureCoverage(target, generation) {
+    let rounds = 0;
+    while (generation === feedGeneration && !feedAbort?.signal.aborted && !coverageComplete(target)) {
+      const targets = feedStates.filter(state =>
+        state.ctx && !state.error && !state.done && Number.isFinite(Number(state.nextPage)) && stateCoverage(state) < target
+      );
+      if (!targets.length) break;
+
+      let progressed = false;
+      await mapLimit(targets, FEED_SEARCH_CONCURRENCY, async state => {
+        const before = stateCoverage(state);
+        await fetchStatePage(state, state.nextPage, generation);
+        if (stateCoverage(state) > before || state.done || state.error) progressed = true;
+        if (generation === feedGeneration) renderFeed();
+      });
+
+      if (!progressed || ++rounds >= 50) break;
+    }
+  }
+
+  async function expandFeed() {
+    if (feedLoading || !feedOpen) return;
+    const generation = feedGeneration;
+    const target = feedVisibleCount + FEED_STEP;
+    feedLoading = true;
+    renderFeed();
+
+    await ensureCoverage(target, generation);
+    if (generation !== feedGeneration) return;
+
+    feedVisibleCount = target;
+    feedLoading = false;
+    renderFeed();
   }
 
   function feedStatusText() {
@@ -1466,9 +1536,27 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const allWorks = feedWorks.size;
     const visibleWorks = sortedWorks().length;
     const excluded = Math.max(0, allWorks - visibleWorks);
+    const target = feedVisibleCount;
+    const covered = feedStates.filter(s => !s.ctx || s.error || s.done || stateCoverage(s) >= target).length;
+    const coverage = total ? ` ／ 横断同期 ${covered}/${total}条件（各最大${target}件）` : '';
     return feedLoading
-      ? `保存検索 ${total}件を更新中… 現在 ${visibleWorks.toLocaleString('ja-JP')}作品${excluded ? `（除外 ${excluded.toLocaleString('ja-JP')}）` : ''}`
-      : `保存検索 ${ok}/${total}件取得 ／ 表示 ${visibleWorks.toLocaleString('ja-JP')}作品${excluded ? ` ／ 除外 ${excluded.toLocaleString('ja-JP')}作品` : ''}${bad ? ` ／ 失敗${bad}件` : ''}`;
+      ? `全保存検索を日付順に揃えています… 現在 ${visibleWorks.toLocaleString('ja-JP')}作品${coverage}${excluded ? `（除外 ${excluded.toLocaleString('ja-JP')}）` : ''}`
+      : `保存検索 ${ok}/${total}件取得 ／ 表示候補 ${visibleWorks.toLocaleString('ja-JP')}作品${coverage}${excluded ? ` ／ 除外 ${excluded.toLocaleString('ja-JP')}作品` : ''}${bad ? ` ／ 失敗${bad}件` : ''}`;
+  }
+
+  function renderCoverageBreakdown() {
+    const box = root?.querySelector('.pss-feed-coverage');
+    if (!box) return;
+    box.replaceChildren();
+    for (const state of feedStates) {
+      const chip = document.createElement('span');
+      const name = state.row?.name || state.row?.word || '保存検索';
+      const count = stateCoverage(state);
+      chip.textContent = name + ' ' + count + '件' +
+        (state.error ? ' ⚠️' : state.done ? ' ✓' : count >= feedVisibleCount ? ' ✓' : ' …');
+      if (state.error) chip.title = state.error;
+      box.append(chip);
+    }
   }
 
   function formatDate(value) {
@@ -1637,6 +1725,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     syncExcludeTagUi();
     const status = root.querySelector('.pss-feed-status');
     if (status) status.textContent = feedStatusText();
+    renderCoverageBreakdown();
 
     const grid = root.querySelector('.pss-feed-grid');
     const works = sortedWorks();
@@ -1664,7 +1753,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     loadOlder.disabled = feedLoading;
     showMore.disabled = feedLoading;
 
-    observeFeedCards(visible, feedGeneration);
+    if (!feedLoading) observeFeedCards(visible, feedGeneration);
   }
 
   async function refreshFeed() {
@@ -1678,13 +1767,36 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     feedVisibleCount = FEED_STEP;
     feedStates = [];
     feedObserver?.disconnect();
+    clearTimeout(feedAutoExpandTimer);
     resetDetailQueue();
 
     for (const row of rows) {
       try {
-        feedStates.push({row, ctx:savedContext(row), nextPage:1, lastPage:null, total:null, done:false, error:''});
+        feedStates.push({
+          row,
+          ctx:savedContext(row),
+          nextPage:1,
+          lastPage:null,
+          total:null,
+          done:false,
+          error:'',
+          loadedIds:new Set(),
+          seenPages:new Set(),
+          pagesFetched:0
+        });
       } catch (e) {
-        feedStates.push({row, ctx:null, nextPage:1, lastPage:0, total:0, done:true, error:String(e?.message || e)});
+        feedStates.push({
+          row,
+          ctx:null,
+          nextPage:1,
+          lastPage:0,
+          total:0,
+          done:true,
+          error:String(e?.message || e),
+          loadedIds:new Set(),
+          seenPages:new Set(),
+          pagesFetched:0
+        });
       }
     }
 
@@ -1695,11 +1807,9 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       return;
     }
 
-    const valid = feedStates.filter(s => s.ctx);
-    await mapLimit(valid, FEED_SEARCH_CONCURRENCY, async state => {
-      await fetchStatePage(state, 1, generation);
-      if (generation === feedGeneration) renderFeed();
-    });
+    // To make the global newest N correct, every saved search must contribute
+    // up to N newest works, or reach its own end, before we rank all results.
+    await ensureCoverage(feedVisibleCount, generation);
 
     if (generation !== feedGeneration) return;
     feedLoading = false;
@@ -1707,22 +1817,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
 
   async function loadOlderFeed() {
-    if (feedLoading) return;
-    const generation = feedGeneration;
-    const targets = feedStates.filter(s => s.ctx && !s.error && !s.done && Number.isFinite(Number(s.nextPage)));
-    if (!targets.length) return;
-    feedLoading = true;
-    renderFeed();
-
-    await mapLimit(targets, FEED_SEARCH_CONCURRENCY, async state => {
-      await fetchStatePage(state, state.nextPage, generation);
-      if (generation === feedGeneration) renderFeed();
-    });
-
-    if (generation !== feedGeneration) return;
-    feedLoading = false;
-    feedVisibleCount = Math.max(feedVisibleCount, FEED_STEP);
-    renderFeed();
+    await expandFeed();
   }
 
   function showManagePage() {
@@ -1767,6 +1862,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     feedOpen = false;
     feedAbort?.abort();
     feedObserver?.disconnect();
+    clearTimeout(feedAutoExpandTimer);
     resetDetailQueue();
     if (!root) return;
     showManagePage();
@@ -1855,6 +1951,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       #${ROOT_ID} .pss-feed-head{position:sticky;top:0;z-index:3;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#f4f6f8;padding:0 0 12px}
       #${ROOT_ID} .pss-feed-head h2{font-size:18px;margin:0 8px 0 0}
       #${ROOT_ID} .pss-feed-status{flex:1 1 100%;font-size:12px;color:#66717e}
+      #${ROOT_ID} .pss-feed-coverage{flex:1 1 100%;display:flex;gap:5px;flex-wrap:wrap}
+      #${ROOT_ID} .pss-feed-coverage span{font-size:10px;color:#596575;background:#eef2f6;border-radius:999px;padding:3px 7px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       #${ROOT_ID} .pss-feed-filter{flex:1 1 100%;background:#fff;border:1px solid #dde2e8;border-radius:10px;padding:8px 10px}
       #${ROOT_ID} .pss-feed-filter summary{cursor:pointer;font-weight:700;color:#4b5663}
       #${ROOT_ID} .pss-feed-filter-row{display:flex;gap:7px;align-items:stretch;margin-top:8px}
@@ -1908,6 +2006,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
           <h2>🆕 保存検索の新着</h2>
           <button type="button" class="pss-feed-refresh">更新</button>
           <div class="pss-feed-status"></div>
+          <div class="pss-feed-coverage"></div>
           <details class="pss-feed-filter">
             <summary class="pss-feed-exclude-summary">🚫 除外タグなし</summary>
             <div class="pss-feed-filter-row">
@@ -1936,11 +2035,18 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
         applyExcludeTagInput();
       }
     });
-    root.querySelector('.pss-feed-show-more').addEventListener('click', () => {
-      feedVisibleCount += FEED_STEP;
-      renderFeed();
-    });
-    root.querySelector('.pss-feed-load-older').addEventListener('click', () => void loadOlderFeed());
+    root.querySelector('.pss-feed-show-more').addEventListener('click', () => void expandFeed());
+    root.querySelector('.pss-feed-load-older').addEventListener('click', () => void expandFeed());
+
+    root.addEventListener('scroll', () => {
+      if (!feedOpen || feedLoading) return;
+      clearTimeout(feedAutoExpandTimer);
+      feedAutoExpandTimer = setTimeout(() => {
+        if (!feedOpen || feedLoading) return;
+        const remaining = root.scrollHeight - root.scrollTop - root.clientHeight;
+        if (remaining < 700) void expandFeed();
+      }, 120);
+    }, {passive:true});
 
     document.body.append(root);
     syncExcludeTagUi();
@@ -1956,6 +2062,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     // previous open/close cycle (notably on iOS Safari).
     feedAbort?.abort();
     feedObserver?.disconnect();
+    clearTimeout(feedAutoExpandTimer);
     resetDetailQueue();
     feedOpen = false;
     root.classList.add('open');
