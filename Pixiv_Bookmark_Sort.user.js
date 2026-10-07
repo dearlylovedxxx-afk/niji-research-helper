@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.28
+// @version      0.6.29
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -981,14 +981,15 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
 
 
-// ---- Saved Pixiv searches + cross-search newest feed (v0.6.11) ----
+// ---- Saved Pixiv searches + cross-search newest feed (v0.6.12) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivSavedSearchesV0611) return;
-  window.__pixivSavedSearchesV0611 = true;
+  if (window.__pixivSavedSearchesV0612) return;
+  window.__pixivSavedSearchesV0612 = true;
 
   const STORAGE_KEY = 'pixiv-saved-searches-v1';
+  const FEED_EXCLUDE_TAGS_KEY = 'pixiv-saved-searches-feed-exclude-tags-v1';
   const ROOT_ID = 'pixiv-saved-searches-root';
   const OFFSET = 78;
   const MAX_SAVED = 200;
@@ -1007,6 +1008,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   let feedObserver = null;
   let detailQueue = [];
   let detailActive = 0;
+  let feedExcludeTags = readExcludeTags();
 
   function isSearchUrl(u) {
     if (/^\/tags\/[^/]+(?:\/(?:artworks|illustrations|manga|novels))?(?:\/|$)/.test(u.pathname)) return true;
@@ -1057,6 +1059,72 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
     window.dispatchEvent(new Event('pixiv-saved-searches-changed'));
     render();
+  }
+
+  function normalizeExcludeTag(value) {
+    return String(value || '').trim().replace(/^#+/, '').normalize('NFKC').toLocaleLowerCase('ja-JP');
+  }
+
+  function parseExcludeTags(value) {
+    const rows = String(value || '').split(/[\n,、]+/).map(x => x.trim()).filter(Boolean);
+    const unique = new Map();
+    for (const raw of rows) {
+      const key = normalizeExcludeTag(raw);
+      if (!key || unique.has(key)) continue;
+      unique.set(key, raw.replace(/^#+/, '').trim());
+    }
+    return [...unique.values()];
+  }
+
+  function readExcludeTags() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(FEED_EXCLUDE_TAGS_KEY) || '[]');
+      if (!Array.isArray(parsed)) return [];
+      return parseExcludeTags(parsed.join('\n'));
+    } catch {
+      return [];
+    }
+  }
+
+  function saveExcludeTags(tags) {
+    feedExcludeTags = parseExcludeTags((tags || []).join('\n'));
+    try { localStorage.setItem(FEED_EXCLUDE_TAGS_KEY, JSON.stringify(feedExcludeTags)); } catch {}
+  }
+
+  function excludedTagSet() {
+    return new Set(feedExcludeTags.map(normalizeExcludeTag).filter(Boolean));
+  }
+
+  function excludedByTag(work) {
+    if (!feedExcludeTags.length || !Array.isArray(work?.tags) || !work.tags.length) return false;
+    const blocked = excludedTagSet();
+    return work.tags.some(tag => blocked.has(normalizeExcludeTag(tag)));
+  }
+
+  function excludedTagFor(work) {
+    if (!feedExcludeTags.length || !Array.isArray(work?.tags)) return '';
+    const blocked = excludedTagSet();
+    return work.tags.find(tag => blocked.has(normalizeExcludeTag(tag))) || '';
+  }
+
+  function syncExcludeTagUi() {
+    if (!root) return;
+    const input = root.querySelector('.pss-feed-exclude-input');
+    const summary = root.querySelector('.pss-feed-exclude-summary');
+    if (input && document.activeElement !== input) input.value = feedExcludeTags.join(', ');
+    if (summary) summary.textContent = feedExcludeTags.length
+      ? `🚫 除外タグ ${feedExcludeTags.length}件`
+      : '🚫 除外タグなし';
+  }
+
+  function applyExcludeTagInput() {
+    if (!root) return;
+    const input = root.querySelector('.pss-feed-exclude-input');
+    if (!input) return;
+    saveExcludeTags(parseExcludeTags(input.value));
+    syncExcludeTagUi();
+    feedVisibleCount = FEED_STEP;
+    renderFeed();
   }
 
   function kindLabel(kind) {
@@ -1292,13 +1360,17 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     return added;
   }
 
-  function sortedWorks() {
+  function allSortedWorks() {
     return [...feedWorks.values()].sort((a,b) => {
       const ad = Date.parse(a.createDate || 0) || 0;
       const bd = Date.parse(b.createDate || 0) || 0;
       if (bd !== ad) return bd - ad;
       return Number(b.id) - Number(a.id);
     });
+  }
+
+  function sortedWorks() {
+    return allSortedWorks().filter(work => !excludedByTag(work));
   }
 
   async function mapLimit(items, limit, worker) {
@@ -1333,10 +1405,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const ok = feedStates.filter(s => s.ctx && !s.error).length;
     const bad = feedStates.filter(s => s.error).length;
     const total = feedStates.length;
-    const works = feedWorks.size;
+    const allWorks = feedWorks.size;
+    const visibleWorks = sortedWorks().length;
+    const excluded = Math.max(0, allWorks - visibleWorks);
     return feedLoading
-      ? `保存検索 ${total}件を更新中… 現在 ${works.toLocaleString('ja-JP')}作品`
-      : `保存検索 ${ok}/${total}件取得 ／ ${works.toLocaleString('ja-JP')}作品${bad ? ` ／ 失敗${bad}件` : ''}`;
+      ? `保存検索 ${total}件を更新中… 現在 ${visibleWorks.toLocaleString('ja-JP')}作品${excluded ? `（除外 ${excluded.toLocaleString('ja-JP')}）` : ''}`
+      : `保存検索 ${ok}/${total}件取得 ／ 表示 ${visibleWorks.toLocaleString('ja-JP')}作品${excluded ? ` ／ 除外 ${excluded.toLocaleString('ja-JP')}作品` : ''}${bad ? ` ／ 失敗${bad}件` : ''}`;
   }
 
   function formatDate(value) {
@@ -1466,7 +1540,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
         work.userName = body?.userName || work.userName;
         work.userId = String(body?.userId || work.userId || '');
         work.detailLoaded = true;
-        updateFeedCard(work);
+        if (excludedByTag(work)) renderFeed();
+        else updateFeedCard(work);
       }).catch(e => {
         if (e?.name !== 'AbortError') {
           work.detailLoaded = true;
@@ -1501,6 +1576,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
   function renderFeed() {
     if (!root) return;
+    syncExcludeTagUi();
     const status = root.querySelector('.pss-feed-status');
     if (status) status.textContent = feedStatusText();
 
@@ -1721,6 +1797,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       #${ROOT_ID} .pss-feed-head{position:sticky;top:0;z-index:3;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#f4f6f8;padding:0 0 12px}
       #${ROOT_ID} .pss-feed-head h2{font-size:18px;margin:0 8px 0 0}
       #${ROOT_ID} .pss-feed-status{flex:1 1 100%;font-size:12px;color:#66717e}
+      #${ROOT_ID} .pss-feed-filter{flex:1 1 100%;background:#fff;border:1px solid #dde2e8;border-radius:10px;padding:8px 10px}
+      #${ROOT_ID} .pss-feed-filter summary{cursor:pointer;font-weight:700;color:#4b5663}
+      #${ROOT_ID} .pss-feed-filter-row{display:flex;gap:7px;align-items:stretch;margin-top:8px}
+      #${ROOT_ID} .pss-feed-exclude-input{flex:1;min-width:0;border:1px solid #cbd2da;border-radius:8px;padding:9px 10px;font:13px/1.4 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif;color:#202124;background:#fff}
+      #${ROOT_ID} .pss-feed-exclude-apply{white-space:nowrap;font-weight:700}
+      #${ROOT_ID} .pss-feed-filter-note{margin:6px 0 0;font-size:11px;color:#7a8490}
       #${ROOT_ID} .pss-feed-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
       #${ROOT_ID} .pss-feed-card{display:grid;grid-template-columns:128px minmax(0,1fr);background:#fff;border:1px solid #dde2e8;border-radius:12px;overflow:hidden;min-width:0}
       #${ROOT_ID} .pss-feed-thumb{display:block;background:#eef1f4;min-height:128px}
@@ -1768,6 +1850,14 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
           <h2>🆕 保存検索の新着</h2>
           <button type="button" class="pss-feed-refresh">更新</button>
           <div class="pss-feed-status"></div>
+          <details class="pss-feed-filter">
+            <summary class="pss-feed-exclude-summary">🚫 除外タグなし</summary>
+            <div class="pss-feed-filter-row">
+              <input type="text" class="pss-feed-exclude-input" placeholder="例：女体化, R-18, パロディ">
+              <button type="button" class="pss-feed-exclude-apply">適用</button>
+            </div>
+            <p class="pss-feed-filter-note">カンマまたは改行区切り。作品タグと完全一致した場合に除外します。</p>
+          </details>
         </div>
         <div class="pss-feed-grid"></div>
         <div class="pss-feed-more">
@@ -1781,6 +1871,13 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     root.querySelector('.pss-newest-open').addEventListener('click', openFeed);
     root.querySelector('.pss-feed-back').addEventListener('click', closeFeed);
     root.querySelector('.pss-feed-refresh').addEventListener('click', () => void refreshFeed());
+    root.querySelector('.pss-feed-exclude-apply').addEventListener('click', applyExcludeTagInput);
+    root.querySelector('.pss-feed-exclude-input').addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        applyExcludeTagInput();
+      }
+    });
     root.querySelector('.pss-feed-show-more').addEventListener('click', () => {
       feedVisibleCount += FEED_STEP;
       renderFeed();
@@ -1788,6 +1885,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     root.querySelector('.pss-feed-load-older').addEventListener('click', () => void loadOlderFeed());
 
     document.body.append(root);
+    syncExcludeTagUi();
     render();
   }
 
