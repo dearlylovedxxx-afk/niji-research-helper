@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.85
+// @version      1.0.86
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.85';
+  const VERSION = '1.0.86';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -3502,6 +3502,8 @@
   }
 
   // ---------- POV search ----------
+  let povSearchRunToken = 0;
+
   async function fetchCandidates(source) {
     const ss = startOf(source), se = endOf(source);
     if (!ss || !se || Number.isNaN(+ss) || Number.isNaN(+se))
@@ -3509,11 +3511,9 @@
     const h = Number(state.settings.searchWindowHours || 24);
     const searches = [
       {org:'Nijisanji',from:new Date(+ss-h*3600000),to:new Date(+se+h*3600000),max:20},
-      // A separate live Holodex request, never requiring the archive DB.
       {topic:String(source.topic_id || '').trim(),from:new Date(+ss-3600000),to:new Date(+se+3600000),max:10},
     ];
     const found = new Map();
-
     for (const query of searches) {
       try {
         for (let offset=0, pages=0; pages<query.max; pages++,offset+=50) {
@@ -3528,79 +3528,85 @@
           if (arr.length<50) break;
         }
       } catch (e) {
-        console.warn('[NRH POV first-pass search]', query.org || query.topic || 'query', String(e?.message || e));
+        console.warn('[NRH POV baseline]', query.org || query.topic || 'query', String(e?.message || e));
       }
     }
+    return [...found.values()];
+  }
 
-    // First-pass gap filler:
-    // Holodex org/topic metadata can be missing for exactly one participant in
-    // an otherwise complete collab. Explicit participant links/mentions from
-    // the source archive are stronger evidence, so query those channels
-    // directly before rendering the initial "current position -> other POVs".
+  async function fetchPovExplicitGapCandidates(source, baseline = []) {
+    const ss = startOf(source), se = endOf(source);
+    if (!ss || !se) return [];
+    const h = Number(state.settings.searchWindowHours || 24);
     const clues = povDescriptionClues(source);
-    const explicitChannelIds = new Set(clues.channelIds || []);
+    const sourceChannel = channelId(source);
+    const known = new Set([source.id, ...baseline.map(v => v?.id).filter(Boolean)]);
+    const channelIds = new Set(clues.channelIds || []);
+    const found = new Map();
 
-    // If the description only contains @handles, resolve them when this device
-    // already has a YouTube Data API key. This is optional and never blocks the
-    // normal Holodex-only path.
-    if (Array.isArray(clues.handles) && clues.handles.length) {
-      try {
-        const ytKey = String(await gmGet(KEY_YT_API, '') || '').trim();
-        if (ytKey) {
-          for (const handle of clues.handles.slice(0, 8)) {
-            try {
-              const data = await youtubePriorityDataApi(
-                'channels?' + new URLSearchParams({part:'id', forHandle:'@' + handle}),
-                ytKey
-              );
-              const id = String(data.items?.[0]?.id || '');
-              if (/^UC[A-Za-z0-9_-]{22}$/.test(id) && id !== channelId(source)) explicitChannelIds.add(id);
-            } catch (e) {
-              console.debug('[NRH POV handle first-pass]', handle, String(e?.message || e));
-            }
+    // Resolve @handles only when a YouTube API key already exists.
+    try {
+      const ytKey = String(await gmGet(KEY_YT_API, '') || '').trim();
+      if (ytKey && Array.isArray(clues.handles) && clues.handles.length) {
+        const resolved = await Promise.allSettled(clues.handles.slice(0,8).map(async handle => {
+          const data = await youtubePriorityDataApi(
+            'channels?' + new URLSearchParams({part:'id',forHandle:'@' + handle}),
+            ytKey
+          );
+          return String(data.items?.[0]?.id || '');
+        }));
+        for (const row of resolved) {
+          const id = row.status === 'fulfilled' ? row.value : '';
+          if (/^UC[A-Za-z0-9_-]{22}$/.test(id) && id !== sourceChannel) channelIds.add(id);
+        }
+      }
+    } catch (e) {
+      console.debug('[NRH POV gap handles]', String(e?.message || e));
+    }
+
+    const jobs = [];
+
+    for (const id of (clues.videoIds || []).slice(0,12)) {
+      if (!id || known.has(id)) continue;
+      jobs.push((async()=>{
+        try {
+          const v = await apiGet('/videos/' + encodeURIComponent(id) + '?lang=ja');
+          if (v?.id) {
+            v._npfExplicitParticipant = true;
+            v._npfExplicitReason = '概要欄の直接動画';
+            found.set(v.id,v);
           }
+        } catch (e) {
+          console.debug('[NRH POV gap direct video]', id, String(e?.message || e));
         }
-      } catch (e) {
-        console.debug('[NRH POV handle first-pass init]', String(e?.message || e));
-      }
+      })());
     }
 
-    // Direct video links are the strongest possible clue.
-    for (const id of (clues.videoIds || []).slice(0, 12)) {
-      if (!id || id === source.id || found.has(id)) continue;
-      try {
-        const v = await apiGet('/videos/' + encodeURIComponent(id) + '?lang=ja');
-        if (v?.id) found.set(v.id, v);
-      } catch (e) {
-        console.debug('[NRH POV direct video first-pass]', id, String(e?.message || e));
-      }
-    }
-
-    // Query each explicitly linked participant channel in the same broad time
-    // window. This bypasses missing/incorrect org and topic classification.
-    for (const ch of [...explicitChannelIds].slice(0, 10)) {
-      if (!ch || ch === channelId(source)) continue;
-      try {
-        const q = new URLSearchParams({
-          channel_id: ch,
-          type:'stream',
-          status:'past',
-          include:'live_info,mentions',
-          sort:'available_at',
-          order:'asc',
-          limit:'50',
-          from:new Date(+ss-h*3600000).toISOString(),
-          to:new Date(+se+h*3600000).toISOString()
-        });
-        const arr = await apiGet('/videos?' + q.toString());
-        if (Array.isArray(arr)) {
-          for (const v of arr) if (v?.id) found.set(v.id, v);
+    for (const ch of [...channelIds].slice(0,10)) {
+      if (!ch || ch === sourceChannel) continue;
+      jobs.push((async()=>{
+        try {
+          const q = new URLSearchParams({
+            channel_id:ch,type:'stream',status:'past',include:'live_info,mentions',
+            sort:'available_at',order:'asc',limit:'50',
+            from:new Date(+ss-h*3600000).toISOString(),
+            to:new Date(+se+h*3600000).toISOString()
+          });
+          const arr = await apiGet('/videos?' + q.toString());
+          if (!Array.isArray(arr)) return;
+          for (const v of arr) {
+            if (!v?.id || known.has(v.id)) continue;
+            v._npfExplicitParticipant = true;
+            v._npfExplicitReason = '概要欄の参加者チャンネル';
+            found.set(v.id,v);
+          }
+        } catch (e) {
+          console.debug('[NRH POV gap channel]', ch, String(e?.message || e));
         }
-      } catch (e) {
-        console.warn('[NRH POV explicit channel first-pass]', ch, String(e?.message || e));
-      }
+      })());
     }
 
+    await Promise.allSettled(jobs);
     return [...found.values()];
   }
 
@@ -3643,11 +3649,14 @@
           ? Math.max(0, (targetMoment - cs) / 1000)
           : Math.max(0, (overlapStart - cs) / 1000);
 
+        const explicitParticipant = !!v._npfExplicitParticipant;
         return {
           v, cs, ce, overlapStart, overlapEnd, overlap, overlapRatio, sim, event, favorite, score,
-          related: relation.related,
-          sameGame: relation.sameGame,
-          reasons: relation.reasons,
+          related: relation.related || explicitParticipant,
+          sameGame: relation.sameGame || explicitParticipant,
+          reasons: explicitParticipant
+            ? [...new Set([...relation.reasons, v._npfExplicitReason || '概要欄の参加者'])]
+            : relation.reasons,
           sameTopic: relation.sameTopic,
           directMention: relation.directMention,
           candidateStartOffset: candidateSyncOffset,
@@ -4125,6 +4134,7 @@
 
   async function showOtherPOVs(videoId) {
     if (!(await ensureApiKey())) return;
+    const runToken = ++povSearchRunToken;
 
     const rawSync = state.syncPoints?.[videoId];
     const syncOffset = Number.isFinite(Number(rawSync)) ? Number(rawSync) : null;
@@ -4194,9 +4204,21 @@
       });
 
       const candidates = await fetchCandidates(source);
-      const matches = buildMatches(source, candidates, syncOffset);
+      if (runToken !== povSearchRunToken) return;
+      let matches = buildMatches(source, candidates, syncOffset);
       renderMatches(source, matches, syncOffset);
       attachPovSupplement(source, matches, syncOffset, false, candidates);
+
+      // Do not block the first result screen on optional participant-link
+      // recovery. Fill missing explicit participants in the background.
+      void fetchPovExplicitGapCandidates(source, candidates).then(extra => {
+        if (runToken !== povSearchRunToken || !extra.length) return;
+        const mergedMap = new Map(candidates.map(v => [v.id,v]));
+        for (const v of extra) if (v?.id) mergedMap.set(v.id,v);
+        const merged = [...mergedMap.values()];
+        matches = buildMatches(source, merged, syncOffset);
+        renderMatches(source, matches, syncOffset);
+      }).catch(e => console.debug('[NRH POV gap background]', String(e?.message || e)));
     } catch (err) {
       console.error('[NPF]', err);
       $('.npf-body', state.sheet).innerHTML = `
