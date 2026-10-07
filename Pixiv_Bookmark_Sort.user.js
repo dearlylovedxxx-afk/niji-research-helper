@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.23
+// @version      0.6.24
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1239,22 +1239,31 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
-// ---- Pixiv home content shield (v0.6.23) ----
+// ---- Pixiv home content shield (v0.6.24) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivHomeContentShieldV0623) return;
-  window.__pixivHomeContentShieldV0623 = true;
+  if (window.__pixivHomeContentShieldV0624) return;
+  window.__pixivHomeContentShieldV0624 = true;
 
   const KEY = 'pixiv-hide-home-recommendations-v1';
   const ROOT_ID = 'pixiv-home-display-settings-v1';
-  const CURTAIN_ID = 'pixiv-home-content-curtain-v0623';
-  const LEGACY_HIDDEN_ATTR = 'data-pixiv-home-content-hidden';
-  const LEGACY_HTML_ATTR = 'data-pixiv-home-clean';
-  const CURTAIN_Z = 2147482000;
+  const STYLE_ID = 'pixiv-home-content-shield-style-v0624';
+  const KEEP_ATTR = 'data-pixiv-home-keep-v0624';
+  const ACTIVE_ATTR = 'data-pixiv-home-hide-v0624';
   let enabled = true;
   let root = null;
   let scanTimer = null;
+
+  const TOOL_SELECTORS = [
+    '#' + ROOT_ID,
+    '#pixiv-tools-unified-bar',
+    '#pixiv-tools-unified-launch',
+    '#pixiv-tools-unified-placeholder',
+    '#pixiv-bookmark-sort-cross-page-v05',
+    '#pixiv-saved-searches-v1',
+    '#pnte-root'
+  ].join(',');
 
   function load() {
     try {
@@ -1272,117 +1281,137 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     return p === '/' || /^\/[a-z]{2}(?:-[a-z]{2})?$/i.test(p);
   }
 
-  function clearLegacyHidden() {
-    document.documentElement.removeAttribute(LEGACY_HTML_ATTR);
-    document.querySelectorAll('[' + LEGACY_HIDDEN_ATTR + '="1"]').forEach(el => {
-      el.removeAttribute(LEGACY_HIDDEN_ATTR);
-      el.style.removeProperty('display');
-      el.style.removeProperty('visibility');
+  function ensureStyle() {
+    let style = document.getElementById(STYLE_ID);
+    if (style) return style;
+    style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+      html[${ACTIVE_ATTR}="1"] body * {
+        visibility:hidden!important;
+      }
+      html[${ACTIVE_ATTR}="1"] [${KEEP_ATTR}="1"],
+      html[${ACTIVE_ATTR}="1"] [${KEEP_ATTR}="1"] * {
+        visibility:visible!important;
+      }
+      html[${ACTIVE_ATTR}="1"] ${TOOL_SELECTORS},
+      html[${ACTIVE_ATTR}="1"] ${TOOL_SELECTORS} * {
+        visibility:visible!important;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+    return style;
+  }
+
+  function clearKeepMarks() {
+    document.querySelectorAll('[' + KEEP_ATTR + '="1"]').forEach(el => {
+      el.removeAttribute(KEEP_ATTR);
     });
   }
 
-  function visibleRect(el) {
+  function isToolNode(el) {
+    return !!el?.closest?.(TOOL_SELECTORS);
+  }
+
+  function rectOf(el) {
     if (!el?.getBoundingClientRect) return null;
     const r = el.getBoundingClientRect();
-    if (!(r.width > 0 && r.height > 0 && r.bottom > 0)) return null;
+    if (!(r.width > 0 && r.height > 0)) return null;
     const s = getComputedStyle(el);
-    if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity || 1) === 0) return null;
+    if (s.display === 'none' || s.visibility === 'hidden') return null;
     return r;
   }
 
-  function headerBottom() {
-    const viewportW = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
-    const viewportH = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
-    const topLimit = Math.min(280, viewportH * 0.42);
-    let bottom = 0;
-
-    // Prefer semantic top navigation when Pixiv exposes it.
-    for (const el of document.querySelectorAll('header,nav,[role="navigation"],[role="tablist"]')) {
-      if (el.id === CURTAIN_ID || el.closest?.('#' + ROOT_ID)) continue;
-      const r = visibleRect(el);
-      if (!r) continue;
-      if (r.top > topLimit || r.height > 260 || r.width < viewportW * 0.45) continue;
-      bottom = Math.max(bottom, r.bottom);
-    }
-
-    // Mobile Pixiv sometimes renders the Home/Illustration/Manga/Novel tabs as
-    // ordinary links instead of a semantic <nav>. Their text is stable enough
-    // to use only for locating the bottom edge of the site chrome.
-    const tabText = /^(?:ホーム|イラスト|マンガ|漫画|小説|みつける|Home|Illustrations?|Manga|Novels?|Discover)$/i;
-    for (const el of document.querySelectorAll('a,button,[role="tab"]')) {
-      const text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!tabText.test(text)) continue;
-      const r = visibleRect(el);
-      if (!r || r.top > topLimit || r.height > 100) continue;
-      bottom = Math.max(bottom, r.bottom);
-    }
-
-    // Fallback is deliberately conservative: keep Pixiv's top controls visible,
-    // but cover everything that could contain artwork/novel recommendations.
-    if (!(bottom > 0)) bottom = viewportW <= 700 ? 146 : 82;
-    return Math.max(0, Math.min(Math.ceil(bottom + 2), Math.floor(viewportH * 0.48)));
-  }
-
-  function ensureCurtain() {
-    let curtain = document.getElementById(CURTAIN_ID);
-    if (!curtain) {
-      curtain = document.createElement('div');
-      curtain.id = CURTAIN_ID;
-      curtain.setAttribute('aria-hidden', 'true');
-      curtain.style.cssText =
-        'display:none;position:fixed;left:0;right:0;bottom:0;background:#fff;' +
-        'pointer-events:auto;touch-action:auto;overscroll-behavior:contain;';
-      (document.body || document.documentElement).appendChild(curtain);
-    }
-    return curtain;
-  }
-
-  function showCurtain() {
-    const curtain = ensureCurtain();
-
-    // At the very top, keep Pixiv's own header/tab row visible.
-    // Once the page has been scrolled, that chrome has moved away, so cover
-    // from the viewport top as well. This prevents the feed leaking through
-    // the reserved header gap while scrolling.
-    const y = Math.max(
-      Number(window.scrollY || window.pageYOffset || 0),
-      Number(document.documentElement?.scrollTop || 0),
-      Number(document.body?.scrollTop || 0)
+  function containsWorkLink(el) {
+    return !!el?.querySelector?.(
+      'a[href*="/artworks/"],a[href*="/novel/show.php?id="]'
     );
-    const top = y > 8 ? 0 : headerBottom();
-
-    curtain.style.setProperty('top', top + 'px', 'important');
-    curtain.style.setProperty('z-index', String(CURTAIN_Z), 'important');
-    curtain.style.setProperty('display', 'block', 'important');
-    curtain.style.setProperty('visibility', 'visible', 'important');
-    curtain.style.setProperty('opacity', '1', 'important');
   }
 
-  function hideCurtain() {
-    const curtain = document.getElementById(CURTAIN_ID);
-    if (!curtain) return;
-    curtain.style.setProperty('display', 'none', 'important');
+  function markKeep(el) {
+    if (!el || el === document.body || el === document.documentElement) return;
+    if (containsWorkLink(el)) return;
+    el.setAttribute(KEEP_ATTR, '1');
+  }
+
+  function markTopChrome() {
+    clearKeepMarks();
+
+    // Always keep this userscript's own controls.
+    document.querySelectorAll(TOOL_SELECTORS).forEach(markKeep);
+
+    const vh = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
+    const vw = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
+    const topBand = Math.min(245, vh * 0.34);
+
+    // Semantic Pixiv chrome, when available.
+    for (const el of document.querySelectorAll('header,nav,[role="navigation"],[role="tablist"]')) {
+      if (isToolNode(el) || containsWorkLink(el)) continue;
+      const r = rectOf(el);
+      if (!r) continue;
+      if (r.top > topBand || r.bottom < -4) continue;
+      if (r.height > 280 || r.width < Math.min(120, vw * 0.25)) continue;
+      markKeep(el);
+    }
+
+    // Mobile Pixiv frequently renders the top chrome as ordinary links/buttons.
+    // Keep only small visible controls in the top band. Large containers and
+    // anything containing artwork/novel links are deliberately rejected.
+    const chromeText = /^(?:ホーム|イラスト|マンガ|漫画|小説|みつける|Home|Illustrations?|Manga|Novels?|Discover)$/i;
+    for (const el of document.querySelectorAll('a,button,[role="button"],[role="tab"],svg')) {
+      if (isToolNode(el)) continue;
+      const r = rectOf(el);
+      if (!r) continue;
+      if (r.top > topBand || r.bottom < -4) continue;
+      if (r.width > vw * 0.75 || r.height > 110) continue;
+      if (containsWorkLink(el)) continue;
+
+      const text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      const href = el.closest?.('a')?.getAttribute?.('href') || el.getAttribute?.('href') || '';
+      const looksLikePixivChrome =
+        chromeText.test(text) ||
+        /(?:pixiv)/i.test(text) ||
+        /^\/(?:$|en\/?$|discovery|request|bookmark|users|tags\/)/i.test(String(href)) ||
+        !!el.closest?.('header,nav,[role="navigation"],[role="tablist"]');
+
+      if (looksLikePixivChrome) markKeep(el);
+    }
+
+    // The logo and icon buttons may be wrapped in non-semantic containers.
+    // Keep compact top-band elements that have no work links and contain an
+    // interactive control, without ever whitelisting a large feed container.
+    for (const el of document.querySelectorAll('div,span')) {
+      if (isToolNode(el) || containsWorkLink(el)) continue;
+      const r = rectOf(el);
+      if (!r) continue;
+      if (r.top > topBand || r.bottom < -4) continue;
+      if (r.width > Math.min(vw * 0.55, 360) || r.height > 120) continue;
+      if (!el.querySelector?.('a,button,input,[role="button"],[role="tab"],svg')) continue;
+      markKeep(el);
+    }
   }
 
   function apply() {
     clearTimeout(scanTimer);
     scanTimer = null;
-    clearLegacyHidden();
+    ensureStyle();
 
     if (!enabled || !isHome()) {
-      hideCurtain();
+      document.documentElement.removeAttribute(ACTIVE_ATTR);
+      clearKeepMarks();
       return;
     }
 
-    // Do not depend on Pixiv's recommendation/card DOM. A fixed opaque curtain
-    // covers the entire content region below the site's own top navigation.
-    // Pixiv tools use a higher z-index and remain operable above this layer.
-    showCurtain();
+    // Hide the Pixiv home DOM itself rather than covering it with an overlay.
+    // visibility can be selectively restored on whitelisted descendants, so the
+    // site chrome and our tools remain visible while every feed card stays hidden.
+    markTopChrome();
+    document.documentElement.setAttribute(ACTIVE_ATTR, '1');
   }
 
   function schedule() {
     clearTimeout(scanTimer);
-    scanTimer = setTimeout(apply, 50);
+    scanTimer = setTimeout(apply, 40);
   }
 
   function build() {
@@ -1405,7 +1434,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     span.textContent = 'トップの作品コンテンツを完全に非表示';
     label.append(input, span);
     const note = document.createElement('p');
-    note.textContent = 'Pixivトップでは、上部のPixivナビゲーションより下を白いレイヤーで覆い、イラスト・漫画・小説・コレクション・おすすめ等を表示しません。検索結果・タグ検索・作者ページ・作品ページ・ブックマークには影響しません。';
+    note.textContent = 'Pixivトップでは作品フィード自体を非表示にし、上部ナビゲーションとPixivツールだけを表示します。検索結果・タグ検索・作者ページ・作品ページ・ブックマークには影響しません。';
     note.style.cssText = 'margin:10px 0 0;color:#66717e;font-size:12px;';
     input.addEventListener('change', () => {
       enabled = !!input.checked;
@@ -1421,6 +1450,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   function open() {
     build();
     root.style.setProperty('display', 'block', 'important');
+    root.setAttribute(KEEP_ATTR, '1');
     const input = root.querySelector('input[type="checkbox"]');
     if (input) input.checked = enabled;
   }
@@ -1430,7 +1460,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
 
   load();
-  clearLegacyHidden();
+  ensureStyle();
   apply();
 
   const observer = new MutationObserver(schedule);
@@ -1439,7 +1469,6 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   window.addEventListener('hashchange', schedule, true);
   window.addEventListener('resize', schedule, true);
   window.addEventListener('orientationchange', schedule, true);
-  window.addEventListener('scroll', schedule, {capture:true, passive:true});
   document.addEventListener('visibilitychange', () => { if (!document.hidden) schedule(); });
 
   window.__pixivHomeDisplayUi = {open, close, apply, isEnabled:() => enabled};
