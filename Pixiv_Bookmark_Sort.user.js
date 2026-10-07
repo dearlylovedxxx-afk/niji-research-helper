@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.24
+// @version      0.6.25
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1239,18 +1239,18 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
-// ---- Pixiv home content shield (v0.6.24) ----
+// ---- Pixiv home content shield (v0.6.25) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivHomeContentShieldV0624) return;
-  window.__pixivHomeContentShieldV0624 = true;
+  if (window.__pixivHomeContentShieldV0625) return;
+  window.__pixivHomeContentShieldV0625 = true;
 
   const KEY = 'pixiv-hide-home-recommendations-v1';
   const ROOT_ID = 'pixiv-home-display-settings-v1';
-  const STYLE_ID = 'pixiv-home-content-shield-style-v0624';
-  const KEEP_ATTR = 'data-pixiv-home-keep-v0624';
-  const ACTIVE_ATTR = 'data-pixiv-home-hide-v0624';
+  const STYLE_ID = 'pixiv-home-content-shield-style-v0625';
+  const KEEP_ATTR = 'data-pixiv-home-keep-v0625';
+  const ACTIVE_ATTR = 'data-pixiv-home-hide-v0625';
   let enabled = true;
   let root = null;
   let scanTimer = null;
@@ -1261,8 +1261,9 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     '#pixiv-tools-unified-launch',
     '#pixiv-tools-unified-placeholder',
     '#pixiv-bookmark-sort-cross-page-v05',
-    '#pixiv-saved-searches-v1',
-    '#pnte-root'
+    '#pixiv-saved-searches-root',
+    '#pnte-root',
+    '#ncb-backup-root'
   ].join(',');
 
   function load() {
