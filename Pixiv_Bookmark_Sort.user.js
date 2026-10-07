@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.27
+// @version      0.6.28
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1829,23 +1829,23 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
-// ---- Pixiv home content shield (v0.6.25) ----
+// ---- Pixiv home content shield (v0.6.26) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivHomeContentShieldV0625) return;
-  window.__pixivHomeContentShieldV0625 = true;
+  if (window.__pixivHomeContentShieldV0626) return;
+  window.__pixivHomeContentShieldV0626 = true;
 
   const KEY = 'pixiv-hide-home-recommendations-v1';
   const ROOT_ID = 'pixiv-home-display-settings-v1';
-  const STYLE_ID = 'pixiv-home-content-shield-style-v0625';
-  const KEEP_ATTR = 'data-pixiv-home-keep-v0625';
-  const ACTIVE_ATTR = 'data-pixiv-home-hide-v0625';
+  const STYLE_ID = 'pixiv-home-content-shield-style-v0626';
+  const KEEP_ATTR = 'data-pixiv-home-keep-v0626';
+  const ACTIVE_ATTR = 'data-pixiv-home-hide-v0626';
   let enabled = true;
   let root = null;
   let scanTimer = null;
 
-  const TOOL_SELECTORS = [
+  const TOOL_SELECTOR_LIST = [
     '#' + ROOT_ID,
     '#pixiv-tools-unified-bar',
     '#pixiv-tools-unified-launch',
@@ -1854,7 +1854,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     '#pixiv-saved-searches-root',
     '#pnte-root',
     '#ncb-backup-root'
-  ].join(',');
+  ];
+  const TOOL_SELECTORS = TOOL_SELECTOR_LIST.join(',');
 
   function load() {
     try {
@@ -1877,6 +1878,15 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     if (style) return style;
     style = document.createElement('style');
     style.id = STYLE_ID;
+
+    // Build every tool selector separately. Appending " *" to one comma-joined
+    // selector string only affects the final selector, which caused tool roots
+    // to stay visible while their children disappeared after a MutationObserver pass.
+    const toolVisibleSelectors = TOOL_SELECTOR_LIST.flatMap(sel => [
+      `html[${ACTIVE_ATTR}="1"] ${sel}`,
+      `html[${ACTIVE_ATTR}="1"] ${sel} *`
+    ]).join(',\n');
+
     style.textContent = `
       html[${ACTIVE_ATTR}="1"] body * {
         visibility:hidden!important;
@@ -1885,8 +1895,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       html[${ACTIVE_ATTR}="1"] [${KEEP_ATTR}="1"] * {
         visibility:visible!important;
       }
-      html[${ACTIVE_ATTR}="1"] ${TOOL_SELECTORS},
-      html[${ACTIVE_ATTR}="1"] ${TOOL_SELECTORS} * {
+      ${toolVisibleSelectors} {
         visibility:visible!important;
       }
     `;
