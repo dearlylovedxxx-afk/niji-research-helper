@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.91
+// @version      1.0.92
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.91';
+  const VERSION = '1.0.92';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2692,19 +2692,136 @@
     return !!v?._npfFavoriteTarget || isFavorite(v) || isLiverFavoriteVideo(v);
   }
 
-  async function resolvePovFavoriteChannelIds(sourceChannel = '') {
+  const youtubePovDiagnostics = {
+    sourceId: '',
+    syncOffset: null,
+    rows: [],
+    favoriteSources: [],
+  };
+
+  function resetYoutubePovDiagnostics(source, syncOffset) {
+    youtubePovDiagnostics.sourceId = String(source?.id || '');
+    youtubePovDiagnostics.syncOffset = Number.isFinite(Number(syncOffset)) ? Number(syncOffset) : null;
+    youtubePovDiagnostics.rows = [];
+    youtubePovDiagnostics.favoriteSources = [
+      ...(state.favorites || []).map(x => ({kind:'チャンネルお気に入り',name:String(x?.name || ''),id:String(x?.id || '')})),
+      ...(state.liverFavorites || []).map(x => ({kind:'ライバーお気に入り',name:String(x?.name || ''),id:String(x?.value || '')})),
+    ];
+  }
+
+  function pushYoutubePovDiagnostic(row) {
+    if (!row || youtubePovDiagnostics.sourceId !== currentYoutubeVideoId()) return;
+    youtubePovDiagnostics.rows.push(row);
+    if (youtubePovDiagnostics.rows.length > 100) youtubePovDiagnostics.rows.splice(0, youtubePovDiagnostics.rows.length - 100);
+    renderYoutubePovDiagnostics();
+  }
+
+  function youtubePovDiagnosticText() {
+    const lines = [
+      'Niji Research Helper POV診断 v' + VERSION,
+      'source=' + youtubePovDiagnostics.sourceId,
+      'sync=' + (youtubePovDiagnostics.syncOffset == null ? 'none' : formatClock(youtubePovDiagnostics.syncOffset)),
+      '',
+      '【お気に入り】',
+      ...(youtubePovDiagnostics.favoriteSources.length
+        ? youtubePovDiagnostics.favoriteSources.map(x => `${x.kind}: ${x.name || '(名前なし)'} / ${x.id || 'ID未解決'}`)
+        : ['なし']),
+      '',
+      '【検索診断】',
+      ...(youtubePovDiagnostics.rows.length
+        ? youtubePovDiagnostics.rows.map(row => [
+            row.name || row.channelId || '不明',
+            row.channelId ? 'ID=' + row.channelId : '',
+            row.queryStatus || '',
+            row.videoId ? 'video=' + row.videoId : '',
+            row.title ? 'title=' + row.title : '',
+            row.timeStatus || '',
+            row.gameStatus || '',
+            row.relatedStatus || '',
+            row.bucket || '',
+          ].filter(Boolean).join(' | '))
+        : ['まだ診断結果なし']),
+    ];
+    return lines.join('\n');
+  }
+
+  function renderYoutubePovDiagnostics() {
+    const area = $('#npf-yt-results');
+    if (!area || youtubePovDiagnostics.sourceId !== currentYoutubeVideoId()) return;
+    area.querySelector('.npf-yt-pov-diagnostics')?.remove();
+
+    const box = document.createElement('details');
+    box.className = 'npf-yt-pov-diagnostics';
+    box.style.cssText = 'margin-top:12px;padding:9px;border:1px dashed rgba(150,160,190,.45);border-radius:10px;font-size:11px;line-height:1.5;';
+
+    const summary = document.createElement('summary');
+    summary.textContent = '🔧 POV診断';
+    summary.style.cssText = 'cursor:pointer;font-weight:800;';
+    box.appendChild(summary);
+
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'npf-yt-btn';
+    copy.textContent = '📋 診断をコピー';
+    copy.style.cssText = 'margin:8px 0;';
+    copy.addEventListener('click', async e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const ok = await copyText(youtubePovDiagnosticText());
+      toast(ok ? 'POV診断をコピーしました' : 'POV診断のコピーに失敗しました');
+    });
+    box.appendChild(copy);
+
+    const fav = document.createElement('div');
+    fav.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;opacity:.88;';
+    fav.textContent = youtubePovDiagnostics.favoriteSources.length
+      ? youtubePovDiagnostics.favoriteSources.map(x => `${x.kind}: ${x.name || '(名前なし)'} / ${x.id || 'ID未解決'}`).join('\n')
+      : 'お気に入り登録なし';
+    box.appendChild(fav);
+
+    const rows = document.createElement('div');
+    rows.style.cssText = 'margin-top:8px;display:flex;flex-direction:column;gap:6px;';
+    for (const row of youtubePovDiagnostics.rows.slice(-30)) {
+      const div = document.createElement('div');
+      div.style.cssText = 'padding:6px 7px;border-radius:7px;background:rgba(127,127,127,.08);white-space:pre-wrap;overflow-wrap:anywhere;';
+      div.textContent = [
+        row.name || row.channelId || '不明',
+        row.channelId ? 'ID ' + row.channelId : '',
+        row.queryStatus || '',
+        row.videoId ? '動画 ' + row.videoId : '',
+        row.timeStatus || '',
+        row.gameStatus || '',
+        row.relatedStatus || '',
+        row.bucket || '',
+      ].filter(Boolean).join(' ｜ ');
+      rows.appendChild(div);
+    }
+    box.appendChild(rows);
+    area.appendChild(box);
+  }
+
+  async function resolvePovFavoriteChannelIds(sourceChannel = '', onResolved = null) {
     const ids = new Set();
     const unresolved = new Map();
+    const resolvedNames = new Map();
+
+    const addId = (id, name, via) => {
+      id = String(id || '');
+      if (!/^UC[A-Za-z0-9_-]{22}$/.test(id) || id === sourceChannel) return;
+      ids.add(id);
+      if (name) resolvedNames.set(id, String(name));
+      if (typeof onResolved === 'function') onResolved({id,name:String(name || ''),via});
+    };
 
     for (const fav of state.favorites || []) {
       const id = String(fav?.id || '');
-      if (/^UC[A-Za-z0-9_-]{22}$/.test(id) && id !== sourceChannel) ids.add(id);
+      if (/^UC[A-Za-z0-9_-]{22}$/.test(id)) addId(id, fav?.name, 'チャンネルお気に入り');
     }
 
     for (const fav of state.liverFavorites || []) {
       const rawValue = String(fav?.value || '');
       if (/^UC[A-Za-z0-9_-]{22}$/.test(rawValue) && rawValue !== sourceChannel) {
-        ids.add(rawValue);
+        addId(rawValue, display, 'ライバーお気に入り値');
         continue;
       }
       const display = collaboratorDisplayName(fav?.name || '');
@@ -2718,7 +2835,7 @@
       const key = normalizeCollaboratorName(collaboratorDisplayName(fav?.name || ''));
       const id = String(fav?.id || '');
       if (key && unresolved.has(key) && /^UC[A-Za-z0-9_-]{22}$/.test(id)) {
-        ids.add(id);
+        addId(id, unresolved.get(key), '既存お気に入りチャンネル');
         unresolved.delete(key);
       }
     }
@@ -2730,7 +2847,7 @@
           const cached = await nrhDbGetByIndex('channels', 'normalizedName', key);
           const id = String(cached?.id || '');
           if (/^UC[A-Za-z0-9_-]{22}$/.test(id)) {
-            if (id !== sourceChannel) ids.add(id);
+            addId(id, unresolved.get(key), 'ローカルDB');
             unresolved.delete(key);
           }
         } catch {}
@@ -2757,7 +2874,7 @@
             .filter(Boolean);
           const matched = keys.find(k => unresolved.has(k));
           if (!matched) continue;
-          if (id !== sourceChannel) ids.add(id);
+          addId(id, unresolved.get(matched), 'Holodex名簿');
           unresolved.delete(matched);
           try { void nrhDbSaveChannel(ch); } catch {}
         }
@@ -2765,7 +2882,14 @@
       }
     }
 
-    return [...ids];
+    for (const [, name] of unresolved) {
+      pushYoutubePovDiagnostic({
+        name,
+        queryStatus:'お気に入りID未解決',
+        relatedStatus:'チャンネル検索できず',
+      });
+    }
+    return [...ids].map(id => ({id,name:resolvedNames.get(id) || ''}));
   }
 
   // ---------- UI shell ----------
@@ -3749,14 +3873,21 @@
     const ss = startOf(source), se = endOf(source);
     if (!ss || !se) return [];
     const sourceChannel = channelId(source);
-    const favoriteIds = await resolvePovFavoriteChannelIds(sourceChannel);
-    if (!favoriteIds.length) return [];
+    const favoriteRows = await resolvePovFavoriteChannelIds(sourceChannel, row => {
+      pushYoutubePovDiagnostic({
+        name:row.name,
+        channelId:row.id,
+        queryStatus:'ID解決済み（' + row.via + '）',
+      });
+    });
+    if (!favoriteRows.length) return [];
 
     const found = new Map();
     const from = new Date(+ss - 2 * 3600000).toISOString();
     const to = new Date(+se + 2 * 3600000).toISOString();
 
-    const jobs = favoriteIds.map(async ch => {
+    const jobs = favoriteRows.map(async favRow => {
+      const ch = favRow.id;
       try {
         const q = new URLSearchParams({
           channel_id:ch,
@@ -3771,16 +3902,42 @@
         });
         const arr = await apiGet('/videos?' + q.toString());
         const batch = [];
+        pushYoutubePovDiagnostic({
+          name:favRow.name,
+          channelId:ch,
+          queryStatus:'Holodex時間帯検索 ' + (Array.isArray(arr) ? arr.length : 0) + '件',
+        });
         if (Array.isArray(arr)) {
           for (const v of arr) {
             if (!v?.id || v.id === source.id) continue;
             v._npfFavoriteTarget = true;
+            const cs = startOf(v), ce = endOf(v);
+            const targetMoment = syncOffset != null && Number.isFinite(Number(syncOffset))
+              ? new Date(+ss + Number(syncOffset) * 1000) : null;
+            const timeOk = !!(cs && ce && (!targetMoment || (targetMoment >= cs && targetMoment <= ce)));
+            const single = buildMatches(source, [v], syncOffset)[0] || null;
+            pushYoutubePovDiagnostic({
+              name:channelName(v) || favRow.name,
+              channelId:ch,
+              queryStatus:'Holodex候補取得',
+              videoId:v.id,
+              title:String(v.title || ''),
+              timeStatus:timeOk ? '時刻○' : '時刻×',
+              gameStatus:single?.sameGame ? '同ゲーム○' : '同ゲーム×',
+              relatedStatus:single?.related ? '関連○' : '関連×',
+              bucket:single ? (single.related ? '表示:関連候補' : (single.sameGame ? '表示:その他候補' : '表示対象外')) : 'buildMatchesで除外',
+            });
             found.set(v.id, v);
             batch.push(v);
           }
         }
         if (batch.length && typeof onBatch === 'function') onBatch(batch, ch);
       } catch (e) {
+        pushYoutubePovDiagnostic({
+          name:favRow.name,
+          channelId:ch,
+          queryStatus:'Holodex取得失敗: ' + String(e?.message || e).slice(0,90),
+        });
         console.debug('[NRH POV favorite channel]', ch, String(e?.message || e));
       }
     });
@@ -6527,6 +6684,7 @@
     try {
       const source = await apiGet(`/videos/${encodeURIComponent(id)}?lang=ja`);
       if (searchToken !== searchOtherPovsFromYoutube._runToken) return;
+      resetYoutubePovDiagnostics(source, sec);
 
       // Fast first paint: two focused first-page requests in parallel.
       const fastCandidates = await fetchYoutubePovFastCandidates(source, sec);
@@ -6692,6 +6850,7 @@
         area.appendChild(card);
       }
     }
+    renderYoutubePovDiagnostics();
     if (isMobileYoutubeUi()) styleMobileYoutubePanel($('#npf-yt-panel'));
   }
 
