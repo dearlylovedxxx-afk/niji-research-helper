@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.84
+// @version      1.0.85
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.84';
+  const VERSION = '1.0.85';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -3513,19 +3513,94 @@
       {topic:String(source.topic_id || '').trim(),from:new Date(+ss-3600000),to:new Date(+se+3600000),max:10},
     ];
     const found = new Map();
+
     for (const query of searches) {
-      for (let offset=0, pages=0; pages<query.max; pages++,offset+=50) {
-        const q = new URLSearchParams({type:'stream',status:'past',include:'live_info,mentions',
-          sort:'available_at',order:'asc',limit:'50',offset:String(offset),
-          from:query.from.toISOString(),to:query.to.toISOString()});
-        if (query.org) q.set('org',query.org);
-        if (query.topic) q.set('topic',query.topic);
-        const arr = await apiGet(`/videos?${q.toString()}`);
-        if (!Array.isArray(arr)) break;
-        for (const v of arr) if (v?.id) found.set(v.id,v);
-        if (arr.length<50) break;
+      try {
+        for (let offset=0, pages=0; pages<query.max; pages++,offset+=50) {
+          const q = new URLSearchParams({type:'stream',status:'past',include:'live_info,mentions',
+            sort:'available_at',order:'asc',limit:'50',offset:String(offset),
+            from:query.from.toISOString(),to:query.to.toISOString()});
+          if (query.org) q.set('org',query.org);
+          if (query.topic) q.set('topic',query.topic);
+          const arr = await apiGet(`/videos?${q.toString()}`);
+          if (!Array.isArray(arr)) break;
+          for (const v of arr) if (v?.id) found.set(v.id,v);
+          if (arr.length<50) break;
+        }
+      } catch (e) {
+        console.warn('[NRH POV first-pass search]', query.org || query.topic || 'query', String(e?.message || e));
       }
     }
+
+    // First-pass gap filler:
+    // Holodex org/topic metadata can be missing for exactly one participant in
+    // an otherwise complete collab. Explicit participant links/mentions from
+    // the source archive are stronger evidence, so query those channels
+    // directly before rendering the initial "current position -> other POVs".
+    const clues = povDescriptionClues(source);
+    const explicitChannelIds = new Set(clues.channelIds || []);
+
+    // If the description only contains @handles, resolve them when this device
+    // already has a YouTube Data API key. This is optional and never blocks the
+    // normal Holodex-only path.
+    if (Array.isArray(clues.handles) && clues.handles.length) {
+      try {
+        const ytKey = String(await gmGet(KEY_YT_API, '') || '').trim();
+        if (ytKey) {
+          for (const handle of clues.handles.slice(0, 8)) {
+            try {
+              const data = await youtubePriorityDataApi(
+                'channels?' + new URLSearchParams({part:'id', forHandle:'@' + handle}),
+                ytKey
+              );
+              const id = String(data.items?.[0]?.id || '');
+              if (/^UC[A-Za-z0-9_-]{22}$/.test(id) && id !== channelId(source)) explicitChannelIds.add(id);
+            } catch (e) {
+              console.debug('[NRH POV handle first-pass]', handle, String(e?.message || e));
+            }
+          }
+        }
+      } catch (e) {
+        console.debug('[NRH POV handle first-pass init]', String(e?.message || e));
+      }
+    }
+
+    // Direct video links are the strongest possible clue.
+    for (const id of (clues.videoIds || []).slice(0, 12)) {
+      if (!id || id === source.id || found.has(id)) continue;
+      try {
+        const v = await apiGet('/videos/' + encodeURIComponent(id) + '?lang=ja');
+        if (v?.id) found.set(v.id, v);
+      } catch (e) {
+        console.debug('[NRH POV direct video first-pass]', id, String(e?.message || e));
+      }
+    }
+
+    // Query each explicitly linked participant channel in the same broad time
+    // window. This bypasses missing/incorrect org and topic classification.
+    for (const ch of [...explicitChannelIds].slice(0, 10)) {
+      if (!ch || ch === channelId(source)) continue;
+      try {
+        const q = new URLSearchParams({
+          channel_id: ch,
+          type:'stream',
+          status:'past',
+          include:'live_info,mentions',
+          sort:'available_at',
+          order:'asc',
+          limit:'50',
+          from:new Date(+ss-h*3600000).toISOString(),
+          to:new Date(+se+h*3600000).toISOString()
+        });
+        const arr = await apiGet('/videos?' + q.toString());
+        if (Array.isArray(arr)) {
+          for (const v of arr) if (v?.id) found.set(v.id, v);
+        }
+      } catch (e) {
+        console.warn('[NRH POV explicit channel first-pass]', ch, String(e?.message || e));
+      }
+    }
+
     return [...found.values()];
   }
 
