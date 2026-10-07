@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.22
+// @version      0.6.23
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1239,16 +1239,16 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
-// ---- Pixiv home content shield (v0.6.22) ----
+// ---- Pixiv home content shield (v0.6.23) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivHomeContentShieldV0622) return;
-  window.__pixivHomeContentShieldV0622 = true;
+  if (window.__pixivHomeContentShieldV0623) return;
+  window.__pixivHomeContentShieldV0623 = true;
 
   const KEY = 'pixiv-hide-home-recommendations-v1';
   const ROOT_ID = 'pixiv-home-display-settings-v1';
-  const CURTAIN_ID = 'pixiv-home-content-curtain-v0622';
+  const CURTAIN_ID = 'pixiv-home-content-curtain-v0623';
   const LEGACY_HIDDEN_ATTR = 'data-pixiv-home-content-hidden';
   const LEGACY_HTML_ATTR = 'data-pixiv-home-clean';
   const CURTAIN_Z = 2147482000;
@@ -1339,7 +1339,19 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
   function showCurtain() {
     const curtain = ensureCurtain();
-    curtain.style.setProperty('top', headerBottom() + 'px', 'important');
+
+    // At the very top, keep Pixiv's own header/tab row visible.
+    // Once the page has been scrolled, that chrome has moved away, so cover
+    // from the viewport top as well. This prevents the feed leaking through
+    // the reserved header gap while scrolling.
+    const y = Math.max(
+      Number(window.scrollY || window.pageYOffset || 0),
+      Number(document.documentElement?.scrollTop || 0),
+      Number(document.body?.scrollTop || 0)
+    );
+    const top = y > 8 ? 0 : headerBottom();
+
+    curtain.style.setProperty('top', top + 'px', 'important');
     curtain.style.setProperty('z-index', String(CURTAIN_Z), 'important');
     curtain.style.setProperty('display', 'block', 'important');
     curtain.style.setProperty('visibility', 'visible', 'important');
@@ -1427,6 +1439,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   window.addEventListener('hashchange', schedule, true);
   window.addEventListener('resize', schedule, true);
   window.addEventListener('orientationchange', schedule, true);
+  window.addEventListener('scroll', schedule, {capture:true, passive:true});
   document.addEventListener('visibilitychange', () => { if (!document.hidden) schedule(); });
 
   window.__pixivHomeDisplayUi = {open, close, apply, isEnabled:() => enabled};
