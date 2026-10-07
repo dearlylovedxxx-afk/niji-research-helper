@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.93
+// @version      1.0.94
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.93';
+  const VERSION = '1.0.94';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -3869,6 +3869,141 @@
   }
 
 
+  async function fetchYoutubeFavoritePovFallback(source, favRow, syncOffset = null) {
+    const key = String(await gmGet(KEY_YT_API, '') || '').trim();
+    if (!key) {
+      pushYoutubePovDiagnostic({
+        name:favRow?.name || '',
+        channelId:favRow?.id || '',
+        queryStatus:'YouTube補完なし：YouTube APIキー未設定',
+      });
+      return [];
+    }
+
+    const ss = startOf(source), se = endOf(source);
+    if (!ss || !se) return [];
+    const ch = String(favRow?.id || '');
+    if (!/^UC[A-Za-z0-9_-]{22}$/.test(ch)) return [];
+
+    pushYoutubePovDiagnostic({
+      name:favRow?.name || '',
+      channelId:ch,
+      queryStatus:'YouTube補完検索開始',
+    });
+
+    const ids = new Set();
+    const runSearch = async params => {
+      const data = await youtubePriorityDataApi(
+        'search?' + new URLSearchParams({
+          part:'snippet',
+          type:'video',
+          channelId:ch,
+          eventType:'completed',
+          maxResults:'25',
+          ...params,
+        }),
+        key
+      );
+      for (const item of data.items || []) {
+        const id = String(item?.id?.videoId || '');
+        if (/^[A-Za-z0-9_-]{11}$/.test(id)) ids.add(id);
+      }
+    };
+
+    // Livestream pages can be created well before the actual broadcast.
+    // Use a generous creation-date window first, then a game-title query as
+    // a second route when the source game is identifiable.
+    try {
+      await runSearch({
+        order:'date',
+        publishedAfter:new Date(+ss - 60 * 24 * 3600000).toISOString(),
+        publishedBefore:new Date(+se + 2 * 24 * 3600000).toISOString(),
+      });
+    } catch (e) {
+      pushYoutubePovDiagnostic({
+        name:favRow?.name || '',
+        channelId:ch,
+        queryStatus:'YouTube期間検索失敗: ' + String(e?.message || e).slice(0,80),
+      });
+    }
+
+    const game = researchGameFromText(source?.title || '', source?.topic_id || '');
+    if (game && ids.size < 6) {
+      try {
+        await runSearch({q:game});
+      } catch (e) {
+        pushYoutubePovDiagnostic({
+          name:favRow?.name || '',
+          channelId:ch,
+          queryStatus:'YouTubeゲーム検索失敗: ' + String(e?.message || e).slice(0,80),
+        });
+      }
+    }
+
+    if (!ids.size) {
+      pushYoutubePovDiagnostic({
+        name:favRow?.name || '',
+        channelId:ch,
+        queryStatus:'YouTube補完検索 0件',
+      });
+      return [];
+    }
+
+    const out = [];
+    const allIds = [...ids].slice(0,50);
+    for (let i = 0; i < allIds.length; i += 50) {
+      try {
+        const data = await youtubePriorityDataApi(
+          'videos?' + new URLSearchParams({
+            part:'snippet,contentDetails,liveStreamingDetails',
+            id:allIds.slice(i,i+50).join(','),
+          }),
+          key
+        );
+        for (const item of data.items || []) {
+          const v = povYoutubeVideo(item);
+          if (!v?.id || v.type !== 'stream' || v.id === source.id) continue;
+          v._npfFavoriteTarget = true;
+          v._npfYoutubeFallback = true;
+
+          const cs = startOf(v), ce = endOf(v);
+          const targetMoment = syncOffset != null && Number.isFinite(Number(syncOffset))
+            ? new Date(+ss + Number(syncOffset) * 1000) : null;
+          const timeOk = !!(cs && ce && (!targetMoment || (targetMoment >= cs && targetMoment <= ce)));
+          if (!timeOk) continue;
+
+          const single = buildMatches(source, [v], syncOffset)[0] || null;
+          pushYoutubePovDiagnostic({
+            name:channelName(v) || favRow?.name || '',
+            channelId:ch,
+            queryStatus:'YouTube補完候補取得',
+            videoId:v.id,
+            title:String(v.title || ''),
+            timeStatus:'時刻○',
+            gameStatus:single?.sameGame ? '同ゲーム○' : '同ゲーム×',
+            relatedStatus:single?.related ? '関連○' : '関連×',
+            bucket:single ? (single.related ? '表示:関連候補' : (single.sameGame ? '表示:その他候補' : '表示対象外')) : 'buildMatchesで除外',
+          });
+          out.push(v);
+        }
+      } catch (e) {
+        pushYoutubePovDiagnostic({
+          name:favRow?.name || '',
+          channelId:ch,
+          queryStatus:'YouTube詳細取得失敗: ' + String(e?.message || e).slice(0,80),
+        });
+      }
+    }
+
+    pushYoutubePovDiagnostic({
+      name:favRow?.name || '',
+      channelId:ch,
+      queryStatus:'YouTube補完 ' + out.length + '件（同時刻）',
+    });
+    return out;
+  }
+
+
   async function fetchFavoritePovCandidates(source, syncOffset = null, onBatch = null) {
     const ss = startOf(source), se = endOf(source);
     if (!ss || !se) return [];
@@ -3933,6 +4068,21 @@
             channelId:ch,
             queryStatus:'Holodex時間帯検索 ' + (Array.isArray(arr) ? arr.length : 0) + '件',
           });
+
+          // Holodex can miss individual archives. For known favorite channels,
+          // fall back to YouTube's own channel search instead of dropping them.
+          if (!Array.isArray(arr) || arr.length === 0) {
+            const ytFallback = await fetchYoutubeFavoritePovFallback(source, favRow, syncOffset);
+            if (ytFallback.length) {
+              for (const v of ytFallback) {
+                found.set(v.id, v);
+                batch.push(v);
+              }
+              if (typeof onBatch === 'function') onBatch(batch, ch);
+              return;
+            }
+          }
+
           if (Array.isArray(arr)) {
             for (const v of arr) {
               if (!v?.id || v.id === source.id) continue;
