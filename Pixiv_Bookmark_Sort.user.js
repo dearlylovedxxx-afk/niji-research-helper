@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.20
+// @version      0.6.21
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1239,17 +1239,18 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
-// ---- Pixiv home recommendation visibility (v0.6.20) ----
+// ---- Pixiv home content shield (v0.6.21) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivHomeRecommendationVisibilityV0620) return;
-  window.__pixivHomeRecommendationVisibilityV0620 = true;
+  if (window.__pixivHomeContentShieldV0621) return;
+  window.__pixivHomeContentShieldV0621 = true;
 
   const KEY = 'pixiv-hide-home-recommendations-v1';
   const ROOT_ID = 'pixiv-home-display-settings-v1';
-  const HIDDEN_ATTR = 'data-pixiv-home-recommendation-hidden';
-  const PROTECTED_ATTR = 'data-pixiv-home-following-protected';
+  const STYLE_ID = 'pixiv-home-content-shield-style-v0621';
+  const HIDDEN_ATTR = 'data-pixiv-home-content-hidden';
+  const HTML_ATTR = 'data-pixiv-home-clean';
   let enabled = true;
   let root = null;
   let scanTimer = null;
@@ -1270,194 +1271,107 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     return p === '/' || /^\/[a-z]{2}(?:-[a-z]{2})?$/i.test(p);
   }
 
-  function textOf(el) {
-    return String(el?.textContent || '').replace(/\s+/g, ' ').trim();
+  function isToolNode(el) {
+    return !!el?.closest?.(
+      '#' + ROOT_ID +
+      ',#pixiv-tools-unified-bar' +
+      ',#pixiv-tools-unified-launch' +
+      ',#pixiv-tools-unified-placeholder' +
+      ',#pixiv-bookmark-sort-cross-page-v05' +
+      ',#pixiv-saved-searches-v1' +
+      ',#pnte-root'
+    );
   }
 
-  function recommendationHeading(el) {
-    const t = textOf(el);
-    if (!t) return false;
-    if (/フォロー|following|新着|new works?/i.test(t)) return false;
-    return /おすすめ(?:作品|イラスト|マンガ|漫画|小説)?|あなたへのおすすめ|recommended(?: works?| illustrations?| manga| novels?)?|for you/i.test(t);
-  }
-
-  function protectedHeading(el) {
-    const t = textOf(el);
-    return /フォロー中の新着|フォロー(?:中)?|following|新着作品|new works?/i.test(t);
-  }
-
-  function artworkLinks(el) {
-    if (!el?.querySelectorAll) return 0;
-    return el.querySelectorAll('a[href*="/artworks/"],a[href*="/novel/show.php?id="]').length;
-  }
-
-  function hasProtectedHeading(el, sourceHeading) {
-    if (!el?.querySelectorAll) return false;
-    for (const h of el.querySelectorAll('h1,h2,h3,[role="heading"]')) {
-      if (h === sourceHeading) continue;
-      if (protectedHeading(h)) return true;
-    }
-    return false;
-  }
-
-  function hasRecommendationHeading(el, sourceHeading) {
-    if (!el?.querySelectorAll) return false;
-    for (const h of el.querySelectorAll('h1,h2,h3,[role="heading"]')) {
-      if (h === sourceHeading) continue;
-      if (recommendationHeading(h)) return true;
-    }
-    return false;
-  }
-
-  function workKeyFromAnchor(anchor) {
-    try {
-      const u = new URL(anchor.href || anchor.getAttribute('href') || '', location.href);
-      const art = u.pathname.match(/^\/artworks\/(\d+)/);
-      if (art) return 'art:' + art[1];
-      if (u.pathname === '/novel/show.php') {
-        const id = u.searchParams.get('id');
-        if (/^\d+$/.test(id || '')) return 'novel:' + id;
+  function ensureStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+      html[${HTML_ATTR}="1"] main {
+        display:none!important;
+        visibility:hidden!important;
       }
-    } catch {}
-    return '';
-  }
-
-  function workKeysInside(el) {
-    const keys = new Set();
-    for (const a of el?.querySelectorAll?.('a[href*="/artworks/"],a[href*="/novel/show.php?id="]') || []) {
-      const key = workKeyFromAnchor(a);
-      if (key) keys.add(key);
-      if (keys.size > 8) break;
-    }
-    return keys;
-  }
-
-  function lowestCommonAncestor(nodes) {
-    const list = nodes.filter(Boolean);
-    if (!list.length) return null;
-    let node = list[0];
-    while (node && node !== document.body && node !== document.documentElement) {
-      if (list.every(x => node === x || node.contains(x))) return node;
-      node = node.parentElement;
-    }
-    return list[0].parentElement || null;
-  }
-
-  function protectedBlock(heading) {
-    let node = heading.parentElement;
-    let best = null;
-    for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
-      if (node === document.body || node === document.documentElement) break;
-      if (hasRecommendationHeading(node, heading)) break;
-      if (artworkLinks(node) >= 1) best = node;
-    }
-    return best;
-  }
-
-  function markProtectedFollowing() {
-    document.querySelectorAll('[' + PROTECTED_ATTR + '="1"]').forEach(el => el.removeAttribute(PROTECTED_ATTR));
-    for (const heading of document.querySelectorAll('h1,h2,h3,[role="heading"]')) {
-      if (!protectedHeading(heading)) continue;
-      const block = protectedBlock(heading);
-      if (block) block.setAttribute(PROTECTED_ATTR, '1');
-    }
-  }
-
-  function workCardFor(key, anchors) {
-    let node = lowestCommonAncestor(anchors);
-    if (!node) return null;
-    if (node.tagName === 'A') node = node.parentElement || node;
-
-    let best = node;
-    for (let depth = 0; best?.parentElement && depth < 7; depth++) {
-      const parent = best.parentElement;
-      if (parent === document.body || parent === document.documentElement) break;
-      if (parent.closest?.('[' + PROTECTED_ATTR + '="1"]')) break;
-
-      const keys = workKeysInside(parent);
-      if (keys.size === 1 && keys.has(key)) best = parent;
-      else break;
-    }
-    return best;
-  }
-
-  function candidateBlock(heading) {
-    // Pixiv mobile often puts the heading and the following recommended cards
-    // in separate sibling wrappers. Hiding the nearest section removes only the
-    // first card, so climb to the largest recommendation-only ancestor.
-    let node = heading.parentElement;
-    let best = null;
-    for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
-      if (node === document.body || node === document.documentElement) break;
-      if (hasProtectedHeading(node, heading)) break;
-      if (artworkLinks(node) >= 1) best = node;
-    }
-    return best;
+      html[${HTML_ATTR}="1"] [${HIDDEN_ATTR}="1"] {
+        display:none!important;
+        visibility:hidden!important;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
   }
 
   function clearHidden() {
+    document.documentElement.removeAttribute(HTML_ATTR);
     document.querySelectorAll('[' + HIDDEN_ATTR + '="1"]').forEach(el => {
-      el.style.removeProperty('display');
       el.removeAttribute(HIDDEN_ATTR);
+      el.style.removeProperty('display');
+      el.style.removeProperty('visibility');
     });
-    document.querySelectorAll('[' + PROTECTED_ATTR + '="1"]').forEach(el => {
-      el.removeAttribute(PROTECTED_ATTR);
-    });
+  }
+
+  function hide(el) {
+    if (!el || isToolNode(el)) return;
+    el.setAttribute(HIDDEN_ATTR, '1');
+    el.style.setProperty('display', 'none', 'important');
+    el.style.setProperty('visibility', 'hidden', 'important');
+  }
+
+  function nearestContentBlock(el) {
+    if (!el) return null;
+    const semantic = el.closest?.('section,article,li');
+    if (semantic && !semantic.closest?.('header,nav')) return semantic;
+
+    let node = el.parentElement;
+    for (let depth = 0; node && depth < 7; depth++, node = node.parentElement) {
+      if (node === document.body || node === document.documentElement) break;
+      if (node.closest?.('header,nav')) break;
+      const workLinks = node.querySelectorAll?.('a[href*="/artworks/"],a[href*="/novel/show.php?id="]').length || 0;
+      if (workLinks >= 1) return node;
+    }
+    return el;
+  }
+
+  function hideLeaksOutsideMain() {
+    // Pixiv occasionally mounts home modules outside <main>. Hide any remaining
+    // artwork/novel cards on the top page so thumbnails and their labels cannot leak.
+    const workLinks = document.querySelectorAll(
+      'a[href*="/artworks/"],a[href*="/novel/show.php?id="]'
+    );
+    for (const a of workLinks) {
+      if (isToolNode(a) || a.closest?.('main,header,nav')) continue;
+      hide(nearestContentBlock(a));
+    }
+
+    // Explicit home modules such as "コレクション" may render their heading before
+    // the works themselves. Hide the entire module immediately by its heading text.
+    for (const h of document.querySelectorAll('h1,h2,h3,h4,[role="heading"]')) {
+      if (isToolNode(h) || h.closest?.('header,nav,main')) continue;
+      const text = String(h.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      if (!/(?:コレクション|おすすめ|あなたへのおすすめ|フォロー中の新着|新着作品|ランキング|みんなの新着|recommended|for you|following|new works?)/i.test(text)) continue;
+      hide(nearestContentBlock(h));
+    }
   }
 
   function apply() {
     clearTimeout(scanTimer);
     scanTimer = null;
+    ensureStyle();
 
     if (!enabled || !isHome()) {
       clearHidden();
       return;
     }
 
-    markProtectedFollowing();
-
-    // First hide explicit recommendation sections when Pixiv provides a heading.
-    const headings = document.querySelectorAll('h1,h2,h3,[role="heading"]');
-    for (const heading of headings) {
-      if (!recommendationHeading(heading)) continue;
-      const block = candidateBlock(heading);
-      if (!block || block.closest?.('[' + PROTECTED_ATTR + '="1"]')) continue;
-      if (hasProtectedHeading(block, heading)) continue;
-      block.setAttribute(HIDDEN_ATTR, '1');
-      block.style.setProperty('display', 'none', 'important');
-    }
-
-    // Mobile Pixiv also has an endless home feed with NO recommendation heading.
-    // Group every work by its URL and hide its complete card unless that card
-    // belongs to a protected Following/New works section.
-    const byWork = new Map();
-    for (const anchor of document.querySelectorAll('a[href*="/artworks/"],a[href*="/novel/show.php?id="]')) {
-      if (anchor.closest?.('#' + ROOT_ID)) continue;
-      if (anchor.closest?.('[' + PROTECTED_ATTR + '="1"]')) continue;
-      const key = workKeyFromAnchor(anchor);
-      if (!key) continue;
-      if (!byWork.has(key)) byWork.set(key, []);
-      byWork.get(key).push(anchor);
-    }
-
-    for (const [key, anchors] of byWork) {
-      const card = workCardFor(key, anchors);
-      if (!card) {
-        for (const anchor of anchors) {
-          anchor.setAttribute(HIDDEN_ATTR, '1');
-          anchor.style.setProperty('display', 'none', 'important');
-        }
-        continue;
-      }
-      if (card.closest?.('[' + PROTECTED_ATTR + '="1"]')) continue;
-      card.setAttribute(HIDDEN_ATTR, '1');
-      card.style.setProperty('display', 'none', 'important');
-    }
+    // Strong mode: no artwork/novel feed is allowed on Pixiv home.
+    // Header/search/navigation and this userscript's tools remain available.
+    document.documentElement.setAttribute(HTML_ATTR, '1');
+    hideLeaksOutsideMain();
   }
 
   function schedule() {
     clearTimeout(scanTimer);
-    scanTimer = setTimeout(apply, 120);
+    scanTimer = setTimeout(apply, 60);
   }
 
   function build() {
@@ -1477,10 +1391,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     input.checked = enabled;
     input.style.cssText = 'width:20px;height:20px;';
     const span = document.createElement('span');
-    span.textContent = 'トップのランダム作品を非表示（フォロー新着は残す）';
+    span.textContent = 'トップの作品コンテンツを完全に非表示';
     label.append(input, span);
     const note = document.createElement('p');
-    note.textContent = 'ホームの見出しなしおすすめフィードも対象です。フォロー中の新着、検索結果、タグ検索、ブックマーク、作品ページには影響しません。';
+    note.textContent = 'Pixivトップでは、イラスト・漫画・小説のサムネイル、作品名、コレクション、おすすめ、フォロー新着、ランキング等の作品フィードを表示しません。検索結果・タグ検索・作者ページ・作品ページ・ブックマークには影響しません。';
     note.style.cssText = 'margin:10px 0 0;color:#66717e;font-size:12px;';
     input.addEventListener('change', () => {
       enabled = !!input.checked;
@@ -1505,6 +1419,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
 
   load();
+  ensureStyle();
   apply();
 
   const observer = new MutationObserver(schedule);
