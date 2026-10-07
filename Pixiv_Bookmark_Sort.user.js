@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.30
+// @version      0.6.31
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -345,7 +345,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
         extra.dataset.key = extraKey(w);
         info.append(extra); link.append(image, info); fragment.append(link);
       }
-      if (!rows.length) fragment.append($new('p', 'pbs-new-empty', '該当する保存済み作品がありません。調査を進めるか、絞り込みを変えてください。'));
+      if (!rows.length) fragment.append($new('p', 'pbs-new-empty',
+        ctx.age && ctx.age !== 'all'
+          ? 'この年齢区分の保存済み作品はまだありません。調査を開始／再開すると順次ここに表示されます。'
+          : '該当する保存済み作品がありません。調査を進めるか、絞り込みを変えてください。'));
       results.append(fragment);
       if ('IntersectionObserver' in window) {
         observer = new IntersectionObserver(entries => {
@@ -388,7 +391,11 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const u = new URL(location.href);
     u.searchParams.set('mode', next);
     u.searchParams.delete('p');
-    try { sessionStorage.setItem('pixiv-bsort-reopen-view-v1', '1'); } catch {}
+    try {
+      sessionStorage.setItem('pixiv-bsort-reopen-view-v1', '1');
+      sessionStorage.setItem('pixiv-bsort-autostart-research-v1', '1');
+      sessionStorage.setItem('pixiv-bsort-selected-age-v1', next);
+    } catch {}
     hide();
     location.assign(u.href);
   }
@@ -462,12 +469,34 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     }
     applyButton.addEventListener('click', applyDatesToSearch);
 
-    // If age mode navigation came from this viewer, reopen it after the new
-    // search context has loaded so the selector feels like part of one screen.
+    // If age mode navigation came from this viewer, reopen it and automatically
+    // start/resume research for that age-specific search key. Otherwise the new
+    // key has no saved rows yet and the result viewer would misleadingly show 0.
     try {
-      if (sessionStorage.getItem('pixiv-bsort-reopen-view-v1') === '1') {
+      const shouldReopen = sessionStorage.getItem('pixiv-bsort-reopen-view-v1') === '1';
+      const shouldAutostart = sessionStorage.getItem('pixiv-bsort-autostart-research-v1') === '1';
+      const selectedAge = sessionStorage.getItem('pixiv-bsort-selected-age-v1') || '';
+      if (shouldReopen) {
         sessionStorage.removeItem('pixiv-bsort-reopen-view-v1');
-        setTimeout(() => openButton.click(), 250);
+        setTimeout(() => {
+          openButton.click();
+          if (selectedAge && ageSelect) ageSelect.value = selectedAge;
+        }, 300);
+      }
+      if (shouldAutostart) {
+        sessionStorage.removeItem('pixiv-bsort-autostart-research-v1');
+        sessionStorage.removeItem('pixiv-bsort-selected-age-v1');
+        setTimeout(() => {
+          const engineRoot = document.getElementById(HOST_ID)?.shadowRoot;
+          const start = engineRoot?.querySelector('.start');
+          const status = engineRoot?.querySelector('.status');
+          if (start && !start.disabled) {
+            if (extraStatus) extraStatus.textContent = '年齢制限を切り替えたため、この区分の調査を自動で開始／再開しています。結果は順次追加されます。';
+            start.click();
+          } else if (status && extraStatus) {
+            extraStatus.textContent = 'この年齢区分の調査状態：' + String(status.textContent || '').trim();
+          }
+        }, 800);
       }
     } catch {}
     new MutationObserver(scheduleRender).observe(source, {childList:true});
