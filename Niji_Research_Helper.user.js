@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.89
+// @version      1.0.90
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.89';
+  const VERSION = '1.0.90';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -3656,6 +3656,53 @@
   }
 
 
+  async function fetchFavoritePovCandidates(source, syncOffset = null, onBatch = null) {
+    const ss = startOf(source), se = endOf(source);
+    if (!ss || !se) return [];
+    const sourceChannel = channelId(source);
+    const favoriteIds = [...new Set((state.favorites || []).map(f => String(f?.id || '')).filter(id =>
+      /^UC[A-Za-z0-9_-]{22}$/.test(id) && id !== sourceChannel
+    ))];
+    if (!favoriteIds.length) return [];
+
+    const found = new Map();
+    const from = new Date(+ss - 2 * 3600000).toISOString();
+    const to = new Date(+se + 2 * 3600000).toISOString();
+
+    const jobs = favoriteIds.map(async ch => {
+      try {
+        const q = new URLSearchParams({
+          channel_id:ch,
+          type:'stream',
+          status:'past',
+          include:'live_info,mentions',
+          sort:'available_at',
+          order:'asc',
+          limit:'50',
+          from,
+          to,
+        });
+        const arr = await apiGet('/videos?' + q.toString());
+        const batch = [];
+        if (Array.isArray(arr)) {
+          for (const v of arr) {
+            if (!v?.id || v.id === source.id) continue;
+            v._npfFavoriteTarget = true;
+            found.set(v.id, v);
+            batch.push(v);
+          }
+        }
+        if (batch.length && typeof onBatch === 'function') onBatch(batch, ch);
+      } catch (e) {
+        console.debug('[NRH POV favorite channel]', ch, String(e?.message || e));
+      }
+    });
+
+    await Promise.allSettled(jobs);
+    return [...found.values()];
+  }
+
+
   function buildMatches(source, videos, syncOffset = null) {
     const ss = startOf(source), se = endOf(source);
     const sourceDuration = Math.max(1, (se - ss) / 1000);
@@ -6408,6 +6455,20 @@
           panel.scrollTop += position - 64;
         }
       }
+
+      // Favorites are expected to be surfaced first. Query every saved favorite
+      // channel directly for this time window and merge each result as soon as
+      // that channel returns; do not wait for all favorites or the broad search.
+      const mergeAndRender = (incoming = []) => {
+        if (searchToken !== searchOtherPovsFromYoutube._runToken || !incoming.length) return;
+        const mergedMap = new Map(currentCandidates.map(v => [v.id, v]));
+        for (const v of incoming) if (v?.id) mergedMap.set(v.id, v);
+        currentCandidates = [...mergedMap.values()];
+        matches = buildMatches(source, currentCandidates, sec);
+        renderYoutubeMatches(source, matches, sec);
+      };
+      void fetchFavoritePovCandidates(source, sec, batch => mergeAndRender(batch))
+        .catch(e => console.debug('[NRH][YouTube POV favorites]', String(e?.message || e)));
 
       // Expand in the background. Never keep the user on a loading screen while
       // the broad 24h/page search completes.
