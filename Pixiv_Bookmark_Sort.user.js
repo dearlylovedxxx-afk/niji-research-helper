@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.29
+// @version      0.6.30
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -154,6 +154,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     }
     p.sort();
     return {key: JSON.stringify([kind, word, [...p.entries()]]), kind, word,
+      age: ['safe','r18'].includes(String(p.get('mode')||'').toLowerCase()) ? String(p.get('mode')).toLowerCase() : 'all',
       from: day(u.searchParams.get('scd')), to: day(u.searchParams.get('ecd'))};
   }
   let researchPromise, extraPromise;
@@ -241,7 +242,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
   const extras = new Map(), extrasQueue = [], extrasPending = new Set();
   let extraBusy = false, extraHalted = false, lastExtraRequest = 0;
-  let overlay, results, summary, extraStatus, sortSelect, fromInput, toInput, limitSelect, minInput;
+  let overlay, results, summary, extraStatus, sortSelect, ageSelect, fromInput, toInput, limitSelect, minInput;
   let viewContext = null, viewSeq = 0, viewTimer, open = false, observer;
   let attached = false;
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -377,6 +378,20 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     hide();
     location.assign(u.href);
   }
+
+  function applyAgeToSearch() {
+    const next = ['safe','r18'].includes(String(ageSelect?.value||'').toLowerCase())
+      ? String(ageSelect.value).toLowerCase()
+      : 'all';
+    const currentAge = viewContext?.age || 'all';
+    if (next === currentAge) return;
+    const u = new URL(location.href);
+    u.searchParams.set('mode', next);
+    u.searchParams.delete('p');
+    try { sessionStorage.setItem('pixiv-bsort-reopen-view-v1', '1'); } catch {}
+    hide();
+    location.assign(u.href);
+  }
   function init() {
     if (attached) return true;
     const host = document.getElementById(HOST_ID), root = host?.shadowRoot;
@@ -405,9 +420,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     sortSelect = $new('select'); sortSelect.setAttribute('aria-label','結果の並び順');
     sortSelect.append(new Option('♥ ブクマ数が多い順', 'bookmarks'), new Option('🕒 投稿日が新しい順', 'newest'));
     try {sortSelect.value = localStorage.getItem(SORT_KEY) === 'newest' ? 'newest' : 'bookmarks';} catch {sortSelect.value = 'bookmarks';}
+    ageSelect = $new('select'); ageSelect.setAttribute('aria-label','年齢制限');
+    ageSelect.append(new Option('すべて','all'), new Option('全年齢','safe'), new Option('R-18','r18'));
     limitSelect = $new('select'); limitSelect.setAttribute('aria-label','表示する作品数');
     limitSelect.append(new Option('100件表示','100'),new Option('300件表示','300'),new Option('1000件表示','1000'));
     const sortLabel = $new('label', '', '並び順'); sortLabel.append(sortSelect);
+    const ageLabel = $new('label', '', '年齢制限'); ageLabel.append(ageSelect);
     const limitLabel = $new('label', '', '表示数'); limitLabel.append(limitSelect);
     minInput = $new('input'); minInput.type='number'; minInput.min='0'; minInput.max='1000000000'; minInput.value='0'; minInput.inputMode='numeric';
     const minLabel = $new('label', '', '最低ブクマ'); minLabel.append(minInput);
@@ -416,7 +434,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const fromLabel = $new('label', '', '投稿日から'); fromLabel.append(fromInput);
     const toLabel = $new('label', '', 'まで'); toLabel.append(toInput);
     const applyButton = $new('button', 'pbs-new-apply', 'この期間で検索'); applyButton.type='button';
-    filters.append(sortLabel, limitLabel, minLabel, fromLabel, toLabel, applyButton);
+    filters.append(sortLabel, ageLabel, limitLabel, minLabel, fromLabel, toLabel, applyButton);
     summary = $new('div', 'pbs-new-summary');
     const help = $new('div', 'pbs-new-help', '日付はまず保存済み作品を絞り込みます。「この期間で検索」を押すとpixivの検索条件にも適用し、対象期間の調査を別データとして開始・再開できます。未調査の作品は一覧に含まれません。');
     extraStatus = $new('div', 'pbs-extra-status');
@@ -427,6 +445,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       if (!viewContext) { window.alert('Pixivのタグ検索・作品検索ページから開いてください。'); return; }
       const baseMinimum = root.querySelector('.minimum');
       minInput.value = baseMinimum?.value || '0';
+      ageSelect.value = viewContext.age || 'all';
       fromInput.value = viewContext.from;
       toInput.value = viewContext.to;
       open = true; overlay.classList.add('pbs-open'); overlay.scrollTop = 0;
@@ -434,6 +453,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     });
     back.addEventListener('click', hide);
     root.querySelector('.close')?.addEventListener('click', hide);
+    ageSelect.addEventListener('change', applyAgeToSearch);
     for (const control of [sortSelect, limitSelect, minInput, fromInput, toInput]) {
       control.addEventListener('change', () => {
         if (control === sortSelect) try {localStorage.setItem(SORT_KEY, sortSelect.value);} catch {}
@@ -441,6 +461,15 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       });
     }
     applyButton.addEventListener('click', applyDatesToSearch);
+
+    // If age mode navigation came from this viewer, reopen it after the new
+    // search context has loaded so the selector feels like part of one screen.
+    try {
+      if (sessionStorage.getItem('pixiv-bsort-reopen-view-v1') === '1') {
+        sessionStorage.removeItem('pixiv-bsort-reopen-view-v1');
+        setTimeout(() => openButton.click(), 250);
+      }
+    } catch {}
     new MutationObserver(scheduleRender).observe(source, {childList:true});
     new MutationObserver(scheduleRender).observe(counted, {childList:true,characterData:true,subtree:true});
     return true;
