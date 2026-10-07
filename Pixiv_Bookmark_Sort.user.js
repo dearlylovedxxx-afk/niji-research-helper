@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.25
+// @version      0.6.26
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -981,18 +981,32 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
 
 
-// ---- Saved Pixiv searches (v0.6.9) ----
+// ---- Saved Pixiv searches + cross-search newest feed (v0.6.10) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivSavedSearchesV069) return;
-  window.__pixivSavedSearchesV069 = true;
+  if (window.__pixivSavedSearchesV0610) return;
+  window.__pixivSavedSearchesV0610 = true;
 
   const STORAGE_KEY = 'pixiv-saved-searches-v1';
   const ROOT_ID = 'pixiv-saved-searches-root';
   const OFFSET = 78;
   const MAX_SAVED = 200;
+  const FEED_STEP = 60;
+  const FEED_SEARCH_CONCURRENCY = 3;
+  const FEED_DETAIL_CONCURRENCY = 4;
   let root = null;
+
+  let feedOpen = false;
+  let feedLoading = false;
+  let feedGeneration = 0;
+  let feedAbort = null;
+  let feedStates = [];
+  let feedWorks = new Map();
+  let feedVisibleCount = FEED_STEP;
+  let feedObserver = null;
+  let detailQueue = [];
+  let detailActive = 0;
 
   function isSearchUrl(u) {
     if (/^\/tags\/[^/]+(?:\/(?:artworks|illustrations|manga|novels))?(?:\/|$)/.test(u.pathname)) return true;
@@ -1131,17 +1145,487 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     location.assign(new URL(row.href, location.origin).href);
   }
 
-  function render() {
+  function ageMode(v) {
+    v = String(v || '').toLowerCase();
+    return ['safe','r18'].includes(v) ? v : 'all';
+  }
+
+  function savedContext(row) {
+    const u = new URL(row.href, location.origin);
+    const tag = u.pathname.match(/^\/tags\/([^/]+)(?:\/(artworks|illustrations|manga|novels))?(?:\/|$)/);
+    let word = '';
+    let kind = row.kind || '';
+    let mode = '';
+
+    if (tag) {
+      try { word = decodeURIComponent(tag[1]); } catch { word = tag[1]; }
+      kind = tag[2] || kind || 'artworks';
+      mode = u.searchParams.get('s_mode') || 's_tag_full';
+    } else if (u.pathname === '/novel/search.php') {
+      word = u.searchParams.get('word') || u.searchParams.get('q') || row.word || '';
+      kind = 'novels';
+      mode = u.searchParams.get('s_mode') || 's_tag';
+    } else if (['/search', '/search.php'].includes(u.pathname)) {
+      word = u.searchParams.get('word') || u.searchParams.get('q') || row.word || '';
+      if (!kind) {
+        const type = u.searchParams.get('type') || '';
+        kind = ['novel','novels'].includes(type) ? 'novels' : type === 'manga' ? 'manga' : ['illust','illustrations'].includes(type) ? 'illustrations' : 'artworks';
+      }
+      mode = u.searchParams.get('s_mode') || 's_tag';
+    } else {
+      throw new Error('未対応の保存検索URLです');
+    }
+
+    if (!word) throw new Error('検索語を取得できません');
+
+    const params = new URLSearchParams();
+    const art = kind !== 'novels';
+    const keys = ['mode','scd','ecd','ai_type','work_lang','lang',...(art ? ['wlt','wgt','hlt','hgt','ratio','tool'] : ['tlt','tgt','wlt','wgt','original_only','genre'])];
+    for (const key of keys) for (const v of u.searchParams.getAll(key)) params.append(key, v);
+
+    mode = mode === 'tag_tc' ? (art ? 's_tag_tc' : 's_tag') : mode === 'tc' ? 's_tc' : mode;
+    params.set('word', word);
+    params.set('s_mode', mode);
+    params.set('mode', ageMode(params.get('mode')));
+
+    if (art) {
+      params.set('csw', '0');
+      if (kind === 'artworks') params.set('type', 'all');
+      else if (kind === 'manga') params.set('type', 'manga');
+      else if (kind === 'illustrations') {
+        const t = u.searchParams.get('type');
+        if (['illust','ugoira','illust_and_ugoira'].includes(t)) params.set('type', t);
+      }
+    } else {
+      const gs = u.searchParams.get('gs');
+      if (['0','1'].includes(gs)) params.set('gs', gs);
+    }
+
+    return {row, word, kind, params};
+  }
+
+  async function pixivJson(url, signal) {
+    const response = await fetch(url, {credentials:'same-origin', signal, headers:{Accept:'application/json'}});
+    if (response.status === 429) throw new Error('429：Pixivのアクセス制限');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    if (!data || data.error) throw new Error(data?.message || 'Pixiv APIエラー');
+    return data.body;
+  }
+
+  function tagNames(value) {
+    const list = Array.isArray(value) ? value : Array.isArray(value?.tags) ? value.tags : [];
+    return [...new Set(list.map(x => typeof x === 'string' ? x : x?.tag || x?.name || '').filter(Boolean))];
+  }
+
+  function plainText(value) {
+    const html = String(value || '').trim();
+    if (!html) return '';
+    const box = document.createElement('div');
+    box.innerHTML = html.replace(/<br\s*\/?>/gi, '\n');
+    return String(box.textContent || '').replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  function normalizeWork(raw, ctx) {
+    const id = String(raw?.id || '');
+    if (!/^\d+$/.test(id)) return null;
+    const isNovel = ctx.kind === 'novels';
+    const bookmark = Number(raw?.bookmarkCount);
+    return {
+      key:(isNovel ? 'novel:' : 'illust:') + id,
+      id,
+      type:isNovel ? 'novel' : 'illust',
+      kind:ctx.kind,
+      href:isNovel ? '/novel/show.php?id=' + encodeURIComponent(id) : '/artworks/' + encodeURIComponent(id),
+      thumb:raw?.url || raw?.coverUrl || raw?.urls?.small || raw?.urls?.thumb || '',
+      title:raw?.title || raw?.illustTitle || '無題',
+      userName:raw?.userName || '',
+      userId:String(raw?.userId || ''),
+      createDate:raw?.createDate || raw?.uploadDate || '',
+      caption:plainText(raw?.description || raw?.caption || ''),
+      tags:tagNames(raw?.tags),
+      bookmarkCount:Number.isFinite(bookmark) && bookmark >= 0 ? bookmark : null,
+      pageCount:Number(raw?.pageCount || 0) || 0,
+      matches:new Set([ctx.row.name]),
+      detailLoaded:false,
+      detailQueued:false,
+      detailLoading:false
+    };
+  }
+
+  async function fetchSearchPage(state, page, signal) {
+    const ctx = state.ctx;
+    const u = new URL('/ajax/search/' + ctx.kind + '/' + encodeURIComponent(ctx.word), location.origin);
+    u.search = ctx.params.toString();
+    u.searchParams.set('order', 'date_d');
+    u.searchParams.set('p', String(page));
+    const body = await pixivJson(u.href, signal);
+    const group = ctx.kind === 'novels' ? body?.novel : (body?.illustManga || body?.illust || body?.manga);
+    if (!Array.isArray(group?.data)) throw new Error('検索結果形式を取得できません');
+    const total = Number(group.total || 0);
+    const lastPage = Number(group.lastPage || 0) || Math.max(1, Math.ceil(total / Math.max(1, group.data.length || 60)));
+    return {data:group.data, total, lastPage};
+  }
+
+  async function fetchDetail(work, signal) {
+    const path = work.type === 'novel' ? '/ajax/novel/' : '/ajax/illust/';
+    return await pixivJson(path + encodeURIComponent(work.id), signal);
+  }
+
+  function mergeWorks(rows, ctx) {
+    let added = 0;
+    for (const raw of rows || []) {
+      const work = normalizeWork(raw, ctx);
+      if (!work) continue;
+      const old = feedWorks.get(work.key);
+      if (old) {
+        old.matches.add(ctx.row.name);
+        if (!old.thumb && work.thumb) old.thumb = work.thumb;
+        if (!old.caption && work.caption) old.caption = work.caption;
+        if (!old.tags.length && work.tags.length) old.tags = work.tags;
+        if (old.bookmarkCount == null && work.bookmarkCount != null) old.bookmarkCount = work.bookmarkCount;
+      } else {
+        feedWorks.set(work.key, work);
+        added++;
+      }
+    }
+    return added;
+  }
+
+  function sortedWorks() {
+    return [...feedWorks.values()].sort((a,b) => {
+      const ad = Date.parse(a.createDate || 0) || 0;
+      const bd = Date.parse(b.createDate || 0) || 0;
+      if (bd !== ad) return bd - ad;
+      return Number(b.id) - Number(a.id);
+    });
+  }
+
+  async function mapLimit(items, limit, worker) {
+    let index = 0;
+    const runners = Array.from({length:Math.min(limit, items.length)}, async () => {
+      while (index < items.length) {
+        const current = items[index++];
+        await worker(current);
+      }
+    });
+    await Promise.allSettled(runners);
+  }
+
+  async function fetchStatePage(state, page, generation) {
+    if (!state?.ctx || feedAbort?.signal.aborted || generation !== feedGeneration) return;
+    try {
+      const result = await fetchSearchPage(state, page, feedAbort.signal);
+      if (generation !== feedGeneration) return;
+      state.total = result.total;
+      state.lastPage = result.lastPage;
+      state.nextPage = page + 1;
+      state.done = page >= result.lastPage;
+      state.error = '';
+      mergeWorks(result.data, state.ctx);
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+      state.error = String(e?.message || e);
+    }
+  }
+
+  function feedStatusText() {
+    const ok = feedStates.filter(s => s.ctx && !s.error).length;
+    const bad = feedStates.filter(s => s.error).length;
+    const total = feedStates.length;
+    const works = feedWorks.size;
+    return feedLoading
+      ? `保存検索 ${total}件を更新中… 現在 ${works.toLocaleString('ja-JP')}作品`
+      : `保存検索 ${ok}/${total}件取得 ／ ${works.toLocaleString('ja-JP')}作品${bad ? ` ／ 失敗${bad}件` : ''}`;
+  }
+
+  function formatDate(value) {
+    const d = new Date(value || 0);
+    if (!Number.isFinite(+d) || +d <= 0) return '';
+    return d.toLocaleString('ja-JP', {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+  }
+
+  function createFeedCard(work) {
+    const card = document.createElement('article');
+    card.className = 'pss-feed-card';
+    card.dataset.workKey = work.key;
+
+    const link = document.createElement('a');
+    link.className = 'pss-feed-thumb';
+    link.href = work.href;
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.alt = work.title;
+    if (work.thumb) img.src = work.thumb;
+    else img.classList.add('empty');
+    link.append(img);
+
+    const info = document.createElement('div');
+    info.className = 'pss-feed-info';
+
+    const top = document.createElement('div');
+    top.className = 'pss-feed-top';
+    const title = document.createElement('a');
+    title.className = 'pss-feed-title';
+    title.href = work.href;
+    title.textContent = work.title;
+    const count = document.createElement('span');
+    count.className = 'pss-feed-bookmarks';
+    count.textContent = work.bookmarkCount == null ? '♥ …' : '♥ ' + Number(work.bookmarkCount).toLocaleString('ja-JP');
+    top.append(title, count);
+
+    const author = document.createElement(work.userId ? 'a' : 'span');
+    author.className = 'pss-feed-author';
+    if (work.userId) author.href = '/users/' + encodeURIComponent(work.userId);
+    author.textContent = work.userName || '作者不明';
+
+    const date = document.createElement('div');
+    date.className = 'pss-feed-date';
+    date.textContent = formatDate(work.createDate);
+
+    const caption = document.createElement('p');
+    caption.className = 'pss-feed-caption';
+    caption.textContent = work.caption || 'キャプション取得中…';
+
+    const tags = document.createElement('div');
+    tags.className = 'pss-feed-tags';
+    for (const tag of work.tags.slice(0, 10)) {
+      const a = document.createElement('a');
+      a.href = '/tags/' + encodeURIComponent(tag) + '/artworks';
+      a.textContent = '#' + tag;
+      tags.append(a);
+    }
+
+    const matches = document.createElement('div');
+    matches.className = 'pss-feed-matches';
+    const matchNames = [...work.matches];
+    for (const name of matchNames.slice(0, 4)) {
+      const chip = document.createElement('span');
+      chip.textContent = name;
+      matches.append(chip);
+    }
+    if (matchNames.length > 4) {
+      const more = document.createElement('span');
+      more.textContent = '+' + (matchNames.length - 4);
+      matches.append(more);
+    }
+
+    info.append(top, author, date, caption, tags, matches);
+    card.append(link, info);
+    return card;
+  }
+
+  function updateFeedCard(work) {
     if (!root) return;
+    const card = [...root.querySelectorAll('.pss-feed-card')].find(x => x.dataset.workKey === work.key);
+    if (!card) return;
+    const count = card.querySelector('.pss-feed-bookmarks');
+    if (count) count.textContent = work.bookmarkCount == null ? '♥ —' : '♥ ' + Number(work.bookmarkCount).toLocaleString('ja-JP');
+    const caption = card.querySelector('.pss-feed-caption');
+    if (caption) caption.textContent = work.caption || 'キャプションなし';
+    const tags = card.querySelector('.pss-feed-tags');
+    if (tags) {
+      tags.replaceChildren();
+      for (const tag of work.tags.slice(0, 10)) {
+        const a = document.createElement('a');
+        a.href = '/tags/' + encodeURIComponent(tag) + '/artworks';
+        a.textContent = '#' + tag;
+        tags.append(a);
+      }
+    }
+  }
+
+  function resetDetailQueue() {
+    detailQueue = [];
+    detailActive = 0;
+  }
+
+  function enqueueDetail(work, generation) {
+    if (!work || work.detailLoaded || work.detailLoading || work.detailQueued) return;
+    work.detailQueued = true;
+    detailQueue.push({work, generation});
+    pumpDetailQueue();
+  }
+
+  function pumpDetailQueue() {
+    while (detailActive < FEED_DETAIL_CONCURRENCY && detailQueue.length) {
+      const job = detailQueue.shift();
+      const work = job.work;
+      work.detailQueued = false;
+      if (job.generation !== feedGeneration || feedAbort?.signal.aborted || work.detailLoaded || work.detailLoading) continue;
+      work.detailLoading = true;
+      detailActive++;
+      fetchDetail(work, feedAbort.signal).then(body => {
+        if (job.generation !== feedGeneration) return;
+        const bookmark = Number(body?.bookmarkCount);
+        if (Number.isFinite(bookmark) && bookmark >= 0) work.bookmarkCount = bookmark;
+        work.caption = plainText(body?.description || body?.caption || work.caption);
+        const tags = tagNames(body?.tags);
+        if (tags.length) work.tags = tags;
+        work.title = body?.title || work.title;
+        work.userName = body?.userName || work.userName;
+        work.userId = String(body?.userId || work.userId || '');
+        work.detailLoaded = true;
+        updateFeedCard(work);
+      }).catch(e => {
+        if (e?.name !== 'AbortError') {
+          work.detailLoaded = true;
+          updateFeedCard(work);
+        }
+      }).finally(() => {
+        work.detailLoading = false;
+        detailActive = Math.max(0, detailActive - 1);
+        pumpDetailQueue();
+      });
+    }
+  }
+
+  function observeFeedCards(works, generation) {
+    feedObserver?.disconnect();
+    if (!('IntersectionObserver' in window)) {
+      for (const work of works.slice(0, 12)) enqueueDetail(work, generation);
+      return;
+    }
+    feedObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const key = entry.target?.dataset?.workKey;
+        const work = key ? feedWorks.get(key) : null;
+        if (work) enqueueDetail(work, generation);
+        feedObserver?.unobserve(entry.target);
+      }
+    }, {root, rootMargin:'500px 0px', threshold:0.01});
+
+    for (const card of root.querySelectorAll('.pss-feed-card')) feedObserver.observe(card);
+  }
+
+  function renderFeed() {
+    if (!root) return;
+    const status = root.querySelector('.pss-feed-status');
+    if (status) status.textContent = feedStatusText();
+
+    const grid = root.querySelector('.pss-feed-grid');
+    const works = sortedWorks();
+    const visible = works.slice(0, feedVisibleCount);
+    grid.replaceChildren();
+
+    if (!works.length && !feedLoading) {
+      const empty = document.createElement('p');
+      empty.className = 'pss-feed-empty';
+      empty.textContent = '該当する新着作品がありません。';
+      grid.append(empty);
+    } else {
+      for (const work of visible) grid.append(createFeedCard(work));
+    }
+
+    const showMore = root.querySelector('.pss-feed-show-more');
+    const loadOlder = root.querySelector('.pss-feed-load-older');
+    const refresh = root.querySelector('.pss-feed-refresh');
+    const hasHidden = works.length > feedVisibleCount;
+    const hasOlder = feedStates.some(s => s.ctx && !s.error && !s.done);
+
+    showMore.hidden = !hasHidden;
+    loadOlder.hidden = hasHidden || !hasOlder || feedLoading;
+    refresh.disabled = feedLoading;
+    loadOlder.disabled = feedLoading;
+    showMore.disabled = feedLoading;
+
+    observeFeedCards(visible, feedGeneration);
+  }
+
+  async function refreshFeed() {
+    const rows = readSaved();
+    feedAbort?.abort();
+    feedAbort = new AbortController();
+    feedGeneration++;
+    const generation = feedGeneration;
+    feedLoading = true;
+    feedWorks = new Map();
+    feedVisibleCount = FEED_STEP;
+    feedStates = [];
+    feedObserver?.disconnect();
+    resetDetailQueue();
+
+    for (const row of rows) {
+      try {
+        feedStates.push({row, ctx:savedContext(row), nextPage:1, lastPage:null, total:null, done:false, error:''});
+      } catch (e) {
+        feedStates.push({row, ctx:null, nextPage:1, lastPage:0, total:0, done:true, error:String(e?.message || e)});
+      }
+    }
+
+    renderFeed();
+    if (!feedStates.length) {
+      feedLoading = false;
+      renderFeed();
+      return;
+    }
+
+    const valid = feedStates.filter(s => s.ctx);
+    await mapLimit(valid, FEED_SEARCH_CONCURRENCY, async state => {
+      await fetchStatePage(state, 1, generation);
+      if (generation === feedGeneration) renderFeed();
+    });
+
+    if (generation !== feedGeneration) return;
+    feedLoading = false;
+    renderFeed();
+  }
+
+  async function loadOlderFeed() {
+    if (feedLoading) return;
+    const generation = feedGeneration;
+    const targets = feedStates.filter(s => s.ctx && !s.error && !s.done && Number.isFinite(Number(s.nextPage)));
+    if (!targets.length) return;
+    feedLoading = true;
+    renderFeed();
+
+    await mapLimit(targets, FEED_SEARCH_CONCURRENCY, async state => {
+      await fetchStatePage(state, state.nextPage, generation);
+      if (generation === feedGeneration) renderFeed();
+    });
+
+    if (generation !== feedGeneration) return;
+    feedLoading = false;
+    feedVisibleCount = Math.max(feedVisibleCount, FEED_STEP);
+    renderFeed();
+  }
+
+  function openFeed() {
+    build();
+    if (!root) return;
+    feedOpen = true;
+    root.querySelector('.pss-manage-page').hidden = true;
+    root.querySelector('.pss-feed-page').hidden = false;
+    root.scrollTop = 0;
+    void refreshFeed();
+  }
+
+  function closeFeed() {
+    feedOpen = false;
+    feedAbort?.abort();
+    feedObserver?.disconnect();
+    resetDetailQueue();
+    if (!root) return;
+    root.querySelector('.pss-feed-page').hidden = true;
+    root.querySelector('.pss-manage-page').hidden = false;
+    root.scrollTop = 0;
+    render();
+  }
+
+  function render() {
+    if (!root || feedOpen) return;
     const rows = readSaved();
     const list = root.querySelector('.pss-list');
     const current = currentSearch();
     const currentText = root.querySelector('.pss-current-text');
     const saveBtn = root.querySelector('.pss-save-current');
+    const newestBtn = root.querySelector('.pss-newest-open');
     currentText.textContent = current
       ? `現在：${current.word || '検索'} ／ ${kindLabel(current.kind)}`
       : '現在のページは検索結果ページではありません。';
     saveBtn.disabled = !current;
+    newestBtn.disabled = !rows.length;
     list.replaceChildren();
 
     if (!rows.length) {
@@ -1192,28 +1676,90 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       #${ROOT_ID}{display:none;position:fixed;top:${OFFSET}px;right:0;bottom:0;left:0;z-index:2147483646;background:#f4f6f8;color:#202124;overflow:auto;-webkit-overflow-scrolling:touch;font:14px/1.5 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif}
       #${ROOT_ID}.open{display:block}
       #${ROOT_ID} *{box-sizing:border-box}
-      #${ROOT_ID} .pss-wrap{max-width:900px;margin:auto;padding:18px 14px 80px}
+      #${ROOT_ID} a{color:inherit}
+      #${ROOT_ID} .pss-wrap{max-width:1100px;margin:auto;padding:18px 14px 80px}
       #${ROOT_ID} .pss-head{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:#fff;border:1px solid #dde2e8;border-radius:12px;padding:14px;margin-bottom:12px}
       #${ROOT_ID} .pss-head h2{font-size:18px;margin:0}
       #${ROOT_ID} .pss-current-text{font-size:12px;color:#65707d;flex:1 1 100%}
       #${ROOT_ID} button{font:inherit;border:1px solid #ccd2d9;border-radius:8px;background:#fff;color:#202124;padding:9px 10px}
       #${ROOT_ID} button:disabled{opacity:.45}
-      #${ROOT_ID} .pss-save-current{background:#0096fa;color:#fff;border-color:#0096fa;font-weight:700}
+      #${ROOT_ID} .pss-save-current,#${ROOT_ID} .pss-newest-open,#${ROOT_ID} .pss-feed-refresh{background:#0096fa;color:#fff;border-color:#0096fa;font-weight:700}
       #${ROOT_ID} .pss-card{background:#fff;border:1px solid #dde2e8;border-radius:12px;padding:10px;margin-bottom:10px}
       #${ROOT_ID} .pss-open{display:flex;width:100%;text-align:left;flex-direction:column;gap:4px;border:0;background:transparent;padding:5px}
       #${ROOT_ID} .pss-open strong{font-size:15px}
       #${ROOT_ID} .pss-open span{font-size:12px;color:#66717e;overflow-wrap:anywhere}
       #${ROOT_ID} .pss-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
       #${ROOT_ID} .pss-actions button{font-size:12px;padding:7px 9px}
-      #${ROOT_ID} .pss-empty{background:#fff;border:1px solid #dde2e8;border-radius:12px;padding:18px;color:#66717e}
-      @media(max-width:600px){#${ROOT_ID} .pss-wrap{padding:12px 9px 70px}#${ROOT_ID} .pss-head h2{font-size:16px}#${ROOT_ID} .pss-actions button{font-size:11px;padding:7px}}
+      #${ROOT_ID} .pss-empty,#${ROOT_ID} .pss-feed-empty{background:#fff;border:1px solid #dde2e8;border-radius:12px;padding:18px;color:#66717e}
+      #${ROOT_ID} .pss-feed-head{position:sticky;top:0;z-index:3;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#f4f6f8;padding:0 0 12px}
+      #${ROOT_ID} .pss-feed-head h2{font-size:18px;margin:0 8px 0 0}
+      #${ROOT_ID} .pss-feed-status{flex:1 1 100%;font-size:12px;color:#66717e}
+      #${ROOT_ID} .pss-feed-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+      #${ROOT_ID} .pss-feed-card{display:grid;grid-template-columns:128px minmax(0,1fr);background:#fff;border:1px solid #dde2e8;border-radius:12px;overflow:hidden;min-width:0}
+      #${ROOT_ID} .pss-feed-thumb{display:block;background:#eef1f4;min-height:128px}
+      #${ROOT_ID} .pss-feed-thumb img{display:block;width:100%;height:100%;min-height:128px;object-fit:cover;background:#eef1f4}
+      #${ROOT_ID} .pss-feed-thumb img.empty{visibility:hidden}
+      #${ROOT_ID} .pss-feed-info{padding:10px;min-width:0}
+      #${ROOT_ID} .pss-feed-top{display:flex;gap:8px;align-items:flex-start}
+      #${ROOT_ID} .pss-feed-title{font-weight:800;text-decoration:none;overflow-wrap:anywhere;flex:1;line-height:1.35}
+      #${ROOT_ID} .pss-feed-bookmarks{white-space:nowrap;color:#e33262;font-weight:800;font-size:12px}
+      #${ROOT_ID} .pss-feed-author{display:block;margin-top:5px;color:#596575;text-decoration:none;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      #${ROOT_ID} .pss-feed-date{font-size:11px;color:#87909b;margin-top:2px}
+      #${ROOT_ID} .pss-feed-caption{font-size:12px;line-height:1.5;color:#404955;margin:7px 0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-line}
+      #${ROOT_ID} .pss-feed-tags{display:flex;gap:5px;flex-wrap:wrap;max-height:44px;overflow:hidden}
+      #${ROOT_ID} .pss-feed-tags a{font-size:11px;color:#1785ce;text-decoration:none;overflow-wrap:anywhere}
+      #${ROOT_ID} .pss-feed-matches{display:flex;gap:4px;flex-wrap:wrap;margin-top:8px}
+      #${ROOT_ID} .pss-feed-matches span{font-size:10px;color:#596575;background:#eef2f6;border-radius:999px;padding:3px 6px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      #${ROOT_ID} .pss-feed-more{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;padding:18px 0}
+      #${ROOT_ID} .pss-feed-more button{font-weight:700}
+      @media(max-width:700px){
+        #${ROOT_ID} .pss-wrap{padding:12px 9px 70px}
+        #${ROOT_ID} .pss-head h2,#${ROOT_ID} .pss-feed-head h2{font-size:16px}
+        #${ROOT_ID} .pss-actions button{font-size:11px;padding:7px}
+        #${ROOT_ID} .pss-feed-grid{grid-template-columns:1fr}
+        #${ROOT_ID} .pss-feed-card{grid-template-columns:116px minmax(0,1fr)}
+        #${ROOT_ID} .pss-feed-thumb,#${ROOT_ID} .pss-feed-thumb img{min-height:116px}
+      }
     `;
     document.head.append(style);
 
     root = document.createElement('section');
     root.id = ROOT_ID;
-    root.innerHTML = '<div class="pss-wrap"><div class="pss-head"><h2>🔖 保存したPixiv検索</h2><button type="button" class="pss-save-current">現在の検索を保存</button><div class="pss-current-text"></div></div><div class="pss-list"></div></div>';
+    root.innerHTML = `
+      <div class="pss-wrap pss-manage-page">
+        <div class="pss-head">
+          <h2>🔖 保存したPixiv検索</h2>
+          <button type="button" class="pss-newest-open">🆕 保存検索の新着</button>
+          <button type="button" class="pss-save-current">現在の検索を保存</button>
+          <div class="pss-current-text"></div>
+        </div>
+        <div class="pss-list"></div>
+      </div>
+      <div class="pss-wrap pss-feed-page" hidden>
+        <div class="pss-feed-head">
+          <button type="button" class="pss-feed-back">← 保存検索へ</button>
+          <h2>🆕 保存検索の新着</h2>
+          <button type="button" class="pss-feed-refresh">更新</button>
+          <div class="pss-feed-status"></div>
+        </div>
+        <div class="pss-feed-grid"></div>
+        <div class="pss-feed-more">
+          <button type="button" class="pss-feed-show-more" hidden>次の60件を表示</button>
+          <button type="button" class="pss-feed-load-older" hidden>さらに過去の新着を取得</button>
+        </div>
+      </div>
+    `;
+
     root.querySelector('.pss-save-current').addEventListener('click', saveCurrent);
+    root.querySelector('.pss-newest-open').addEventListener('click', openFeed);
+    root.querySelector('.pss-feed-back').addEventListener('click', closeFeed);
+    root.querySelector('.pss-feed-refresh').addEventListener('click', () => void refreshFeed());
+    root.querySelector('.pss-feed-show-more').addEventListener('click', () => {
+      feedVisibleCount += FEED_STEP;
+      renderFeed();
+    });
+    root.querySelector('.pss-feed-load-older').addEventListener('click', () => void loadOlderFeed());
+
     document.body.append(root);
     render();
   }
@@ -1221,19 +1767,28 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   function open() {
     build();
     if (!root) return;
+    if (feedOpen) closeFeed();
     render();
     root.classList.add('open');
   }
 
   function close() {
-    root?.classList.remove('open');
+    feedAbort?.abort();
+    feedObserver?.disconnect();
+    resetDetailQueue();
+    feedOpen = false;
+    if (root) {
+      root.classList.remove('open');
+      root.querySelector('.pss-feed-page').hidden = true;
+      root.querySelector('.pss-manage-page').hidden = false;
+    }
   }
 
   function count() {
     return readSaved().length;
   }
 
-  window.__pixivSavedSearchesUi = {open, close, count, render, storageKey: STORAGE_KEY};
+  window.__pixivSavedSearchesUi = {open, close, count, render, storageKey: STORAGE_KEY, openNewest: openFeed};
   window.addEventListener('pixiv-saved-searches-changed', render);
   if (document.body) build(); else addEventListener('DOMContentLoaded', build, {once:true});
 })();
