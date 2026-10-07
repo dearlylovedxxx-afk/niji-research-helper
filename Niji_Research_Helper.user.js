@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.88
+// @version      1.0.89
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.88';
+  const VERSION = '1.0.89';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -3696,13 +3696,27 @@
           : Math.max(0, (overlapStart - cs) / 1000);
 
         const explicitParticipant = !!v._npfExplicitParticipant;
+        // Some multi-POV collabs have no participant names in one person's title
+        // and incomplete Holodex mentions/topic metadata. If both archives are
+        // the same game, start within 3 minutes, and substantially overlap with
+        // similar durations, keep them as a likely same-session POV instead of
+        // silently dropping the candidate.
+        const startGapSec = Math.abs(cs - ss) / 1000;
+        const durationSimilarity = Math.min(sourceDuration, candDuration) / Math.max(sourceDuration, candDuration);
+        const sameSessionTiming = !!(
+          relation.sameGame &&
+          startGapSec <= 180 &&
+          overlapRatio >= 0.80 &&
+          durationSimilarity >= 0.78
+        );
+        const timingReason = sameSessionTiming ? '同ゲーム＋開始時刻ほぼ一致' : '';
         return {
           v, cs, ce, overlapStart, overlapEnd, overlap, overlapRatio, sim, event, favorite, score,
-          related: relation.related || explicitParticipant,
+          related: relation.related || explicitParticipant || sameSessionTiming,
           sameGame: relation.sameGame || explicitParticipant,
           reasons: explicitParticipant
-            ? [...new Set([...relation.reasons, v._npfExplicitReason || '概要欄の参加者'])]
-            : relation.reasons,
+            ? [...new Set([...relation.reasons, v._npfExplicitReason || '概要欄の参加者', timingReason].filter(Boolean))]
+            : [...new Set([...relation.reasons, timingReason].filter(Boolean))],
           sameTopic: relation.sameTopic,
           directMention: relation.directMention,
           candidateStartOffset: candidateSyncOffset,
@@ -8100,6 +8114,7 @@
       ['Splatoon 3', /splatoon|スプラ(?:トゥーン)?/i],
       ['Dead by Daylight', /dead by daylight|\bdbd\b/i],
       ['Among Us', /among us|アモアス/i],
+      ['MIMESIS', /\bmimesis\b|ミメシス/i],
       ['Stardew Valley', /stardew valley|スターデューバレー/i],
       ['ARK', /\bark\b/i],
       ['Rust', /\brust\b/i],
