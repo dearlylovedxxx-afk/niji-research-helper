@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.90
+// @version      1.0.91
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.90';
+  const VERSION = '1.0.91';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2679,6 +2679,95 @@
     return !!id && state.favorites.some(f => f.id === id);
   }
 
+  function isLiverFavoriteVideo(v) {
+    const candidate = normalizeCollaboratorName(collaboratorDisplayName(channelName(v) || ''));
+    if (!candidate) return false;
+    return (state.liverFavorites || []).some(f => {
+      const key = normalizeCollaboratorName(collaboratorDisplayName(f?.name || ''));
+      return !!key && key === candidate;
+    });
+  }
+
+  function isPovPriorityFavorite(v) {
+    return !!v?._npfFavoriteTarget || isFavorite(v) || isLiverFavoriteVideo(v);
+  }
+
+  async function resolvePovFavoriteChannelIds(sourceChannel = '') {
+    const ids = new Set();
+    const unresolved = new Map();
+
+    for (const fav of state.favorites || []) {
+      const id = String(fav?.id || '');
+      if (/^UC[A-Za-z0-9_-]{22}$/.test(id) && id !== sourceChannel) ids.add(id);
+    }
+
+    for (const fav of state.liverFavorites || []) {
+      const rawValue = String(fav?.value || '');
+      if (/^UC[A-Za-z0-9_-]{22}$/.test(rawValue) && rawValue !== sourceChannel) {
+        ids.add(rawValue);
+        continue;
+      }
+      const display = collaboratorDisplayName(fav?.name || '');
+      const key = normalizeCollaboratorName(display);
+      if (key) unresolved.set(key, display);
+    }
+
+    // Existing channel favorites often already contain the same liver under a
+    // decorated YouTube channel name. Reuse those IDs before any network lookup.
+    for (const fav of state.favorites || []) {
+      const key = normalizeCollaboratorName(collaboratorDisplayName(fav?.name || ''));
+      const id = String(fav?.id || '');
+      if (key && unresolved.has(key) && /^UC[A-Za-z0-9_-]{22}$/.test(id)) {
+        ids.add(id);
+        unresolved.delete(key);
+      }
+    }
+
+    // Reuse locally accumulated channel metadata first.
+    if (nrhDbEnabled() && unresolved.size) {
+      for (const [key] of [...unresolved]) {
+        try {
+          const cached = await nrhDbGetByIndex('channels', 'normalizedName', key);
+          const id = String(cached?.id || '');
+          if (/^UC[A-Za-z0-9_-]{22}$/.test(id)) {
+            if (id !== sourceChannel) ids.add(id);
+            unresolved.delete(key);
+          }
+        } catch {}
+      }
+    }
+
+    // Resolve all remaining favorite-liver names with a single paged pass over
+    // Nijisanji channels instead of one full scan per favorite.
+    if (state.apiKey && unresolved.size) {
+      for (let offset = 0, page = 0; page < 12 && unresolved.size; page++, offset += 50) {
+        let arr = [];
+        try {
+          arr = await apiGet('/channels?type=vtuber&org=Nijisanji&limit=50&offset=' + offset);
+        } catch (e) {
+          console.debug('[NRH POV favorite liver resolve]', String(e?.message || e));
+          break;
+        }
+        if (!Array.isArray(arr) || !arr.length) break;
+        for (const ch of arr) {
+          const id = String(ch?.id || '');
+          if (!/^UC[A-Za-z0-9_-]{22}$/.test(id)) continue;
+          const keys = [ch?.name, ch?.english_name]
+            .map(x => normalizeCollaboratorName(collaboratorDisplayName(x || '')))
+            .filter(Boolean);
+          const matched = keys.find(k => unresolved.has(k));
+          if (!matched) continue;
+          if (id !== sourceChannel) ids.add(id);
+          unresolved.delete(matched);
+          try { void nrhDbSaveChannel(ch); } catch {}
+        }
+        if (arr.length < 50) break;
+      }
+    }
+
+    return [...ids];
+  }
+
   // ---------- UI shell ----------
   function createShell() {
     const onYouTube = /(^|\.)youtube\.com$/i.test(location.hostname);
@@ -3660,9 +3749,7 @@
     const ss = startOf(source), se = endOf(source);
     if (!ss || !se) return [];
     const sourceChannel = channelId(source);
-    const favoriteIds = [...new Set((state.favorites || []).map(f => String(f?.id || '')).filter(id =>
-      /^UC[A-Za-z0-9_-]{22}$/.test(id) && id !== sourceChannel
-    ))];
+    const favoriteIds = await resolvePovFavoriteChannelIds(sourceChannel);
     if (!favoriteIds.length) return [];
 
     const found = new Map();
@@ -3730,13 +3817,14 @@
         const sim = titleSimilarity(source.title || '', v.title || '');
         const event = sameEvent(source.title || '', v.title || '');
         const favorite = isFavorite(v);
+        const priorityFavorite = isPovPriorityFavorite(v);
         const relation = relationInfo(source, v, sim, event);
 
         let score = overlapRatio * 0.42 + sim * 0.35 + (event ? 0.50 : 0);
         if (relation.directMention) score += 0.45;
         if (relation.tags.length) score += 0.35;
         if (relation.sameTopic) score += 0.10;
-        if (favorite) score += 1.0;
+        if (priorityFavorite) score += 1.0;
 
         const candidateSyncOffset = targetMoment
           ? Math.max(0, (targetMoment - cs) / 1000)
@@ -3758,7 +3846,7 @@
         );
         const timingReason = sameSessionTiming ? '同ゲーム＋開始時刻ほぼ一致' : '';
         return {
-          v, cs, ce, overlapStart, overlapEnd, overlap, overlapRatio, sim, event, favorite, score,
+          v, cs, ce, overlapStart, overlapEnd, overlap, overlapRatio, sim, event, favorite, priorityFavorite, score,
           related: relation.related || explicitParticipant || sameSessionTiming,
           sameGame: relation.sameGame || explicitParticipant,
           reasons: explicitParticipant
@@ -3777,7 +3865,7 @@
       .sort((a, b) => {
         // 関連候補を最優先。お気に入りだからという理由だけで無関係配信を上に出さない。
         if (a.related !== b.related) return a.related ? -1 : 1;
-        if (state.settings.favoriteFirst && a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+        if (state.settings.favoriteFirst && a.priorityFavorite !== b.priorityFavorite) return a.priorityFavorite ? -1 : 1;
         if (state.settings.eventFirst && a.event !== b.event) return a.event ? -1 : 1;
         return b.score - a.score;
       });
