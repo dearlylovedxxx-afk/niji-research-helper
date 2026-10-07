@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.26
+// @version      0.6.27
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -981,12 +981,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
 
 
-// ---- Saved Pixiv searches + cross-search newest feed (v0.6.10) ----
+// ---- Saved Pixiv searches + cross-search newest feed (v0.6.11) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivSavedSearchesV0610) return;
-  window.__pixivSavedSearchesV0610 = true;
+  if (window.__pixivSavedSearchesV0611) return;
+  window.__pixivSavedSearchesV0611 = true;
 
   const STORAGE_KEY = 'pixiv-saved-searches-v1';
   const ROOT_ID = 'pixiv-saved-searches-root';
@@ -1591,12 +1591,40 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     renderFeed();
   }
 
+  function showManagePage() {
+    if (!root) return;
+    const manage = root.querySelector('.pss-manage-page');
+    const feed = root.querySelector('.pss-feed-page');
+    if (feed) {
+      feed.hidden = true;
+      feed.style.setProperty('display', 'none', 'important');
+    }
+    if (manage) {
+      manage.hidden = false;
+      manage.style.setProperty('display', 'block', 'important');
+    }
+  }
+
+  function showFeedPage() {
+    if (!root) return;
+    const manage = root.querySelector('.pss-manage-page');
+    const feed = root.querySelector('.pss-feed-page');
+    if (manage) {
+      manage.hidden = true;
+      manage.style.setProperty('display', 'none', 'important');
+    }
+    if (feed) {
+      feed.hidden = false;
+      feed.style.setProperty('display', 'block', 'important');
+    }
+  }
+
   function openFeed() {
     build();
     if (!root) return;
     feedOpen = true;
-    root.querySelector('.pss-manage-page').hidden = true;
-    root.querySelector('.pss-feed-page').hidden = false;
+    root.classList.add('open');
+    showFeedPage();
     root.scrollTop = 0;
     void refreshFeed();
   }
@@ -1607,8 +1635,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     feedObserver?.disconnect();
     resetDetailQueue();
     if (!root) return;
-    root.querySelector('.pss-feed-page').hidden = true;
-    root.querySelector('.pss-manage-page').hidden = false;
+    showManagePage();
     root.scrollTop = 0;
     render();
   }
@@ -1767,9 +1794,18 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   function open() {
     build();
     if (!root) return;
-    if (feedOpen) closeFeed();
-    render();
+
+    // Every tap on the Saved Search tab is a deterministic reset to the
+    // management screen. Do not rely on stale hidden/feedOpen state from a
+    // previous open/close cycle (notably on iOS Safari).
+    feedAbort?.abort();
+    feedObserver?.disconnect();
+    resetDetailQueue();
+    feedOpen = false;
     root.classList.add('open');
+    showManagePage();
+    root.scrollTop = 0;
+    render();
   }
 
   function close() {
@@ -1778,9 +1814,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     resetDetailQueue();
     feedOpen = false;
     if (root) {
+      showManagePage();
       root.classList.remove('open');
-      root.querySelector('.pss-feed-page').hidden = true;
-      root.querySelector('.pss-manage-page').hidden = false;
     }
   }
 
