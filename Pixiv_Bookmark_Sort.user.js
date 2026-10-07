@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.21
+// @version      0.6.22
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1239,18 +1239,19 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 })();
 
 
-// ---- Pixiv home content shield (v0.6.21) ----
+// ---- Pixiv home content shield (v0.6.22) ----
 (() => {
   try { if (window.top !== window.self) return; } catch { return; }
   'use strict';
-  if (window.__pixivHomeContentShieldV0621) return;
-  window.__pixivHomeContentShieldV0621 = true;
+  if (window.__pixivHomeContentShieldV0622) return;
+  window.__pixivHomeContentShieldV0622 = true;
 
   const KEY = 'pixiv-hide-home-recommendations-v1';
   const ROOT_ID = 'pixiv-home-display-settings-v1';
-  const STYLE_ID = 'pixiv-home-content-shield-style-v0621';
-  const HIDDEN_ATTR = 'data-pixiv-home-content-hidden';
-  const HTML_ATTR = 'data-pixiv-home-clean';
+  const CURTAIN_ID = 'pixiv-home-content-curtain-v0622';
+  const LEGACY_HIDDEN_ATTR = 'data-pixiv-home-content-hidden';
+  const LEGACY_HTML_ATTR = 'data-pixiv-home-clean';
+  const CURTAIN_Z = 2147482000;
   let enabled = true;
   let root = null;
   let scanTimer = null;
@@ -1271,107 +1272,105 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     return p === '/' || /^\/[a-z]{2}(?:-[a-z]{2})?$/i.test(p);
   }
 
-  function isToolNode(el) {
-    return !!el?.closest?.(
-      '#' + ROOT_ID +
-      ',#pixiv-tools-unified-bar' +
-      ',#pixiv-tools-unified-launch' +
-      ',#pixiv-tools-unified-placeholder' +
-      ',#pixiv-bookmark-sort-cross-page-v05' +
-      ',#pixiv-saved-searches-v1' +
-      ',#pnte-root'
-    );
-  }
-
-  function ensureStyle() {
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
-      html[${HTML_ATTR}="1"] main {
-        display:none!important;
-        visibility:hidden!important;
-      }
-      html[${HTML_ATTR}="1"] [${HIDDEN_ATTR}="1"] {
-        display:none!important;
-        visibility:hidden!important;
-      }
-    `;
-    (document.head || document.documentElement).appendChild(style);
-  }
-
-  function clearHidden() {
-    document.documentElement.removeAttribute(HTML_ATTR);
-    document.querySelectorAll('[' + HIDDEN_ATTR + '="1"]').forEach(el => {
-      el.removeAttribute(HIDDEN_ATTR);
+  function clearLegacyHidden() {
+    document.documentElement.removeAttribute(LEGACY_HTML_ATTR);
+    document.querySelectorAll('[' + LEGACY_HIDDEN_ATTR + '="1"]').forEach(el => {
+      el.removeAttribute(LEGACY_HIDDEN_ATTR);
       el.style.removeProperty('display');
       el.style.removeProperty('visibility');
     });
   }
 
-  function hide(el) {
-    if (!el || isToolNode(el)) return;
-    el.setAttribute(HIDDEN_ATTR, '1');
-    el.style.setProperty('display', 'none', 'important');
-    el.style.setProperty('visibility', 'hidden', 'important');
+  function visibleRect(el) {
+    if (!el?.getBoundingClientRect) return null;
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0 && r.bottom > 0)) return null;
+    const s = getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity || 1) === 0) return null;
+    return r;
   }
 
-  function nearestContentBlock(el) {
-    if (!el) return null;
-    const semantic = el.closest?.('section,article,li');
-    if (semantic && !semantic.closest?.('header,nav')) return semantic;
+  function headerBottom() {
+    const viewportW = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
+    const viewportH = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
+    const topLimit = Math.min(280, viewportH * 0.42);
+    let bottom = 0;
 
-    let node = el.parentElement;
-    for (let depth = 0; node && depth < 7; depth++, node = node.parentElement) {
-      if (node === document.body || node === document.documentElement) break;
-      if (node.closest?.('header,nav')) break;
-      const workLinks = node.querySelectorAll?.('a[href*="/artworks/"],a[href*="/novel/show.php?id="]').length || 0;
-      if (workLinks >= 1) return node;
+    // Prefer semantic top navigation when Pixiv exposes it.
+    for (const el of document.querySelectorAll('header,nav,[role="navigation"],[role="tablist"]')) {
+      if (el.id === CURTAIN_ID || el.closest?.('#' + ROOT_ID)) continue;
+      const r = visibleRect(el);
+      if (!r) continue;
+      if (r.top > topLimit || r.height > 260 || r.width < viewportW * 0.45) continue;
+      bottom = Math.max(bottom, r.bottom);
     }
-    return el;
+
+    // Mobile Pixiv sometimes renders the Home/Illustration/Manga/Novel tabs as
+    // ordinary links instead of a semantic <nav>. Their text is stable enough
+    // to use only for locating the bottom edge of the site chrome.
+    const tabText = /^(?:ホーム|イラスト|マンガ|漫画|小説|みつける|Home|Illustrations?|Manga|Novels?|Discover)$/i;
+    for (const el of document.querySelectorAll('a,button,[role="tab"]')) {
+      const text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!tabText.test(text)) continue;
+      const r = visibleRect(el);
+      if (!r || r.top > topLimit || r.height > 100) continue;
+      bottom = Math.max(bottom, r.bottom);
+    }
+
+    // Fallback is deliberately conservative: keep Pixiv's top controls visible,
+    // but cover everything that could contain artwork/novel recommendations.
+    if (!(bottom > 0)) bottom = viewportW <= 700 ? 146 : 82;
+    return Math.max(0, Math.min(Math.ceil(bottom + 2), Math.floor(viewportH * 0.48)));
   }
 
-  function hideLeaksOutsideMain() {
-    // Pixiv occasionally mounts home modules outside <main>. Hide any remaining
-    // artwork/novel cards on the top page so thumbnails and their labels cannot leak.
-    const workLinks = document.querySelectorAll(
-      'a[href*="/artworks/"],a[href*="/novel/show.php?id="]'
-    );
-    for (const a of workLinks) {
-      if (isToolNode(a) || a.closest?.('main,header,nav')) continue;
-      hide(nearestContentBlock(a));
+  function ensureCurtain() {
+    let curtain = document.getElementById(CURTAIN_ID);
+    if (!curtain) {
+      curtain = document.createElement('div');
+      curtain.id = CURTAIN_ID;
+      curtain.setAttribute('aria-hidden', 'true');
+      curtain.style.cssText =
+        'display:none;position:fixed;left:0;right:0;bottom:0;background:#fff;' +
+        'pointer-events:auto;touch-action:auto;overscroll-behavior:contain;';
+      (document.body || document.documentElement).appendChild(curtain);
     }
+    return curtain;
+  }
 
-    // Explicit home modules such as "コレクション" may render their heading before
-    // the works themselves. Hide the entire module immediately by its heading text.
-    for (const h of document.querySelectorAll('h1,h2,h3,h4,[role="heading"]')) {
-      if (isToolNode(h) || h.closest?.('header,nav,main')) continue;
-      const text = String(h.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!text) continue;
-      if (!/(?:コレクション|おすすめ|あなたへのおすすめ|フォロー中の新着|新着作品|ランキング|みんなの新着|recommended|for you|following|new works?)/i.test(text)) continue;
-      hide(nearestContentBlock(h));
-    }
+  function showCurtain() {
+    const curtain = ensureCurtain();
+    curtain.style.setProperty('top', headerBottom() + 'px', 'important');
+    curtain.style.setProperty('z-index', String(CURTAIN_Z), 'important');
+    curtain.style.setProperty('display', 'block', 'important');
+    curtain.style.setProperty('visibility', 'visible', 'important');
+    curtain.style.setProperty('opacity', '1', 'important');
+  }
+
+  function hideCurtain() {
+    const curtain = document.getElementById(CURTAIN_ID);
+    if (!curtain) return;
+    curtain.style.setProperty('display', 'none', 'important');
   }
 
   function apply() {
     clearTimeout(scanTimer);
     scanTimer = null;
-    ensureStyle();
+    clearLegacyHidden();
 
     if (!enabled || !isHome()) {
-      clearHidden();
+      hideCurtain();
       return;
     }
 
-    // Strong mode: no artwork/novel feed is allowed on Pixiv home.
-    // Header/search/navigation and this userscript's tools remain available.
-    document.documentElement.setAttribute(HTML_ATTR, '1');
-    hideLeaksOutsideMain();
+    // Do not depend on Pixiv's recommendation/card DOM. A fixed opaque curtain
+    // covers the entire content region below the site's own top navigation.
+    // Pixiv tools use a higher z-index and remain operable above this layer.
+    showCurtain();
   }
 
   function schedule() {
     clearTimeout(scanTimer);
-    scanTimer = setTimeout(apply, 60);
+    scanTimer = setTimeout(apply, 50);
   }
 
   function build() {
@@ -1394,7 +1393,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     span.textContent = 'トップの作品コンテンツを完全に非表示';
     label.append(input, span);
     const note = document.createElement('p');
-    note.textContent = 'Pixivトップでは、イラスト・漫画・小説のサムネイル、作品名、コレクション、おすすめ、フォロー新着、ランキング等の作品フィードを表示しません。検索結果・タグ検索・作者ページ・作品ページ・ブックマークには影響しません。';
+    note.textContent = 'Pixivトップでは、上部のPixivナビゲーションより下を白いレイヤーで覆い、イラスト・漫画・小説・コレクション・おすすめ等を表示しません。検索結果・タグ検索・作者ページ・作品ページ・ブックマークには影響しません。';
     note.style.cssText = 'margin:10px 0 0;color:#66717e;font-size:12px;';
     input.addEventListener('change', () => {
       enabled = !!input.checked;
@@ -1419,13 +1418,15 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
 
   load();
-  ensureStyle();
+  clearLegacyHidden();
   apply();
 
   const observer = new MutationObserver(schedule);
   if (document.documentElement) observer.observe(document.documentElement, {childList:true, subtree:true});
   window.addEventListener('popstate', schedule, true);
   window.addEventListener('hashchange', schedule, true);
+  window.addEventListener('resize', schedule, true);
+  window.addEventListener('orientationchange', schedule, true);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) schedule(); });
 
   window.__pixivHomeDisplayUi = {open, close, apply, isEnabled:() => enabled};
