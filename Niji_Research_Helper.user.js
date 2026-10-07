@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.95
+// @version      1.0.96
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.95';
+  const VERSION = '1.0.96';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -6886,25 +6886,12 @@
       if (searchToken !== searchOtherPovsFromYoutube._runToken) return;
       resetYoutubePovDiagnostics(source, sec);
 
-      // Fast first paint: two focused first-page requests in parallel.
-      const fastCandidates = await fetchYoutubePovFastCandidates(source, sec);
-      if (searchToken !== searchOtherPovsFromYoutube._runToken) return;
-      let currentCandidates = fastCandidates;
-      let matches = buildMatches(source, currentCandidates, sec);
-      renderYoutubeMatches(source, matches, sec);
-      attachPovSupplement(source, matches, sec, true, currentCandidates);
+      let currentCandidates = [];
+      let matches = [];
 
-      if (isMobileYoutubeUi()) {
-        const panel = $('#npf-yt-panel');
-        if (panel && results) {
-          const position = results.getBoundingClientRect().top - panel.getBoundingClientRect().top;
-          panel.scrollTop += position - 64;
-        }
-      }
-
-      // Favorites are expected to be surfaced first. Query every saved favorite
-      // channel directly for this time window and merge each result as soon as
-      // that channel returns; do not wait for all favorites or the broad search.
+      // Favorites are the highest-priority path. Start them immediately after
+      // source metadata is available; never wait for the focused Holodex search.
+      // This matters when one fast Holodex request stalls until its ~20s timeout.
       const mergeAndRender = (incoming = []) => {
         if (searchToken !== searchOtherPovsFromYoutube._runToken || !incoming.length) return;
         const mergedMap = new Map(currentCandidates.map(v => [v.id, v]));
@@ -6913,8 +6900,25 @@
         matches = buildMatches(source, currentCandidates, sec);
         renderYoutubeMatches(source, matches, sec);
       };
+
       void fetchFavoritePovCandidates(source, sec, batch => mergeAndRender(batch))
         .catch(e => console.debug('[NRH][YouTube POV favorites]', String(e?.message || e)));
+
+      // Run the focused first-page Holodex search at the same time. When it
+      // returns, merge it into anything favorites may already have displayed.
+      void fetchYoutubePovFastCandidates(source, sec).then(fastCandidates => {
+        if (searchToken !== searchOtherPovsFromYoutube._runToken) return;
+        mergeAndRender(fastCandidates);
+        attachPovSupplement(source, matches, sec, true, currentCandidates);
+
+        if (isMobileYoutubeUi()) {
+          const panel = $('#npf-yt-panel');
+          if (panel && results) {
+            const position = results.getBoundingClientRect().top - panel.getBoundingClientRect().top;
+            panel.scrollTop += position - 64;
+          }
+        }
+      }).catch(e => console.debug('[NRH][YouTube POV fast background]', String(e?.message || e)));
 
       // Expand in the background. Never keep the user on a loading screen while
       // the broad 24h/page search completes.
