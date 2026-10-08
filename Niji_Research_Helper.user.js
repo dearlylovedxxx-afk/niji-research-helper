@@ -1133,14 +1133,20 @@
     if(await favoriteCloudSha(bytes)!==item.sha256)throw new Error('APIキー同期SHA-256検証失敗');
     const data=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
     if(data?.app!=='Niji Research Helper'||data?.device!==API_SECRET_CLOUD_DEVICE ||
-        data?.version!==1||!data.encrypted)throw new Error('暗号化バックアップ形式が違います');
-    return data.encrypted;
+        data?.dbVersion!==NRH_DB_VERSION || !data?.preferences?.apiSecretEncrypted ||
+        CLOUD_STORES.some(name=>!Array.isArray(data?.stores?.[name])))
+      throw new Error('暗号化バックアップ形式が違います');
+    return data.preferences.apiSecretEncrypted;
   }
 
   async function apiSecretUpload(rows,token) {
     const envelope=await apiSecretEncrypt(rows,state.apiSecretCrypto);
-    const payload={app:'Niji Research Helper',device:API_SECRET_CLOUD_DEVICE,
-      version:1,encrypted:envelope};
+    // Follow the existing /v1/backups NRH envelope contract. All actual
+    // credentials live ONLY in AES-GCM ciphertext under preferences.
+    const stores={};for(const name of CLOUD_STORES)stores[name]=[];
+    const payload={app:'Niji Research Helper',version:VERSION,dbVersion:NRH_DB_VERSION,
+      exportedAt:new Date().toISOString(),sourceOrigin:PREF_CLOUD_ORIGIN,
+      device:API_SECRET_CLOUD_DEVICE,stores,preferences:{apiSecretEncrypted:envelope}};
     const body=JSON.stringify(payload),bytes=new TextEncoder().encode(body);
     const digest=await favoriteCloudSha(bytes);
     const res=await gmRequest({method:'POST',url:CLOUD_URL+'/v1/backups',
