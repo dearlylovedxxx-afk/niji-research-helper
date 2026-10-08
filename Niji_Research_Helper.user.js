@@ -6374,7 +6374,7 @@
   }
 
   function youtubeCommentRoots() {
-    return $(YT_COMMENT_ROOT_SELECTOR).filter(root => {
+    return Array.from(document.querySelectorAll(YT_COMMENT_ROOT_SELECTOR)).filter(root => {
       if (!(root instanceof Element) || !root.isConnected) return false;
       const parent = root.parentElement;
       return !parent?.closest?.(YT_COMMENT_ROOT_SELECTOR);
