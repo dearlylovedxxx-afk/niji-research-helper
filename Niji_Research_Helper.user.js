@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.97
+// @version      1.0.98
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.97';
+  const VERSION = '1.0.98';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5924,6 +5924,11 @@
     width: 360,
     widthLoaded: false,
     resizing: false,
+    dragging: false,
+    // Position offsets relative to the video player (not the viewport).
+    // null means the default position; only save after user interaction.
+    x: null,
+    y: null,
     scrollTop: 0,
   };
 
@@ -5948,6 +5953,8 @@
       const saved = await gmGet(KEY_YT_PRIORITY_OVERLAY_UI, {});
       if (saved && typeof saved === 'object') {
         youtubePriorityOverlayUi.width = clampYoutubePriorityOverlayWidth(saved.width);
+        if (saved.x != null && Number.isFinite(Number(saved.x))) youtubePriorityOverlayUi.x = Math.round(Number(saved.x));
+        if (saved.y != null && Number.isFinite(Number(saved.y))) youtubePriorityOverlayUi.y = Math.round(Number(saved.y));
       }
     } catch {}
     const root = $('#npf-yt-priority-overlay');
@@ -5958,6 +5965,8 @@
     try {
       await GM.setValue(KEY_YT_PRIORITY_OVERLAY_UI, {
         width: Math.round(youtubePriorityOverlayUi.width),
+        x: youtubePriorityOverlayUi.x,
+        y: youtubePriorityOverlayUi.y,
         savedAt: Date.now(),
       });
     } catch (e) {
@@ -6007,27 +6016,56 @@
 
   function styleYoutubePriorityOverlay(root) {
     if (!root) return;
+    const host = youtubeTimestampPlayerHost();
+    if (!host) { root.style.display = 'none'; return; }
+
+    // A document-level portal avoids the competing chat overlay's stacking
+    // context inside the YouTube video player. Keep it visually attached to
+    // the player with fresh viewport coordinates on each UI tick.
+    const rect = host.getBoundingClientRect();
+    const vw = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
+    const vh = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
+    const visible = rect.width >= 140 && rect.height >= 90
+      && rect.right > 0 && rect.left < vw && rect.bottom > 0 && rect.top < vh;
+    if (!visible) { root.style.display = 'none'; return; }
+
     const mobile = isMobileYoutubeUi();
+    const maxWidth = Math.max(120, Math.floor(Math.min(rect.width - 12, vw - 12)));
+    const wantedWidth = youtubePriorityOverlayUi.collapsed
+      ? Math.min(160, maxWidth)
+      : clampYoutubePriorityOverlayWidth(youtubePriorityOverlayUi.width, host);
+    const width = Math.min(maxWidth, wantedWidth);
+    const maxHeight = Math.max(75, Math.floor(rect.height * (mobile ? 0.58 : 0.72)));
+    const currentHeight = root.getBoundingClientRect().height || Math.min(185, maxHeight);
+    const maxX = Math.max(4, Math.floor(rect.width - width - 4));
+    const maxY = Math.max(4, Math.floor(rect.height - Math.min(currentHeight, maxHeight) - 4));
+    const x = Math.max(4, Math.min(maxX,
+      youtubePriorityOverlayUi.x == null ? (mobile ? 58 : 20) : youtubePriorityOverlayUi.x));
+    const y = Math.max(4, Math.min(maxY,
+      youtubePriorityOverlayUi.y == null ? (mobile ? 52 : 36) : youtubePriorityOverlayUi.y));
+
+    const left = Math.max(0, Math.min(vw - Math.min(width, vw),
+      Math.round(rect.left + x)));
+    const top = Math.max(0, Math.min(vh - 40, Math.round(rect.top + y)));
+
     root.style.cssText = [
-      'position:absolute',
-      `left:${mobile ? '6px' : '10px'}`,
-      `top:${mobile ? '8%' : '7%'}`,
-      'z-index:86',
+      'position:fixed',
+      `left:${left}px`, `top:${top}px`,
+      'right:auto','bottom:auto',
+      'z-index:2147483500',
       'display:flex','flex-direction:column',
-      `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : clampYoutubePriorityOverlayWidth(youtubePriorityOverlayUi.width, root.parentElement) + 'px'}`,
-      `max-width:${mobile ? '82%' : '72%'}`,
-      `min-width:${youtubePriorityOverlayUi.collapsed ? '0' : mobile ? '170px' : '220px'}`,
-      `max-height:${mobile ? '58%' : '72%'}`,
+      `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : width + 'px'}`,
+      `max-width:${maxWidth}px`,
+      `min-width:${youtubePriorityOverlayUi.collapsed ? '0' : Math.min(mobile ? 170 : 220, maxWidth) + 'px'}`,
+      `max-height:${maxHeight}px`,
       'border:1px solid rgba(255,255,255,.20)',
       'border-radius:10px',
-      'background:rgba(12,12,12,.46)',
+      'background:rgba(12,12,12,.58)',
       '-webkit-backdrop-filter:blur(5px)',
       'backdrop-filter:blur(5px)',
       'box-shadow:0 3px 14px rgba(0,0,0,.28)',
-      'color:#fff',
-      'font-family:inherit',
-      'pointer-events:auto',
-      'overflow:hidden',
+      'color:#fff','font-family:inherit',
+      'pointer-events:auto','overflow:hidden',
       'box-sizing:border-box'
     ].join(';');
   }
@@ -6077,12 +6115,15 @@
     if (!host) return existing || null;
 
     let root = existing;
+    // Mount above the player as a viewport-fixed sibling, not inside the
+    // player's stacked layers where Live Chat Overlay can cover it.
+    const portal = document.documentElement;
     if (!root) {
       root = document.createElement('section');
       root.id = 'npf-yt-priority-overlay';
-      host.appendChild(root);
-    } else if (root.parentElement !== host) {
-      host.appendChild(root);
+      portal.appendChild(root);
+    } else if (root.parentElement !== portal) {
+      portal.appendChild(root);
     }
 
     styleYoutubePriorityOverlay(root);
@@ -6102,6 +6143,51 @@
         'font-size:12px','font-weight:800','line-height:1.2',
         'user-select:none'
       ].join(';');
+
+      const move = document.createElement('div');
+      move.textContent = '⠿ 移動';
+      move.title = 'ドラッグして優先コメントの位置を移動';
+      move.setAttribute('aria-label', move.title);
+      move.style.cssText = [
+        'flex:0 0 auto','font:800 11px/1.2 sans-serif',
+        'padding:5px 6px','border-radius:5px',
+        'background:rgba(255,255,255,.13)','cursor:grab',
+        'touch-action:none','user-select:none','-webkit-user-select:none'
+      ].join(';');
+      let dragStart = null;
+      move.addEventListener('pointerdown', e => {
+        if (e.button != null && e.button !== 0) return;
+        dragStart = {
+          x: Number(e.clientX), y: Number(e.clientY),
+          left: root.getBoundingClientRect().left,
+          top: root.getBoundingClientRect().top,
+        };
+        youtubePriorityOverlayUi.dragging = true;
+        try { move.setPointerCapture(e.pointerId); } catch {}
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      move.addEventListener('pointermove', e => {
+        if (!dragStart || !youtubePriorityOverlayUi.dragging) return;
+        const hostRect = youtubeTimestampPlayerHost()?.getBoundingClientRect();
+        if (!hostRect) return;
+        youtubePriorityOverlayUi.x = Math.round(
+          dragStart.left + Number(e.clientX) - dragStart.x - hostRect.left);
+        youtubePriorityOverlayUi.y = Math.round(
+          dragStart.top + Number(e.clientY) - dragStart.y - hostRect.top);
+        styleYoutubePriorityOverlay(root);
+        e.preventDefault();
+      });
+      const endDrag = e => {
+        if (!youtubePriorityOverlayUi.dragging) return;
+        youtubePriorityOverlayUi.dragging = false;
+        dragStart = null;
+        try { move.releasePointerCapture(e.pointerId); } catch {}
+        void saveYoutubePriorityOverlayWidth();
+        e.preventDefault();
+      };
+      move.addEventListener('pointerup', endDrag);
+      move.addEventListener('pointercancel', endDrag);
 
       const title = document.createElement('button');
       title.type = 'button';
@@ -6131,7 +6217,7 @@
       };
       title.addEventListener('click', toggleCollapsed);
       toggle.addEventListener('click', toggleCollapsed);
-      head.append(title, toggle);
+      head.append(move, title, toggle);
       root.appendChild(head);
 
       if (!youtubePriorityOverlayUi.collapsed) {
@@ -6151,9 +6237,10 @@
         const onMove = e => {
           if (!youtubePriorityOverlayUi.resizing) return;
           const next = startWidth + (Number(e.clientX) - startX);
-          youtubePriorityOverlayUi.width = clampYoutubePriorityOverlayWidth(next, root.parentElement);
+          youtubePriorityOverlayUi.width = clampYoutubePriorityOverlayWidth(next, youtubeTimestampPlayerHost());
           root.style.setProperty('width', youtubePriorityOverlayUi.width + 'px', 'important');
           root.querySelector('.npf-yt-priority-overlay-body')?.style.setProperty('width', '100%', 'important');
+          styleYoutubePriorityOverlay(root);
           e.preventDefault();
         };
         const onEnd = e => {
