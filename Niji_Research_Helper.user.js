@@ -7820,6 +7820,31 @@
     footer.textContent='Niji Research Helper v'+VERSION;
     footer.style.cssText='font-size:11px;text-align:right;opacity:.65;margin:14px 0;';
     pane.append(footer);
+    // Macaque/iPad Safari may ignore GM.addStyle. Settings must remain readable
+    // and tappable using inline CSS even when the shared stylesheet is absent.
+    pane.querySelectorAll('.npf-r-btn').forEach(el=>{
+      el.style.setProperty('min-height','42px');
+      el.style.setProperty('max-width','100%');
+      el.style.setProperty('font-size','13px');
+      el.style.setProperty('color','#f5f7ff');
+      el.style.setProperty('background','#303b53');
+      el.style.setProperty('border','1px solid #52607e');
+      el.style.setProperty('border-radius','9px');
+      el.style.setProperty('padding','8px 11px');
+      el.style.setProperty('white-space','normal');
+      el.style.setProperty('overflow-wrap','anywhere');
+    });
+    pane.querySelectorAll('.npf-r-input, input[type="password"], #npf-yt-copy-mode').forEach(el=>{
+      el.style.setProperty('min-width','0');
+      el.style.setProperty('max-width','100%');
+      el.style.setProperty('box-sizing','border-box');
+      el.style.setProperty('color','#f5f7ff');
+      el.style.setProperty('background','#101727');
+      el.style.setProperty('border','1px solid #586887');
+      el.style.setProperty('border-radius','8px');
+      el.style.setProperty('padding','8px');
+      el.style.setProperty('font-size','13px');
+    });
     void updateYoutubeSettingsStatus();
     return pane;
   }
@@ -7967,6 +7992,7 @@
       installYoutubePanelResize(panel, head, closeBtn);
     }
     syncYoutubePanelVisibility();
+    cloudUpdateUi();
 
     closeBtn.addEventListener('click', closeYoutubePanel);
     $$('[data-seek]', panel).forEach(btn => btn.addEventListener('click', () => seekYoutube(Number(btn.dataset.seek || 0))));
