@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.101
+// @version      1.0.102
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.101';
+  const VERSION = '1.0.102';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -7699,6 +7699,140 @@
     });
   }
 
+
+  // All user-facing settings live together in the NIJI panel. This is a
+  // separate pane, not another floating control over the video.
+  async function updateYoutubeSettingsStatus() {
+    const hd = document.getElementById('npf-yt-holodex-status');
+    const yt = document.getElementById('npf-yt-youtube-api-status');
+    if (hd) hd.textContent = String(await gmGet(KEY_API, '') || '').trim()
+      ? '✅ 保存済み' : '未設定';
+    if (yt) yt.textContent = String(await gmGet(KEY_YT_API, '') || '').trim()
+      ? '✅ 保存済み' : '未設定';
+    const cloudStatus = document.getElementById('npf-yt-cloud-connection');
+    if (cloudStatus) {
+      const cfg = await gmGet(CLOUD_CONFIG_KEY, {});
+      cloudStatus.textContent = cfg?.enabled && cfg?.token
+        ? '✅ Niji Cloud接続済み' : '⚠️ Niji Cloud未接続';
+    }
+  }
+
+  function createYoutubeSettingsUi(copyPref) {
+    const pane = document.createElement('div');
+    pane.id = 'npf-yt-settings-body';
+    pane.style.cssText = 'padding:14px 16px 28px;color:#f2f5ff;font:13px/1.55 -apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif;display:none;';
+    const top = document.createElement('div');
+    top.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px;';
+    const heading = document.createElement('strong');
+    heading.textContent = '⚙ NIJI 総合設定';
+    heading.style.cssText = 'font-size:16px;';
+    const back = document.createElement('button');
+    back.type = 'button';back.textContent = '← 戻る';
+    back.className='npf-yt-btn';
+    back.style.cssText='min-height:36px;padding:6px 10px;';
+    back.addEventListener('click',()=>{
+      if (isMobileYoutubeUi()) setMobileYoutubeTab('pov');
+      else showYoutubeSettings(false);
+    });
+    if (isMobileYoutubeUi()) back.style.display='none';
+    top.append(heading,back);pane.append(top);
+
+    const intro = document.createElement('div');
+    intro.textContent = 'APIキー・クラウド・再生設定・データ管理をここから変更できます。各項目を押すと開きます。';
+    intro.style.cssText = 'font-size:12px;color:#cbd6ee;margin-bottom:12px;';
+    pane.append(intro);
+
+    const section=(label,expanded=false)=>{
+      const details=document.createElement('details');
+      details.open=expanded;
+      details.style.cssText='border:1px solid #506181;border-radius:11px;background:#202a40;margin:9px 0;overflow:hidden;';
+      const summary=document.createElement('summary');
+      summary.textContent=label;
+      summary.style.cssText='padding:12px;cursor:pointer;font-size:14px;font-weight:800;min-height:20px;user-select:none;';
+      const inner=document.createElement('div');
+      inner.style.cssText='padding:0 12px 12px;display:grid;gap:9px;';
+      details.append(summary,inner);pane.append(details);
+      return inner;
+    };
+    const line=(parent,label,id)=>{
+      const wrap=document.createElement('div');
+      wrap.style.cssText='display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:5px;';
+      const name=document.createElement('strong');name.textContent=label;
+      const status=document.createElement('span');status.id=id;status.textContent='確認中…';
+      status.style.cssText='font-size:12px;color:#c5d9ff;';
+      wrap.append(name,status);parent.append(wrap);
+    };
+    const button=(parent,label,fn)=>{
+      const el=document.createElement('button');el.type='button';el.className='npf-yt-btn';
+      el.textContent=label;
+      el.style.cssText='display:block;width:100%;min-height:40px;text-align:left;padding:9px 12px;white-space:normal;';
+      el.addEventListener('click',fn);
+      parent.append(el);
+      return el;
+    };
+    const note=(parent,text)=>{
+      const el=document.createElement('div');el.textContent=text;
+      el.style.cssText='font-size:12px;opacity:.83;line-height:1.55;';
+      parent.append(el);
+      return el;
+    };
+
+    const api = section('🔑 APIキー',true);
+    line(api,'YouTube Data API','npf-yt-youtube-api-status');
+    button(api,'YouTube APIキーを登録・変更',()=>void setYoutubePriorityApiKey()
+      .finally(()=>void updateYoutubeSettingsStatus()));
+    line(api,'Holodex API','npf-yt-holodex-status');
+    button(api,'Holodex APIキーを登録・変更',()=>void openYoutubeQuickSettings()
+      .finally(()=>void updateYoutubeSettingsStatus()));
+    note(api,'YouTube APIは優先コメントの自動検索などに、Holodex APIは別視点検索やアーカイブ情報の取得に使います。キーの値はこの画面には表示しません。');
+
+    const apiSync = section('🔐 APIキーを端末間で共有');
+    const apiSyncUi=createApiSecretUi();
+    apiSyncUi.style.margin='0';
+    apiSync.append(apiSyncUi);
+
+    const cloud = section('☁️ Niji Cloud・バックアップ');
+    const cloudConnection=document.createElement('div');
+    cloudConnection.id='npf-yt-cloud-connection';
+    cloudConnection.style.cssText='font-weight:750;color:#c5d9ff;';
+    cloudConnection.textContent='接続状態を確認中…';
+    cloud.append(cloudConnection);
+    const cloudUi=createCloudBackupUi();
+    cloudUi.style.margin='0';
+    cloud.append(cloudUi);
+
+    const display = section('▶ 再生・コメント設定');
+    copyPref.style.cssText='display:flex;flex-wrap:wrap;align-items:center;gap:9px;padding:10px;border:1px solid #465675;border-radius:9px;';
+    display.append(copyPref);
+    button(display,'⭐ 優先コメント診断',showYoutubePriorityDiagnostic);
+    note(display,'優先ユーザーの登録・解除は各動画のコメント欄から操作できます。登録済みユーザーや同期データはそのまま維持されます。');
+
+    const data = section('💾 データ管理・メンテナンス');
+    const dbActions=document.createElement('div');
+    dbActions.id='npf-yt-settings-data-actions';
+    dbActions.style.cssText='display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;';
+    const existingDbActions=$('#npf-r-db-actions');
+    if(existingDbActions)dbActions.appendChild(existingDbActions);
+    data.append(dbActions);
+    note(data,'調査DBのバックアップ・復元などを管理します。削除・初期化の操作は確認後に実行されます。');
+
+    const footer=document.createElement('div');
+    footer.textContent='Niji Research Helper v'+VERSION;
+    footer.style.cssText='font-size:11px;text-align:right;opacity:.65;margin:14px 0;';
+    pane.append(footer);
+    void updateYoutubeSettingsStatus();
+    return pane;
+  }
+
+  function showYoutubeSettings(show=true) {
+    const panel=$('#npf-yt-panel');
+    if(!panel)return;
+    if(isMobileYoutubeUi()) {setMobileYoutubeTab(show?'settings':'pov');return;}
+    $('#npf-yt-pov-body',panel)?.style.setProperty('display',show?'none':'block','important');
+    $('#npf-yt-settings-body',panel)?.style.setProperty('display',show?'block':'none','important');
+    if(show)void updateYoutubeSettingsStatus();
+  }
+
   function ensureYoutubePanel() {
     if (!isYoutubeHost()) return null;
     let panel = $('#npf-yt-panel');
@@ -7725,7 +7859,7 @@
 
     if (isMobileYoutubeUi()) {
       const tabs = make('div', { id: 'npf-yt-tabs', cls: 'npf-yt-tabs' });
-      for (const [tab, label] of [['pov', '👥 他視点'], ['research', '🔎 アーカイブ'], ['chat', '💬 チャット']]) {
+      for (const [tab, label] of [['pov', '👥 他視点'], ['research', '🔎 アーカイブ'], ['chat', '💬 チャット'], ['settings', '⚙ 設定']]) {
         const button = make('button', { cls: 'npf-yt-tab', text: label, type: 'button' });
         button.dataset.npfTab = tab;
         button.setAttribute('aria-pressed', String(tab === mobileYoutubeTab));
@@ -7779,14 +7913,13 @@
       ['npf-yt-save-sync', 'npf-yt-btn', '⏱ 同期位置を保存'],
       ['npf-yt-clear-sync', 'npf-yt-btn', '同期を解除'],
       ['npf-yt-favorite', 'npf-yt-btn', '☆ お気に入り切替'],
-      ['npf-yt-settings', 'npf-yt-btn', '⚙ APIキー'],
-      ['npf-yt-priority-debug', 'npf-yt-btn', '⭐ 優先コメント診断']
+      ['npf-yt-settings', 'npf-yt-btn', '⚙ 総合設定']
     ];
     for (const [id, cls, label] of actionDefs) {
       actions.appendChild(make('button', { id, cls, text: label, type: 'button' }));
     }
     body.appendChild(actions);
-    body.appendChild(createApiSecretUi());
+    if(isMobileYoutubeUi()) $('#npf-yt-settings',actions)?.style.setProperty('display','none','important');
 
     const copyPref = make('div', { cls: 'npf-yt-copy-pref' });
     const copyLabel = make('label', { text: 'コピー形式' });
@@ -7804,7 +7937,7 @@
     copySelect.value = state.settings.youtubeCopyMode === 'url-only' ? 'url-only' : 'title-url';
     copyPref.appendChild(copyLabel);
     copyPref.appendChild(copySelect);
-    body.appendChild(copyPref);
+    // Playback preference is now in the consolidated settings pane.
 
     body.appendChild(make('div', { cls: 'npf-yt-divider' }));
     body.appendChild(make('div', {
@@ -7816,6 +7949,7 @@
     body.appendChild(results);
 
     panel.appendChild(body);
+    panel.appendChild(createYoutubeSettingsUi(copyPref));
     if (isMobileYoutubeUi()) {
       // Keep the overlay outside YouTube's frequently replaced mobile body.
       document.documentElement.appendChild(panel);
@@ -7853,8 +7987,7 @@
     });
     $('#npf-yt-clear-sync', panel)?.addEventListener('click', () => void clearYoutubeSync());
     $('#npf-yt-favorite', panel)?.addEventListener('click', () => void favoriteCurrentYoutubeChannel());
-    $('#npf-yt-settings', panel)?.addEventListener('click', () => void openYoutubeQuickSettings());
-    $('#npf-yt-priority-debug', panel)?.addEventListener('click', showYoutubePriorityDiagnostic);
+    $('#npf-yt-settings', panel)?.addEventListener('click', () => showYoutubeSettings());
 
     updateYoutubePanel();
     if (isMobileYoutubeUi()) {
@@ -8001,7 +8134,7 @@
 
   function setMobileYoutubeTab(tab) {
     if (!isMobileYoutubeUi()) return;
-    mobileYoutubeTab = tab === 'research' ? 'research' : 'pov';
+    mobileYoutubeTab = ['pov','research','settings'].includes(tab) ? tab : 'pov';
     if (mobileYoutubeTab === 'research') {
       try { ensureMobileYoutubeResearchTab(); handleResearchNavigation(); scanYoutubeResearchCards(); }
       catch (error) { console.warn('[NRH] mobile research tab', error); toast('調査画面の表示に失敗しました'); }
@@ -8011,8 +8144,12 @@
     if (!parent) return;
     const pov = $('#npf-yt-pov-body');
     if (pov) pov.style.setProperty('display', mobileYoutubeTab === 'pov' ? 'block' : 'none', 'important');
+    const settings=$('#npf-yt-settings-body',parent);
+    if(settings) settings.style.setProperty('display',mobileYoutubeTab==='settings'?'block':'none','important');
+    if(mobileYoutubeTab==='settings')void updateYoutubeSettingsStatus();
     const title = parent.querySelector('.npf-yt-head-title');
-    if (title) title.textContent = mobileYoutubeTab === 'research' ? '🔎 アーカイブ調査' : '👥 他視点・同期';
+    if (title) title.textContent = mobileYoutubeTab === 'research' ? '🔎 アーカイブ調査'
+      : mobileYoutubeTab === 'settings' ? '⚙ 総合設定' : '👥 他視点・同期';
     parent.querySelectorAll('[data-npf-tab]').forEach(btn => {
       const selected = btn.dataset.npfTab === mobileYoutubeTab;
       btn.setAttribute('aria-pressed', String(selected));
@@ -11443,8 +11580,12 @@ e.el.classList.toggle('npf-r-hidden', !show);
     dbRestore.addEventListener('click', () => dbFile.click());
     dbFile.addEventListener('change', () => { const f = dbFile.files?.[0]; if (f) void restoreResearchDbFile(f); dbFile.value = ''; });
     const dbClear = document.createElement('button'); dbClear.id = 'npf-r-db-clear'; dbClear.type = 'button'; dbClear.className = 'npf-r-btn'; dbClear.textContent = '🗑 DB初期化'; dbClear.addEventListener('click', () => void clearResearchDb());
-    dbActions.append(dbBackup, dbRestore, dbClear, dbFile); body.appendChild(dbActions);
-    body.appendChild(createCloudBackupUi());
+    dbActions.id='npf-r-db-actions';
+    dbActions.append(dbBackup, dbRestore, dbClear, dbFile);
+    const settingsDataActions=$('#npf-yt-settings-data-actions');
+    if(settingsDataActions) settingsDataActions.appendChild(dbActions);
+    else body.appendChild(dbActions);
+    // Cloud settings are in the central NIJI Settings tab, not in archive filters.
     void updateResearchDbStatus();
     body.appendChild(nrhCreateWikiDiagnosisUi());
 
