@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.100
+// @version      1.0.101
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.100';
+  const VERSION = '1.0.101';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -93,6 +93,10 @@
   const CLOUD_STORES = ['videos','channels','wiki','pairs'];
   const RESEARCH_CLOUD_DEVICE = 'nrh-research-global';
   const PREF_CLOUD_DEVICE = 'nrh-preferences-global';
+  // API secrets never enter research or preference snapshots.
+  const API_SECRET_CLOUD_DEVICE = 'nrh-api-secrets-global';
+  const API_SECRET_CRYPTO_LOCAL = 'npf_api_secrets_crypto_local_v1';
+  const API_SECRET_REVISIONS_LOCAL = 'npf_api_secrets_revisions_local_v1';
   const PREF_CLOUD_ORIGIN = 'https://www.youtube.com';
 
   function nrhDbEnabled() {
@@ -460,6 +464,11 @@
     preferenceCloudTimer: null,
     preferenceCloudSuppress: 0,
     wikiCache: {},
+    apiSecretCrypto: null,
+    apiSecretBusy: false,
+    apiSecretReady: false,
+    apiSecretStatus: '未設定。同期用の合言葉を登録してください。',
+    apiSecretTimer: null,
   };
 
   // ---------- compatibility helpers ----------
@@ -476,6 +485,11 @@
   async function gmSet(key, value) {
     try {
       await GM.setValue(key, value);
+      if (key === KEY_API || key === KEY_YT_API) {
+        // Deliberate edits are versioned. Direct GM writes during cloud restore
+        // bypass this hook so a remote value is not mistaken for a local edit.
+        await apiSecretRecordLocalChange(key === KEY_API ? 'holodex' : 'youtube', String(value || ''));
+      }
       if ([KEY_LIVER_FAVS, KEY_SETTINGS, KEY_SYNC, KEY_CAL].includes(key)) cloudMarkChanged();
       if ([KEY_SETTINGS, KEY_SYNC, KEY_CAL].includes(key) && !state.preferenceCloudSuppress) {
         state.preferenceRevision = Math.max(Date.now(), Number(state.preferenceRevision || 0) + 1);
@@ -1016,6 +1030,321 @@
     }catch(e){console.warn('[NRH][preference cloud init]',e);}
   }
 
+
+  // ---------- encrypted API key sync (independent from ordinary Niji Cloud settings) ----------
+  // The user's passphrase is used once on each device to derive a 256-bit AES
+  // key with PBKDF2-SHA256/310k and a random user-specific salt. Only the
+  // derived key and salt stay in local GM storage; the passphrase never does.
+  // pCloud receives AES-GCM ciphertext, salt and a fresh random nonce only.
+  const API_SECRET_KDF_ITERATIONS = 310000;
+  const apiSecretTypes = ['holodex','youtube'];
+
+  function apiSecretB64(bytes) {
+    const raw = Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+    return btoa(raw);
+  }
+
+  function apiSecretUnb64(value) {
+    const input = String(value || '');
+    if (!input || !/^[A-Za-z0-9+/]+={0,2}$/.test(input)) throw new Error('暗号データ形式が不正です');
+    return Uint8Array.from(atob(input), c => c.charCodeAt(0));
+  }
+
+  function apiSecretSetStatus(message) {
+    state.apiSecretStatus = String(message);
+    const el = document.getElementById('npf-api-secret-status');
+    if (el) el.textContent = state.apiSecretStatus;
+  }
+
+  async function apiSecretLocalConfig() {
+    const cfg = await gmGet(CLOUD_CONFIG_KEY, null);
+    if (!cfg || cfg.enabled !== true || typeof cfg.token !== 'string' || !cfg.token.trim())
+      throw new Error('先にNiji Cloudを接続してください');
+    return cfg.token.trim();
+  }
+
+  async function apiSecretDerive(passphrase, salt) {
+    if (!crypto?.subtle) throw new Error('このブラウザではWeb Cryptoが利用できません');
+    const source = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase),
+      {name:'PBKDF2'}, false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({
+      name:'PBKDF2', hash:'SHA-256', salt, iterations:API_SECRET_KDF_ITERATIONS
+    }, source, 256);
+    return new Uint8Array(bits);
+  }
+
+  async function apiSecretCipherKey(keyBytes) {
+    return crypto.subtle.importKey('raw', keyBytes, {name:'AES-GCM'}, false, ['encrypt','decrypt']);
+  }
+
+  async function apiSecretEncrypt(rows, cryptoConfig) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await apiSecretCipherKey(apiSecretUnb64(cryptoConfig.key));
+    const data = new TextEncoder().encode(JSON.stringify({version:1,rows}));
+    const cipher = new Uint8Array(await crypto.subtle.encrypt({
+      name:'AES-GCM',iv,additionalData:new TextEncoder().encode(API_SECRET_CLOUD_DEVICE)
+    },key,data));
+    return {version:1,alg:'AES-256-GCM',kdf:'PBKDF2-SHA256',
+      iterations:API_SECRET_KDF_ITERATIONS,salt:cryptoConfig.salt,
+      iv:apiSecretB64(iv),ciphertext:apiSecretB64(cipher)};
+  }
+
+  async function apiSecretDecrypt(envelope, cryptoConfig) {
+    if (envelope?.version !== 1 || envelope?.alg !== 'AES-256-GCM' ||
+        envelope?.kdf !== 'PBKDF2-SHA256' || envelope?.salt !== cryptoConfig.salt ||
+        envelope?.iterations !== API_SECRET_KDF_ITERATIONS)
+      throw new Error('暗号化形式または合言葉が違います');
+    const iv = apiSecretUnb64(envelope.iv);
+    if (iv.length !== 12) throw new Error('暗号化データのIVが不正です');
+    const key = await apiSecretCipherKey(apiSecretUnb64(cryptoConfig.key));
+    let plain;
+    try { plain = await crypto.subtle.decrypt({
+      name:'AES-GCM',iv,additionalData:new TextEncoder().encode(API_SECRET_CLOUD_DEVICE)
+    },key,apiSecretUnb64(envelope.ciphertext)); }
+    catch { throw new Error('合言葉が違うか、クラウドデータが破損しています'); }
+    const decoded = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(plain));
+    if (decoded?.version !== 1 || !decoded.rows || typeof decoded.rows !== 'object')
+      throw new Error('復号したAPIキーのデータ形式が違います');
+    return decoded.rows;
+  }
+
+  async function apiSecretList(token) {
+    const res = await gmRequest({method:'GET',
+      url:CLOUD_URL+'/v1/backups?device='+encodeURIComponent(API_SECRET_CLOUD_DEVICE),
+      headers:{authorization:'Bearer '+token,accept:'application/json'},
+      responseType:'text',timeout:45000});
+    let body={};try{body=JSON.parse(res.responseText||res.response||'{}');}catch{}
+    if(res.status<200||res.status>=300||!body.ok)
+      throw new Error('APIキー同期一覧 HTTP '+res.status+'：'+String(body.error||'取得失敗'));
+    return (Array.isArray(body.backups)?body.backups:[])
+      .filter(item=>item?.device===API_SECRET_CLOUD_DEVICE)
+      .sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0));
+  }
+
+  async function apiSecretFetch(item,token) {
+    if (!item?.id || !item?.sha256) throw new Error('暗号化バックアップの情報が不正です');
+    const res=await gmRequest({method:'GET',url:CLOUD_URL+'/v1/backups/'+encodeURIComponent(item.id),
+      headers:{authorization:'Bearer '+token},responseType:'arraybuffer',timeout:45000});
+    if(res.status!==200)throw new Error('暗号化バックアップ読込 HTTP '+res.status);
+    const bytes=res.response instanceof ArrayBuffer?new Uint8Array(res.response)
+      :ArrayBuffer.isView(res.response)?new Uint8Array(res.response.buffer,res.response.byteOffset,res.response.byteLength)
+      :new TextEncoder().encode(res.responseText||String(res.response||''));
+    if(bytes.byteLength!==Number(item.size||0))throw new Error('APIキー同期ファイルのサイズが違います');
+    if(await favoriteCloudSha(bytes)!==item.sha256)throw new Error('APIキー同期SHA-256検証失敗');
+    const data=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
+    if(data?.app!=='Niji Research Helper'||data?.device!==API_SECRET_CLOUD_DEVICE ||
+        data?.version!==1||!data.encrypted)throw new Error('暗号化バックアップ形式が違います');
+    return data.encrypted;
+  }
+
+  async function apiSecretUpload(rows,token) {
+    const envelope=await apiSecretEncrypt(rows,state.apiSecretCrypto);
+    const payload={app:'Niji Research Helper',device:API_SECRET_CLOUD_DEVICE,
+      version:1,encrypted:envelope};
+    const body=JSON.stringify(payload),bytes=new TextEncoder().encode(body);
+    const digest=await favoriteCloudSha(bytes);
+    const res=await gmRequest({method:'POST',url:CLOUD_URL+'/v1/backups',
+      headers:{authorization:'Bearer '+token,accept:'application/json','content-type':'application/json',
+        'x-nrh-device':API_SECRET_CLOUD_DEVICE,'x-nrh-origin':PREF_CLOUD_ORIGIN,
+        'x-nrh-sha256':digest,'x-nrh-version':VERSION},
+      data:body,responseType:'text',timeout:45000});
+    let data={};try{data=JSON.parse(res.responseText||res.response||'{}');}catch{}
+    if(res.status<200||res.status>=300||!data.ok)
+      throw new Error('暗号化バックアップ保存 HTTP '+res.status+'：'+String(data.error||'失敗'));
+    // Verify committed ciphertext by reading it back. Never return or print key values.
+    const list=await apiSecretList(token),item=list.find(row=>row.id===data.backup?.id)||list[0];
+    if(!item)throw new Error('暗号化バックアップ保存後に一覧を確認できません');
+    const fetched=await apiSecretFetch(item,token);
+    const check=await apiSecretDecrypt(fetched,state.apiSecretCrypto);
+    if(JSON.stringify(check)!==JSON.stringify(rows))throw new Error('暗号化バックアップ保存後の照合に失敗しました');
+  }
+
+  async function apiSecretHash(value) {
+    return favoriteCloudSha(new TextEncoder().encode(String(value||'')));
+  }
+
+  async function apiSecretCurrentRows() {
+    const values={
+      holodex:String(await gmGet(KEY_API,'')||'').trim(),
+      youtube:String(await gmGet(KEY_YT_API,'')||'').trim(),
+    };
+    const stored=await gmGet(API_SECRET_REVISIONS_LOCAL,{});
+    const rows={};
+    for(const kind of apiSecretTypes) {
+      const hash=await apiSecretHash(values[kind]);
+      const meta=stored?.[kind];
+      const updatedAt=meta?.hash===hash?Math.max(0,Number(meta.updatedAt||0)):0;
+      rows[kind]={value:values[kind],updatedAt};
+    }
+    return rows;
+  }
+
+  async function apiSecretSaveRevisions(rows) {
+    const stamps={};
+    for(const kind of apiSecretTypes) {
+      const entry=rows[kind]||{};
+      stamps[kind]={hash:await apiSecretHash(entry.value),
+        updatedAt:Math.max(0,Number(entry.updatedAt||0))};
+    }
+    await GM.setValue(API_SECRET_REVISIONS_LOCAL,stamps);
+  }
+
+  async function apiSecretRecordLocalChange(kind,value) {
+    const meta=await gmGet(API_SECRET_REVISIONS_LOCAL,{});
+    meta[kind]={hash:await apiSecretHash(String(value||'')),
+      updatedAt:Math.max(Date.now(),Number(meta?.[kind]?.updatedAt||0)+1)};
+    await GM.setValue(API_SECRET_REVISIONS_LOCAL,meta);
+    apiSecretSchedule();
+  }
+
+  function apiSecretSchedule(delay=1800) {
+    clearTimeout(state.apiSecretTimer);
+    if(!state.apiSecretReady||!state.apiSecretCrypto)return;
+    state.apiSecretTimer=setTimeout(()=>void apiSecretSync(),delay);
+  }
+
+  async function apiSecretSync({manual=false}={}) {
+    if(state.apiSecretBusy)return;
+    if(!state.apiSecretCrypto){if(manual)apiSecretSetStatus('この端末で合言葉を設定してください');return;}
+    state.apiSecretBusy=true;
+    apiSecretSetStatus('🔐 APIキーを暗号化同期しています…');
+    try{
+      const token=await apiSecretLocalConfig();
+      const list=await apiSecretList(token),latest=list[0]||null;
+      const local=await apiSecretCurrentRows();
+      let remote=null;
+      if(latest)remote=await apiSecretDecrypt(await apiSecretFetch(latest,token),state.apiSecretCrypto);
+      const merged={},apply={},conflicts=[];
+      let changes=false;
+      for(const kind of apiSecretTypes) {
+        const a=local[kind]||{value:'',updatedAt:0};
+        const b=remote?.[kind]||{value:'',updatedAt:0};
+        const lv=String(a.value||''),rv=String(b.value||'');
+        const lt=Number(a.updatedAt||0),rt=Number(b.updatedAt||0);
+        const label=kind==='holodex'?'Holodex':'YouTube';
+        let chosen;
+        if(lv===rv)chosen={value:lv,updatedAt:Math.max(lt,rt)};
+        else if(!rv && rt===0 && lv)chosen={value:lv,updatedAt:Math.max(lt,Date.now())};
+        else if(!lv && lt===0 && rv)chosen={value:rv,updatedAt:rt};
+        else if(lv && rv && (!lt || !rt || lt===rt)) {
+          conflicts.push(label);chosen={value:rv,updatedAt:rt};
+        } else chosen=lt>rt?a:b;
+        merged[kind]={value:String(chosen.value||''),updatedAt:Number(chosen.updatedAt||0)};
+        if(merged[kind].value!==rv || merged[kind].updatedAt!==rt)changes=true;
+        // Do not overwrite existing, conflicting local credentials automatically.
+        if(merged[kind].value!==lv && !conflicts.includes(label))apply[kind]=merged[kind].value;
+      }
+      if(conflicts.length){
+        apiSecretSetStatus('⚠️ '+conflicts.join('・')+'のキーが端末間で不一致。ローカルキーを保護するため同期を中断しました。');
+        return;
+      }
+      if(changes)await apiSecretUpload(merged,token);
+      // Applying does not trigger a new local-write revision.
+      if(Object.prototype.hasOwnProperty.call(apply,'holodex')){
+        await GM.setValue(KEY_API,apply.holodex);
+        state.apiKey=apply.holodex;
+      }
+      if(Object.prototype.hasOwnProperty.call(apply,'youtube')){
+        await GM.setValue(KEY_YT_API,apply.youtube);
+        resetYoutubePriorityBackground();
+        if(isYoutubeHost())void startYoutubePriorityBackgroundSearch();
+      }
+      await apiSecretSaveRevisions(merged);
+      apiSecretSetStatus('✅ 暗号化同期済み（Holodex '+(merged.holodex.value?'あり':'未設定')+
+        ' / YouTube '+(merged.youtube.value?'あり':'未設定')+'）');
+    }catch(error){
+      apiSecretSetStatus('⚠️ APIキー同期失敗：'+String(error?.message||error).slice(0,125));
+      console.warn('[NRH][encrypted API keys sync]',error);
+    }finally{state.apiSecretBusy=false;}
+  }
+
+  async function apiSecretEnable() {
+    const input=document.getElementById('npf-api-secret-passphrase');
+    const confirmInput=document.getElementById('npf-api-secret-confirm');
+    const passphrase=String(input?.value||'');
+    const confirmPassphrase=String(confirmInput?.value||'');
+    if(passphrase.length<12){apiSecretSetStatus('合言葉は12文字以上にしてください');return;}
+    if(state.apiSecretBusy)return;
+    state.apiSecretBusy=true;
+    try {
+      const token=await apiSecretLocalConfig();
+      const list=await apiSecretList(token),latest=list[0]||null;
+      if(!latest && passphrase!==confirmPassphrase){
+        apiSecretSetStatus('新規登録では確認用の合言葉も同じ内容にしてください');return;
+      }
+      let salt;
+      if(latest){
+        const enc=await apiSecretFetch(latest,token);
+        salt=apiSecretUnb64(enc?.salt);
+        if(salt.length!==16)throw new Error('クラウドの暗号化ソルトが不正です');
+      }else salt=crypto.getRandomValues(new Uint8Array(16));
+      const cfg={salt:apiSecretB64(salt),key:apiSecretB64(await apiSecretDerive(passphrase,salt))};
+      if(latest)await apiSecretDecrypt(await apiSecretFetch(latest,token),cfg);
+      await GM.setValue(API_SECRET_CRYPTO_LOCAL,cfg);
+      state.apiSecretCrypto=cfg;state.apiSecretReady=true;
+      if(input)input.value='';
+      if(confirmInput)confirmInput.value='';
+      apiSecretSetStatus('🔐 合言葉を登録しました。暗号化同期を確認します…');
+    }catch(error){
+      apiSecretSetStatus('⚠️ 合言葉設定失敗：'+String(error?.message||error).slice(0,110));
+      return;
+    }finally{state.apiSecretBusy=false;}
+    await apiSecretSync({manual:true});
+  }
+
+  async function apiSecretInitialize() {
+    const cfg=await gmGet(API_SECRET_CRYPTO_LOCAL,null);
+    if(cfg?.salt && cfg?.key) {
+      try{
+        if(apiSecretUnb64(cfg.key).length!==32||apiSecretUnb64(cfg.salt).length!==16)
+          throw new Error('ローカル暗号鍵の形式が不正です');
+        state.apiSecretCrypto=cfg;
+        state.apiSecretReady=true;
+        apiSecretSetStatus('🔐 この端末の暗号鍵を読み込みました');
+        await apiSecretSync();
+      }catch(error){
+        apiSecretSetStatus('⚠️ 暗号鍵読込失敗：'+String(error?.message||error).slice(0,105));
+      }
+    }else apiSecretSetStatus('未設定。同期用の合言葉を登録してください。');
+  }
+
+  function createApiSecretUi() {
+    const card=document.createElement('section');
+    card.id='npf-api-secret-card';
+    card.style.cssText='border:1px solid #677daa;border-radius:12px;padding:12px;margin:12px 0;background:#192539;color:#f1f5ff;';
+    const title=document.createElement('div');
+    title.textContent='🔐 APIキーの暗号化同期';
+    title.style.cssText='font-weight:800;font-size:14px;margin-bottom:7px;';
+    const info=document.createElement('div');
+    info.style.cssText='font-size:12px;line-height:1.55;margin-bottom:8px;';
+    info.textContent='YouTube Data APIとHolodexのキーをNiji Cloudで共有します。PC・iPadで同じ合言葉を入力。キーの平文や合言葉はクラウドに保存しません。暗号鍵はこの端末のMacaque内に保存されます。';
+    const status=document.createElement('div');
+    status.id='npf-api-secret-status';
+    status.style.cssText='font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0;';
+    status.textContent=state.apiSecretStatus;
+    const input=document.createElement('input');
+    input.id='npf-api-secret-passphrase';input.type='password';
+    input.placeholder='端末共通の合言葉（12文字以上）';input.autocomplete='new-password';
+    input.className='npf-r-input';
+    input.style.cssText='display:block;width:100%;margin:5px 0;';
+    const confirmInput=document.createElement('input');
+    confirmInput.id='npf-api-secret-confirm';confirmInput.type='password';
+    confirmInput.placeholder='初めて作るときだけ、合言葉を再入力';
+    confirmInput.autocomplete='new-password';confirmInput.className='npf-r-input';
+    confirmInput.style.cssText='display:block;width:100%;margin:5px 0;';
+    const setup=document.createElement('button');setup.type='button';
+    setup.className='npf-r-btn';setup.textContent='🔒 合言葉を登録 / 別端末から復元';
+    setup.addEventListener('click',()=>void apiSecretEnable());
+    const sync=document.createElement('button');sync.type='button';
+    sync.className='npf-r-btn';sync.textContent='🔄 APIキーを今すぐ同期';
+    sync.addEventListener('click',()=>void apiSecretSync({manual:true}));
+    const note=document.createElement('div');
+    note.style.cssText='font-size:11px;line-height:1.5;margin-top:8px;opacity:.82;';
+    note.textContent='先にNiji Cloudへ接続してください。合言葉を忘れると新しい端末では復号できません。端末に保存するのは導出した暗号鍵で、元の合言葉ではありません。';
+    card.append(title,info,status,input,confirmInput,setup,sync,note);
+    return card;
+  }
+
   // ---------- optional pCloud backup through the dedicated, access-limited gateway ----------
   // The gateway has its own limited client token. A pCloud OAuth token and other apps'
   // shared-storage tokens never enter the userscript. No upload or remote delete
@@ -1027,7 +1356,7 @@
 
   function isResearchCloudBackupItem(item) {
     const device = String(item?.device || '');
-    if (!device || device === FAV_CLOUD_DEVICE || device === PREF_CLOUD_DEVICE) return false;
+    if (!device || device === FAV_CLOUD_DEVICE || device === PREF_CLOUD_DEVICE || device === API_SECRET_CLOUD_DEVICE) return false;
     // YouTubeメン限チャット検索は同じNRHバックアップゲートウェイを使うが、
     // 研究DBとは別データなのでNRH本体の復元一覧から除外する。
     if (device.startsWith('ytchat_')) return false;
@@ -1456,6 +1785,7 @@
       await favoriteCloudInitialize();
       await preferenceCloudInitialize();
       await cloudSyncShared({force:true});
+      void apiSecretInitialize();
     } catch (e) {
       cloud.token = previous;
       cloud.status = `⚠️ 接続できません：${String(e?.message || e).slice(0, 100)}`;
@@ -1469,6 +1799,8 @@
     state.favoriteCloudToken = ''; state.favoriteCloudReady = false;
     state.favoriteStorageStatus = '☁️ pCloud未接続';
     state.preferenceCloudToken=''; state.preferenceCloudReady=false; state.preferenceCloudBackupId='';
+    clearTimeout(state.apiSecretTimer);
+    apiSecretSetStatus('Niji Cloudが停止中です。暗号鍵とローカルAPIキーは残っています。');
     clearTimeout(state.preferenceCloudTimer);
     clearTimeout(cloud.timer);
     cloud.status = 'この端末の同期は停止中。クラウド上の共通データは残っています';
@@ -1708,7 +2040,7 @@
     const enable = document.createElement('button'); enable.type = 'button'; enable.className = 'npf-r-btn';
     enable.textContent = '🔒 接続して全端末同期を有効化'; enable.addEventListener('click', () => void cloudEnable());
     const note = document.createElement('div'); note.className = 'npf-r-note';
-    note.textContent = '研究DB・お気に入り・設定・同期位置・補正値をPC / iPhone / iPadで共通化します。Holodex / YouTube APIキーとNIJI CLIENT TOKEN自体はクラウドへ保存しません。';
+    note.textContent = '研究DB・お気に入り・設定・同期位置・補正値をPC / iPhone / iPadで共通化します。APIキーはNIJIの「🔐 APIキーの暗号化同期」で別途暗号化して保存します。NIJI CLIENT TOKENはクラウドへ送信しません。';
     const verify = document.createElement('button'); verify.type = 'button'; verify.id = 'npf-cloud-verify';
     verify.className = 'npf-r-btn'; verify.textContent = '🔎 保存済み共通DBを検証（復元なし）';
     verify.addEventListener('click', () => void cloudVerifyLatest());
@@ -7432,6 +7764,7 @@
       actions.appendChild(make('button', { id, cls, text: label, type: 'button' }));
     }
     body.appendChild(actions);
+    body.appendChild(createApiSecretUi());
 
     const copyPref = make('div', { cls: 'npf-yt-copy-pref' });
     const copyLabel = make('label', { text: 'コピー形式' });
@@ -11422,6 +11755,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
   if (isYoutubeHost()) void cloudInitialize().catch(err => console.warn('[NRH][cloud init]', err));
   void favoriteCloudInitialize().catch(err => console.warn('[NRH][favorite cloud init]', err));
   void preferenceCloudInitialize().catch(err => console.warn('[NRH][preference cloud init]', err));
+  void apiSecretInitialize().catch(err => console.warn('[NRH][API secret init]', err));
 
   if (!Array.isArray(state.favorites)) state.favorites = [];
   if (!Array.isArray(state.liverFavorites)) state.liverFavorites = [];
@@ -11455,11 +11789,13 @@ e.el.classList.toggle('npf-r-hidden', !show);
     if (document.hidden) return;
     if (state.preferenceCloudToken) void preferenceCloudSync({force:true});
     if (isYoutubeHost() && cloud.enabled) void cloudSyncShared({force:true});
+    if (state.apiSecretReady) void apiSecretSync();
   });
   setInterval(() => {
     if (document.hidden) return;
     if (state.preferenceCloudToken) void preferenceCloudSync();
     if (isYoutubeHost() && cloud.enabled) void cloudSyncShared();
+    if (state.apiSecretReady) void apiSecretSync();
   }, 60000);
 
   console.info(`[Niji Research Helper] v${VERSION} ready on ${location.hostname}`);
