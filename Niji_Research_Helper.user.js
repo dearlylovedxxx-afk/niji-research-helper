@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.96
+// @version      1.0.97
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.96';
+  const VERSION = '1.0.97';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -4990,8 +4990,15 @@
   }
 
   function isMobileYoutubeUi() {
+    // iPadOS Safari can advertise itself as desktop Mac Safari on www.youtube.com.
+    // In that mode the width is often >900px and the UA omits "iPad", so the
+    // normal desktop boot waits for GM storage / IndexedDB before showing NIJI.
+    // A touch-capable MacIntel platform distinguishes iPadOS Safari from Mac Safari.
+    const ipadDesktopMode = navigator.platform === 'MacIntel'
+      && Number(navigator.maxTouchPoints || 0) > 1;
     return isYoutubeHost() && (location.hostname === 'm.youtube.com'
       || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+      || ipadDesktopMode
       || (navigator.maxTouchPoints > 1 && window.innerWidth <= 900));
   }
 
