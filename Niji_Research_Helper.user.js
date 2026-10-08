@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.98
+// @version      1.0.99
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.98';
+  const VERSION = '1.0.99';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -6051,7 +6051,7 @@
     root.style.cssText = [
       'position:fixed',
       `left:${left}px`, `top:${top}px`,
-      'right:auto','bottom:auto',
+      'right:auto','bottom:auto','margin:0',
       'z-index:2147483500',
       'display:flex','flex-direction:column',
       `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : width + 'px'}`,
@@ -6124,6 +6124,19 @@
       portal.appendChild(root);
     } else if (root.parentElement !== portal) {
       portal.appendChild(root);
+    }
+
+    // Live Chat Overlay injects a separate player overlay layer. An ordinary
+    // high z-index was not enough on iPad Safari; use the browser's top layer
+    // when available. "manual" does not block clicks outside this box.
+    if (typeof root.showPopover === 'function') {
+      try {
+        root.setAttribute('popover', 'manual');
+        if (!root.matches(':popover-open')) root.showPopover();
+      } catch (error) {
+        root.removeAttribute('popover'); // Fall back to fixed positioning.
+        console.debug('[NRH][priority popover]', String(error?.message || error));
+      }
     }
 
     styleYoutubePriorityOverlay(root);
@@ -6318,8 +6331,50 @@
     return root;
   }
 
+  function showYoutubePriorityDiagnostic() {
+    let restartError = '';
+    try { scanYoutubePreferredComments(true); }
+    catch (error) { restartError = String(error?.message || error); }
+
+    const entries = youtubePriorityOverlayEntries();
+    const favs = preferredCommentAuthors();
+    const host = youtubeTimestampPlayerHost();
+    const playerRect = host?.getBoundingClientRect();
+    const box = $('#npf-yt-priority-overlay');
+    const boxRect = box?.getBoundingClientRect();
+    const css = box ? getComputedStyle(box) : null;
+    let topLayer = false;
+    try { topLayer = !!box?.matches(':popover-open'); } catch {}
+    const externalOverlay = !!document.querySelector(
+      '#yt-chat-overlay, [id^="yt-chat-overlay"], .yt-chat-overlay-settings-button'
+    );
+
+    const r = rect => rect ? [
+      Math.round(rect.left), Math.round(rect.top),
+      Math.round(rect.width), Math.round(rect.height)
+    ].join(',') : 'なし';
+
+    window.alert([
+      'NIJI 優先コメント診断 v' + VERSION,
+      '優先登録ユーザー: ' + favs.length + '人',
+      '一致コメント: ' + entries.length + '件 (API ' +
+        (youtubePriorityBackground.found?.length || 0) + '件)',
+      '取得状況: ' + (youtubePriorityBackground.error || (
+        youtubePriorityBackground.running ? '検索中' :
+        youtubePriorityBackground.needsApiKey ? 'YouTube APIキー未設定' :
+        youtubePriorityBackground.done ? '取得完了' : '待機中')),
+      'Live Chat Overlayの要素: ' + (externalOverlay ? 'あり' : '未検出'),
+      '動画領域 x,y,w,h: ' + r(playerRect),
+      '優先表示枠: ' + (box ? 'あり' : 'なし'),
+      '優先表示枠 x,y,w,h: ' + r(boxRect),
+      '表示CSS: ' + (css ? [css.display, css.visibility, css.opacity].join(' / ') : '-'),
+      '最前面表示: ' + (topLayer ? 'Popover有効' : '通常表示'),
+      ...(restartError ? ['診断時エラー: ' + restartError] : [])
+    ].join('\n'));
+  }
+
   function youtubeCommentRoots() {
-    return $$(YT_COMMENT_ROOT_SELECTOR).filter(root => {
+    return $(YT_COMMENT_ROOT_SELECTOR).filter(root => {
       if (!(root instanceof Element) || !root.isConnected) return false;
       const parent = root.parentElement;
       return !parent?.closest?.(YT_COMMENT_ROOT_SELECTOR);
@@ -7370,7 +7425,8 @@
       ['npf-yt-save-sync', 'npf-yt-btn', '⏱ 同期位置を保存'],
       ['npf-yt-clear-sync', 'npf-yt-btn', '同期を解除'],
       ['npf-yt-favorite', 'npf-yt-btn', '☆ お気に入り切替'],
-      ['npf-yt-settings', 'npf-yt-btn', '⚙ APIキー']
+      ['npf-yt-settings', 'npf-yt-btn', '⚙ APIキー'],
+      ['npf-yt-priority-debug', 'npf-yt-btn', '⭐ 優先コメント診断']
     ];
     for (const [id, cls, label] of actionDefs) {
       actions.appendChild(make('button', { id, cls, text: label, type: 'button' }));
@@ -7443,6 +7499,7 @@
     $('#npf-yt-clear-sync', panel)?.addEventListener('click', () => void clearYoutubeSync());
     $('#npf-yt-favorite', panel)?.addEventListener('click', () => void favoriteCurrentYoutubeChannel());
     $('#npf-yt-settings', panel)?.addEventListener('click', () => void openYoutubeQuickSettings());
+    $('#npf-yt-priority-debug', panel)?.addEventListener('click', showYoutubePriorityDiagnostic);
 
     updateYoutubePanel();
     if (isMobileYoutubeUi()) {
