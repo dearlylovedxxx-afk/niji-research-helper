@@ -1209,7 +1209,7 @@
     state.apiSecretTimer=setTimeout(()=>void apiSecretSync(),delay);
   }
 
-  async function apiSecretSync({manual=false}={}) {
+  async function apiSecretSync({manual=false,resolve=''}={}) {
     if(state.apiSecretBusy)return;
     if(!state.apiSecretCrypto){if(manual)apiSecretSetStatus('この端末で合言葉を設定してください');return;}
     state.apiSecretBusy=true;
@@ -1232,8 +1232,11 @@
         if(lv===rv)chosen={value:lv,updatedAt:Math.max(lt,rt)};
         else if(!rv && rt===0 && lv)chosen={value:lv,updatedAt:Math.max(lt,Date.now())};
         else if(!lv && lt===0 && rv)chosen={value:rv,updatedAt:rt};
-        else if(lv && rv && (!lt || !rt || lt===rt)) {
-          conflicts.push(label);chosen={value:rv,updatedAt:rt};
+        else if ((lv && rv && (!lt || !rt || lt===rt)) ||
+                 (lv && !rv && rt>0 && !lt)) {
+          if (resolve==='local') chosen={value:lv,updatedAt:Math.max(Date.now(),lt,rt+1)};
+          else if (resolve==='cloud') chosen={value:rv,updatedAt:rt};
+          else { conflicts.push(label);chosen={value:rv,updatedAt:rt}; }
         } else chosen=lt>rt?a:b;
         merged[kind]={value:String(chosen.value||''),updatedAt:Number(chosen.updatedAt||0)};
         if(merged[kind].value!==rv || merged[kind].updatedAt!==rt)changes=true;
@@ -1244,7 +1247,8 @@
         apiSecretSetStatus('⚠️ '+conflicts.join('・')+'のキーが端末間で不一致。ローカルキーを保護するため同期を中断しました。');
         return;
       }
-      if(changes)await apiSecretUpload(merged,token);
+      // Even an empty first snapshot must establish the shared random salt.
+      if(changes || !latest)await apiSecretUpload(merged,token);
       // Applying does not trigger a new local-write revision.
       if(Object.prototype.hasOwnProperty.call(apply,'holodex')){
         await GM.setValue(KEY_API,apply.holodex);
@@ -1344,10 +1348,22 @@
     const sync=document.createElement('button');sync.type='button';
     sync.className='npf-r-btn';sync.textContent='🔄 APIキーを今すぐ同期';
     sync.addEventListener('click',()=>void apiSecretSync({manual:true}));
+    const localWins=document.createElement('button');localWins.type='button';
+    localWins.className='npf-r-btn';localWins.textContent='⚠️ 不一致時：この端末を優先';
+    localWins.addEventListener('click',()=>{
+      if(confirm('同じAPIのキーが端末間で異なる場合、この端末のキーをクラウドに反映します。よろしいですか？'))
+        void apiSecretSync({manual:true,resolve:'local'});
+    });
+    const cloudWins=document.createElement('button');cloudWins.type='button';
+    cloudWins.className='npf-r-btn';cloudWins.textContent='⚠️ 不一致時：クラウドを優先';
+    cloudWins.addEventListener('click',()=>{
+      if(confirm('同じAPIのキーが端末間で異なる場合、クラウドのキーでこの端末を更新します。よろしいですか？'))
+        void apiSecretSync({manual:true,resolve:'cloud'});
+    });
     const note=document.createElement('div');
     note.style.cssText='font-size:11px;line-height:1.5;margin-top:8px;opacity:.82;';
-    note.textContent='先にNiji Cloudへ接続してください。合言葉を忘れると新しい端末では復号できません。端末に保存するのは導出した暗号鍵で、元の合言葉ではありません。';
-    card.append(title,info,status,input,confirmInput,setup,sync,note);
+    note.textContent='先にNiji Cloudへ接続してください。合言葉を忘れると新しい端末では復号できません。端末に保存するのは導出した暗号鍵で、元の合言葉ではありません。不一致時の優先操作は必要な場合だけ使ってください。';
+    card.append(title,info,status,input,confirmInput,setup,sync,localWins,cloudWins,note);
     return card;
   }
 
