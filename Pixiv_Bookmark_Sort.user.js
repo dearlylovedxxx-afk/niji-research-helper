@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.32
+// @version      0.6.33
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1095,6 +1095,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
         kind = ['novel','novels'].includes(type) ? 'novels' : type === 'manga' ? 'manga' : ['illust','illustrations'].includes(type) ? 'illustrations' : 'artworks';
       }
     }
+    u.searchParams.set('s_mode', savedTagPartialMode(kind));
     const query = u.searchParams.toString();
     return {
       href: u.pathname + (query ? '?' + query : ''),
@@ -1103,11 +1104,48 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     };
   }
 
+  // Saved searches always use tag-only PARTIAL matching.
+  // Unlike artworks, Pixiv novels need s_tag_only; novel s_tag also searches
+  // the title/description and can match arbitrary URLs in captions.
+  function savedTagPartialMode(kind) {
+    return kind === 'novels' ? 's_tag_only' : 's_tag';
+  }
+
+  function normalizeSavedSearchHref(href, savedKind = '') {
+    try {
+      const u = new URL(href, location.origin);
+      if (u.origin !== location.origin || !isSearchUrl(u)) return href;
+      const novel = savedKind === 'novels'
+        || u.pathname === '/novel/search.php'
+        || /\/novels(?:\/|$)/.test(u.pathname)
+        || ['novel', 'novels'].includes(u.searchParams.get('type') || '');
+      u.searchParams.set('s_mode', savedTagPartialMode(novel ? 'novels' : 'artworks'));
+      u.searchParams.delete('p');
+      return u.pathname + u.search;
+    } catch {
+      return href;
+    }
+  }
+
   function readSaved() {
     try {
       const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
       if (!Array.isArray(value)) return [];
-      return value.filter(row => row && typeof row.href === 'string' && row.href.startsWith('/') && typeof row.name === 'string');
+      const valid = value.filter(row => row && typeof row.href === 'string' && row.href.startsWith('/') && typeof row.name === 'string');
+      const normalized = valid.map(row => ({
+        ...row,
+        href: normalizeSavedSearchHref(row.href, row.kind)
+      }));
+      // Migrate existing saved URLs without changing their IDs, names, order,
+      // words, exclusions or the other Pixiv search options. Niji Cloud
+      // listens for this event and can synchronize the corrected URLs.
+      if (normalized.some((row, i) => row.href !== valid[i].href)) {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+          window.dispatchEvent(new Event('pixiv-saved-searches-changed'));
+        } catch {}
+      }
+      return normalized;
     } catch {
       return [];
     }
@@ -1198,7 +1236,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     try {
       const u = new URL(row.href, location.origin);
       const params = [...u.searchParams.keys()].filter(k => !['word','q','p'].includes(k));
-      return `${kindLabel(row.kind)} ／ ${row.word || '検索条件'}${params.length ? ` ／ 条件${new Set(params).size}項目` : ''}`;
+      const other = params.filter(k => k !== 's_mode');
+      return `${kindLabel(row.kind)} ／ ${row.word || '検索条件'} ／ タグ部分一致${other.length ? ` ／ その他${new Set(other).size}条件` : ''}`;
     } catch {
       return row.word || row.href;
     }
@@ -1310,9 +1349,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const keys = ['mode','scd','ecd','ai_type','work_lang','lang',...(art ? ['wlt','wgt','hlt','hgt','ratio','tool'] : ['tlt','tgt','wlt','wgt','original_only','genre'])];
     for (const key of keys) for (const v of u.searchParams.getAll(key)) params.append(key, v);
 
-    mode = mode === 'tag_tc' ? (art ? 's_tag_tc' : 's_tag') : mode === 'tc' ? 's_tc' : mode;
+    // Existing rows from title/caption search are normalized to tag-only
+    // partial search. Keep keyword operators like "riru -ruri" verbatim.
     params.set('word', word);
-    params.set('s_mode', mode);
+    params.set('s_mode', savedTagPartialMode(kind));
     params.set('mode', ageMode(params.get('mode')));
 
     if (art) {
@@ -1384,6 +1424,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const ctx = state.ctx;
     const u = new URL('/ajax/search/' + ctx.kind + '/' + encodeURIComponent(ctx.word), location.origin);
     u.search = ctx.params.toString();
+    // Defensively reapply per-type tag-only matching before every request.
+    u.searchParams.set('s_mode', savedTagPartialMode(ctx.kind));
     u.searchParams.set('order', 'date_d');
     u.searchParams.set('p', String(page));
     const body = await pixivJson(u.href, signal);
@@ -1951,6 +1993,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       #${ROOT_ID} .pss-feed-head{position:sticky;top:0;z-index:3;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#f4f6f8;padding:0 0 12px}
       #${ROOT_ID} .pss-feed-head h2{font-size:18px;margin:0 8px 0 0}
       #${ROOT_ID} .pss-feed-status{flex:1 1 100%;font-size:12px;color:#66717e}
+      #${ROOT_ID} .pss-feed-status-hint{flex:1 1 100%;font-size:11px;color:#586277}
       #${ROOT_ID} .pss-feed-coverage{flex:1 1 100%;display:flex;gap:5px;flex-wrap:wrap}
       #${ROOT_ID} .pss-feed-coverage span{font-size:10px;color:#596575;background:#eef2f6;border-radius:999px;padding:3px 7px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       #${ROOT_ID} .pss-feed-filter{flex:1 1 100%;background:#fff;border:1px solid #dde2e8;border-radius:10px;padding:8px 10px}
@@ -2005,6 +2048,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
           <button type="button" class="pss-feed-back">← 保存検索へ</button>
           <h2>🆕 保存検索の新着</h2>
           <button type="button" class="pss-feed-refresh">更新</button>
+          <div class="pss-feed-status-hint">検索対象：タグ部分一致のみ（タイトル・キャプション本文は対象外）</div>
           <div class="pss-feed-status"></div>
           <div class="pss-feed-coverage"></div>
           <details class="pss-feed-filter">
