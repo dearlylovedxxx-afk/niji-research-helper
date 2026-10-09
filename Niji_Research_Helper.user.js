@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.103
+// @version      1.0.104
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.103';
+  const VERSION = '1.0.104';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2783,6 +2783,44 @@
     window.open(url, '_blank', 'noopener');
   }
 
+  // YouTube may replace an explicit ?t= seek with the viewer's saved resume
+  // position after navigation. The target-side handoff guard already corrects
+  // this for comment timestamps; POV links must write the same handoff first.
+  async function openYoutubeAtExactTime(videoId, seconds) {
+    const id = String(videoId || '').trim();
+    if (!/^[A-Za-z0-9_-]{11}$/.test(id)) {
+      toast('移動先の動画IDが不正です');
+      return;
+    }
+    const sec = Math.max(0, Math.floor(Number(seconds) || 0));
+    const url = youtubeUrl(id, sec);
+    // t=0 explicitly requests the start when opening a "最初から" button.
+    const destination = sec === 0 ? url + '&t=0s' : url;
+    try {
+      // Await storage completion before opening the target tab, avoiding
+      // a race with the document-idle startup on the target watch page.
+      await gmSet(KEY_YT_SEEK_HANDOFF, {
+        videoId:id, seconds:sec, createdAt:Date.now()
+      });
+    } catch (error) {
+      // The real timestamp URL remains a usable fallback if GM storage fails.
+      console.warn('[NRH][POV timestamp handoff save]', error);
+    }
+    openUrl(destination);
+  }
+
+  function bindYoutubeExactTimeLink(anchor, videoId, seconds) {
+    if (!anchor) return;
+    anchor.addEventListener('click', event => {
+      if (event.defaultPrevented || event.button !== 0 ||
+          event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void openYoutubeAtExactTime(videoId, seconds);
+    });
+  }
+
+
   function calibrationKey(source, target) {
     const sid = typeof source === 'string' ? source : source?.id;
     const tid = typeof target === 'string' ? target : target?.id;
@@ -4861,8 +4899,10 @@
         const title=document.createElement('strong');title.textContent=v.title||'動画 '+v.id;title.style.cssText='display:block;overflow-wrap:anywhere;';
         const info=document.createElement('div');info.textContent=channelName(v)+' ／ '+row.reason+(match?' ／ 同時刻の重なり '+fmtDuration(match.overlap):row.coach?' ／ 同時刻ではないため同期対象外':' ／ 配信日時を確認できません');
         info.style.cssText='margin:5px 0;color:#b9c7dd;';
-        const open=document.createElement('a');open.href=youtubeUrl(v.id,match?correctedCandidateOffset(source,match):0);
+        const matchedSecond=match?correctedCandidateOffset(source,match):0;
+        const open=document.createElement('a');open.href=youtubeUrl(v.id,matchedSecond);
         open.target='_blank';open.rel='noopener noreferrer';open.textContent=match?'↗ 重なり時刻から開く':'↗ 動画を確認する';
+        if(match) bindYoutubeExactTimeLink(open,v.id,matchedSecond);
         open.style.cssText='display:inline-block;color:#b9d4ff;margin:4px 12px 4px 0;';
         card.append(title,info,open);
         if(match) {
@@ -5107,7 +5147,7 @@
       });
 
       $('#npf-open-source', state.sheet).addEventListener('click', () => {
-        openUrl(youtubeUrl(source.id, syncOffset || 0));
+        void openYoutubeAtExactTime(source.id, syncOffset || 0);
       });
 
       $('#npf-clear-sync', state.sheet)?.addEventListener('click', async () => {
@@ -5299,14 +5339,14 @@
       $$('.npf-open-point', area).forEach(btn => {
         btn.addEventListener('click', () => {
           const m = visible[Number(btn.dataset.idx)];
-          openUrl(youtubeUrl(m.v.id, correctedCandidateOffset(source, m)));
+          void openYoutubeAtExactTime(m.v.id, correctedCandidateOffset(source, m));
         });
       });
 
       $$('.npf-open-start', area).forEach(btn => {
         btn.addEventListener('click', () => {
           const m = visible[Number(btn.dataset.idx)];
-          openUrl(youtubeUrl(m.v.id));
+          void openYoutubeAtExactTime(m.v.id, 0);
         });
       });
 
@@ -7518,7 +7558,7 @@
       openBtn.className = 'npf-yt-btn primary';
       openBtn.textContent = m.related ? '同じ瞬間を開く' : '同じ時刻で開く（未確認）';
       openBtn.addEventListener('click', () => {
-        openUrl(youtubeUrl(m.v.id, correctedCandidateOffset(source, m)));
+        void openYoutubeAtExactTime(m.v.id, correctedCandidateOffset(source, m));
       });
       buttons.appendChild(openBtn);
 
@@ -9706,9 +9746,11 @@
           const a = document.createElement('a');
           a.className = 'npf-r-pill';
           a.textContent = `▶ ${channelName(m.v)}`;
-          a.href = youtubeUrl(m.v.id, correctedCandidateOffset(entry.meta, m));
+          const exactSecond=correctedCandidateOffset(entry.meta, m);
+          a.href = youtubeUrl(m.v.id, exactSecond);
           a.target = '_blank';
           a.rel = 'noopener';
+          bindYoutubeExactTimeLink(a,m.v.id,exactSecond);
           holder.appendChild(a);
         }
       }
