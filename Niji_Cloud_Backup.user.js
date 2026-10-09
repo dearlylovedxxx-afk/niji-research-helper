@@ -716,6 +716,16 @@ function integrateNativeBackup() {
 }
 integrateNativeBackup();
 setInterval(integrateNativeBackup,1200);
+// Pixiv exclusion edits do not have to wait for the next periodic scan.
+if(app.id==='pixiv'){
+ let excludeTagsSyncTimer=null;
+ window.addEventListener('pixiv-feed-exclude-tags-changed',()=>{
+  clearTimeout(excludeTagsSyncTimer);
+  excludeTagsSyncTimer=setTimeout(()=>{
+   if(settings.enabled&&!working)void syncShared({force:true});
+  },2500);
+ });
+}
 // 全端末共通データ：起動時・復帰時・定期的に双方向同期。
 setTimeout(()=>{if(settings.enabled&&!working)void syncShared({force:true});},500);
 setInterval(()=>{
