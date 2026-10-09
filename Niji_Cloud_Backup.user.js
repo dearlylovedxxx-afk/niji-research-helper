@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.2.4
+// @version      0.2.5
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
@@ -35,6 +35,30 @@ const GATEWAY='https://niji-research-backup.dearlylovedxxx.workers.dev';
 const CONFIG='ncb_app_cloud_v1_'+app.id;
 const GLOBAL_TOKEN_KEY='ncb_client_token_v1';
 const CHUNK=3*1024*1024, MAX_PARTS=80;
+const PIXIV_EXCLUDE_TAGS_KEY='pixiv-saved-searches-feed-exclude-tags-v1';
+// Same NFKC + case-insensitive rules as Pixiv's saved-search feed.
+function normalizePixivFeedExcludeTags(value){
+ const result=[],seen=new Set();
+ for(const raw of Array.isArray(value)?value:[]){
+  if(typeof raw!=='string')continue;
+  for(const part of raw.split(/[\n,、]+/)){
+   const tag=part.trim().replace(/^#+/,'').trim();
+   const key=tag.normalize('NFKC').toLocaleLowerCase('ja-JP');
+   if(!key||seen.has(key))continue;
+   seen.add(key);result.push(tag);
+  }
+ }
+ return result;
+}
+function readPixivFeedExcludeTags(){
+ try{return normalizePixivFeedExcludeTags(JSON.parse(localStorage.getItem(PIXIV_EXCLUDE_TAGS_KEY)||'[]'));}
+ catch{return [];}
+}
+function savePixivFeedExcludeTags(tags){
+ localStorage.setItem(PIXIV_EXCLUDE_TAGS_KEY,JSON.stringify(normalizePixivFeedExcludeTags(tags)));
+ // Same-tab localStorage writes do not emit native storage events.
+ try{window.dispatchEvent(new Event('pixiv-feed-exclude-tags-cloud-applied'));}catch{}
+}
 const enc=new TextEncoder(), dec=new TextDecoder('utf-8',{fatal:true});
 let settings={enabled:false,token:'',lastSavedAt:0,lastSha:'',syncInitialized:false,lastContentSha:'',lastRemoteId:'',lastSyncAt:0},working=false,nextScan=0,notice='未接続';
 try {
@@ -156,7 +180,8 @@ async function pixivSnapshot(allowEmpty=false){
    if(Object.keys(data).length)databases.push({name,stores:data});
   }finally{db.close();}
  }
- const preferences={minimum:localStorage.getItem('pixiv-bookmark-sort-minimum-v03'),sort:localStorage.getItem('pixiv-bsort-view-sort-v055')};
+ const preferences={minimum:localStorage.getItem('pixiv-bookmark-sort-minimum-v03'),
+  sort:localStorage.getItem('pixiv-bsort-view-sort-v055'),feedExcludeTags:readPixivFeedExcludeTags()};
  let savedSearches=[];
  try{
   const parsed=JSON.parse(localStorage.getItem('pixiv-saved-searches-v1')||'[]');
@@ -198,7 +223,7 @@ function hasMeaningfulPayload(obj){
  if(app.id==='x')return !!(p.savedSearches?.length||p.history?.length||p.folders?.length);
  if(app.id==='pictbland')return !!p.savedSearches?.length;
  return !!(p.savedSearches?.length||(p.databases||[]).some(d=>Object.values(d.stores||{}).some(rows=>Array.isArray(rows)&&rows.length))||
-   p.preferences?.minimum!=null||p.preferences?.sort!=null);
+   p.preferences?.minimum!=null||p.preferences?.sort!=null||!!p.preferences?.feedExcludeTags?.length);
 }
 async function mergePixivDatabases(databases,{replace=false}={}){
  let changed=0;
@@ -316,11 +341,14 @@ async function restore(snap,{mode='merge'}={}){
  }
  const count=await mergePixivDatabases(snap.payload.databases||[],{replace:mode==='replace'});
  const pref=snap.payload.preferences||{};
+ // Missing in old backups means unknown, not clear. Explicit [] means clear.
+ const incomingExclude=Array.isArray(pref.feedExcludeTags)?normalizePixivFeedExcludeTags(pref.feedExcludeTags):null;
  if(mode==='replace'){
   if(typeof pref.minimum==='string')localStorage.setItem('pixiv-bookmark-sort-minimum-v03',pref.minimum);
   else localStorage.removeItem('pixiv-bookmark-sort-minimum-v03');
   if(typeof pref.sort==='string')localStorage.setItem('pixiv-bsort-view-sort-v055',pref.sort);
   else localStorage.removeItem('pixiv-bsort-view-sort-v055');
+  if(incomingExclude!==null)savePixivFeedExcludeTags(incomingExclude);
   const searches=(Array.isArray(snap.payload.savedSearches)?snap.payload.savedSearches:[])
     .filter(row=>row&&typeof row.name==='string'&&typeof row.href==='string'&&row.href.startsWith('/')).slice(0,200)
     .map(row=>({...row,id:typeof row.id==='string'&&row.id?row.id:crypto.randomUUID()}));
@@ -328,6 +356,7 @@ async function restore(snap,{mode='merge'}={}){
  }else{
   for(const [key,v] of [['pixiv-bookmark-sort-minimum-v03',pref.minimum],['pixiv-bsort-view-sort-v055',pref.sort]])
    if(localStorage.getItem(key)===null&&typeof v==='string')localStorage.setItem(key,v);
+  if(incomingExclude!==null)savePixivFeedExcludeTags([...readPixivFeedExcludeTags(),...incomingExclude]);
   let localSearches=[];try{const parsed=JSON.parse(localStorage.getItem('pixiv-saved-searches-v1')||'[]');if(Array.isArray(parsed))localSearches=parsed;}catch{}
   const incomingSearches=Array.isArray(snap.payload.savedSearches)?snap.payload.savedSearches:[];
   const merged=[],seen=new Set();
@@ -340,7 +369,7 @@ async function restore(snap,{mode='merge'}={}){
  }
  try{window.dispatchEvent(new Event('pixiv-saved-searches-changed'));}catch{}
  try{window.dispatchEvent(new CustomEvent('niji-cloud-sync-applied',{detail:{app:'pixiv'}}));}catch{}
- return `Pixiv共有データを反映しました（DB反映${count}件・保存検索${(JSON.parse(localStorage.getItem('pixiv-saved-searches-v1')||'[]')).length}件）`;
+ return `Pixiv共有データを反映しました（DB反映${count}件・保存検索${(JSON.parse(localStorage.getItem('pixiv-saved-searches-v1')||'[]')).length}件・除外タグ${readPixivFeedExcludeTags().length}件）`;
 }
 function genericRequest(details){
  const api=GM.xmlHttpRequest||GM.xmlhttpRequest;
