@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.102
+// @version      1.0.103
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.102';
+  const VERSION = '1.0.103';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2377,6 +2377,15 @@
       padding:10px 12px; border-bottom:1px solid #34343a; background:#202024;
     }
     .npf-yt-head-title { font-size:13px; font-weight:800; flex:1; min-width:0; }
+    /* PC and iPad now expose the same four top-level NIJI destinations. */
+    .npf-yt-tabs { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:7px;
+      position:sticky; top:0; z-index:4; padding:10px 12px; background:#171c2a;
+      border-bottom:1px solid #45516e; }
+    .npf-yt-tab { appearance:none; display:block; min-width:0; min-height:39px;
+      padding:7px 3px; border:1px solid #52607e; border-radius:9px;
+      background:#303b53; color:#f5f7ff; font-size:11px; font-weight:800;
+      cursor:pointer; white-space:normal; overflow-wrap:anywhere; }
+    .npf-yt-tab[aria-pressed="true"] { background:#596fe0; border-color:#8297ff; color:#fff; }
     #npf-yt-resize { appearance:none; border:1px solid #50576c; border-radius:8px;
       background:#303547; color:#f2f2ff; padding:5px 9px; min-width:70px; height:33px;
       font:700 11px/1.2 system-ui; cursor:ew-resize; touch-action:none; user-select:none;
@@ -7734,7 +7743,7 @@
       if (isMobileYoutubeUi()) setMobileYoutubeTab('pov');
       else showYoutubeSettings(false);
     });
-    if (isMobileYoutubeUi()) back.style.display='none';
+    back.style.display='none'; // Tabs provide navigation on every device.
     top.append(heading,back);pane.append(top);
 
     const intro = document.createElement('div');
@@ -7850,12 +7859,7 @@
   }
 
   function showYoutubeSettings(show=true) {
-    const panel=$('#npf-yt-panel');
-    if(!panel)return;
-    if(isMobileYoutubeUi()) {setMobileYoutubeTab(show?'settings':'pov');return;}
-    $('#npf-yt-pov-body',panel)?.style.setProperty('display',show?'none':'block','important');
-    $('#npf-yt-settings-body',panel)?.style.setProperty('display',show?'block':'none','important');
-    if(show)void updateYoutubeSettingsStatus();
+    setMobileYoutubeTab(show ? 'settings' : 'pov');
   }
 
   function ensureYoutubePanel() {
@@ -7882,7 +7886,7 @@
     head.appendChild(closeBtn);
     panel.appendChild(head);
 
-    if (isMobileYoutubeUi()) {
+    {
       const tabs = make('div', { id: 'npf-yt-tabs', cls: 'npf-yt-tabs' });
       for (const [tab, label] of [['pov', '👥 他視点'], ['research', '🔎 アーカイブ'], ['chat', '💬 チャット'], ['settings', '⚙ 設定']]) {
         const button = make('button', { cls: 'npf-yt-tab', text: label, type: 'button' });
@@ -7937,14 +7941,12 @@
       ['npf-yt-copy', 'npf-yt-btn', '📋 時刻付きコピー'],
       ['npf-yt-save-sync', 'npf-yt-btn', '⏱ 同期位置を保存'],
       ['npf-yt-clear-sync', 'npf-yt-btn', '同期を解除'],
-      ['npf-yt-favorite', 'npf-yt-btn', '☆ お気に入り切替'],
-      ['npf-yt-settings', 'npf-yt-btn', '⚙ 総合設定']
+      ['npf-yt-favorite', 'npf-yt-btn', '☆ お気に入り切替']
     ];
     for (const [id, cls, label] of actionDefs) {
       actions.appendChild(make('button', { id, cls, text: label, type: 'button' }));
     }
     body.appendChild(actions);
-    if(isMobileYoutubeUi()) $('#npf-yt-settings',actions)?.style.setProperty('display','none','important');
 
     const copyPref = make('div', { cls: 'npf-yt-copy-pref' });
     const copyLabel = make('label', { text: 'コピー形式' });
@@ -8013,14 +8015,13 @@
     });
     $('#npf-yt-clear-sync', panel)?.addEventListener('click', () => void clearYoutubeSync());
     $('#npf-yt-favorite', panel)?.addEventListener('click', () => void favoriteCurrentYoutubeChannel());
-    $('#npf-yt-settings', panel)?.addEventListener('click', () => showYoutubeSettings());
 
     updateYoutubePanel();
-    if (isMobileYoutubeUi()) {
-      // Research is created separately so its failure cannot take down the NIJI button.
-      try { ensureMobileYoutubeResearchTab(); setMobileYoutubeTab(mobileYoutubeTab); } catch (error) {
-        console.warn('[NRH] mobile research UI unavailable', error);
-      }
+    // Preserve the existing archive research UI but mount it inside NIJI on
+    // desktop as well as iPad, so its buttons, filters, history and status are
+    // accessible through the Archive tab rather than a second floating FAB.
+    try { ensureMobileYoutubeResearchTab(); setMobileYoutubeTab(mobileYoutubeTab); } catch (error) {
+      console.warn('[NRH] unified research tab unavailable', error);
     }
     return panel;
   }
@@ -8067,7 +8068,7 @@
   }
 
   function styleMobileResearchTab() {
-    if (!isMobileYoutubeUi()) return;
+    if (!isYoutubeHost()) return;
     const root = $('#npf-yt-panel');
     const panel = $('#npf-research-panel');
     if (!root || !panel) return;
@@ -8115,7 +8116,7 @@
   }
 
   function ensureMobileYoutubeResearchTab() {
-    if (!isMobileYoutubeUi()) return;
+    if (!isYoutubeHost()) return;
     const parent = $('#npf-yt-panel');
     if (!parent) return;
     const panel = ensureResearchUi();
@@ -8159,10 +8160,14 @@
   }
 
   function setMobileYoutubeTab(tab) {
-    if (!isMobileYoutubeUi()) return;
+    if (!isYoutubeHost()) return;
     mobileYoutubeTab = ['pov','research','settings'].includes(tab) ? tab : 'pov';
     if (mobileYoutubeTab === 'research') {
-      try { ensureMobileYoutubeResearchTab(); handleResearchNavigation(); scanYoutubeResearchCards(); }
+      try {
+        ensureMobileYoutubeResearchTab();
+        handleResearchNavigation();
+        if (isYoutubeResearchPage()) scanYoutubeResearchCards();
+      }
       catch (error) { console.warn('[NRH] mobile research tab', error); toast('調査画面の表示に失敗しました'); }
       void updateResearchDbStatus();
     }
@@ -11795,8 +11800,8 @@ e.el.classList.toggle('npf-r-hidden', !show);
     ensureResearchUi();
     const fab = $('#npf-research-fab');
     const panel = $('#npf-research-panel');
-    if (fab) fab.style.display = isMobileYoutubeUi() ? 'none' : active ? '' : 'none';
-    if (isMobileYoutubeUi()) mobileResearchPageHint();
+    if (fab) fab.style.setProperty('display', 'none', 'important');
+    mobileResearchPageHint();
     if (!active && panel && !isMobileYoutubeUi()) closeResearchPanel();
     if (active) {
       scheduleResearchScan(250);
@@ -11870,7 +11875,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       // failures in archive initialization must not take down the proven mobile FAB.
       try {
         startYoutubeResearch();
-        if (isMobileYoutubeUi()) ensureMobileYoutubeResearchTab();
+        ensureMobileYoutubeResearchTab();
       } catch (error) {
         console.warn('[NRH] archive research initialization failed', error);
       }
