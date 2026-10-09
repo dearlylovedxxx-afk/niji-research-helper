@@ -2825,7 +2825,10 @@
   function bindYoutubePovTimeLink(anchor, videoId, syncSeconds) {
     if (!anchor) return;
     const playbackSeconds = youtubePovPlaybackSeconds(syncSeconds);
-    anchor.href = youtubeUrl(videoId, playbackSeconds);
+    const href = youtubeUrl(videoId, playbackSeconds);
+    // In modifier-click/new-tab fallback, explicitly request 0s instead of
+    // letting YouTube resume from history when syncSeconds < 5.
+    anchor.href = playbackSeconds === 0 ? href + '&t=0s' : href;
     bindYoutubeExactTimeLink(anchor, videoId, playbackSeconds);
   }
 
@@ -4920,7 +4923,7 @@
         const info=document.createElement('div');info.textContent=channelName(v)+' ／ '+row.reason+(match?' ／ 同時刻の重なり '+fmtDuration(match.overlap):row.coach?' ／ 同時刻ではないため同期対象外':' ／ 配信日時を確認できません');
         info.style.cssText='margin:5px 0;color:#b9c7dd;';
         const matchedSecond=match?correctedCandidateOffset(source,match):0;
-        const open=document.createElement('a');open.href=youtubeUrl(v.id,match?youtubePovPlaybackSeconds(matchedSecond):0);
+        const open=document.createElement('a');open.href=youtubeUrl(v.id);
         open.target='_blank';open.rel='noopener noreferrer';open.textContent=match?'↗ 重なり時刻の5秒前から開く':'↗ 動画を確認する';
         if(match) bindYoutubePovTimeLink(open,v.id,matchedSecond);
         open.style.cssText='display:inline-block;color:#b9d4ff;margin:4px 12px 4px 0;';
@@ -9770,7 +9773,6 @@
           a.className = 'npf-r-pill';
           a.textContent = `▶ ${channelName(m.v)}`;
           const exactSecond=correctedCandidateOffset(entry.meta, m);
-          a.href = youtubeUrl(m.v.id, youtubePovPlaybackSeconds(exactSecond));
           a.target = '_blank';
           a.rel = 'noopener';
           bindYoutubePovTimeLink(a,m.v.id,exactSecond);
