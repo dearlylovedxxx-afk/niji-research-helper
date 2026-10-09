@@ -7246,7 +7246,6 @@
 
   async function applyYoutubeSeekHandoff() {
     if (!isYoutubeHost()) return false;
-    const run = ++youtubeSeekHandoffRun;
 
     let handoff = null;
     try { handoff = await gmGet(KEY_YT_SEEK_HANDOFF, null); }
@@ -7268,6 +7267,10 @@
 
     if (currentYoutubeVideoId() !== videoId) return false;
 
+    // Only invalidate a previous seek guard AFTER finding a new valid handoff.
+    // A second yt-navigate-finish / popstate callback often runs after the
+    // handoff has been consumed; it must not cancel the scheduled corrections.
+    const run = ++youtubeSeekHandoffRun;
     // 一度この動画で受け取ったら再利用しない。以降はこのページ内のガードだけで処理する。
     void gmSet(KEY_YT_SEEK_HANDOFF, null).catch(() => {});
 
