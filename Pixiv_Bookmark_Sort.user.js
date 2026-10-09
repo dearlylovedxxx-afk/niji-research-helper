@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.33
+// @version      0.6.34
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1185,7 +1185,20 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
   function saveExcludeTags(tags) {
     feedExcludeTags = parseExcludeTags((tags || []).join('\n'));
-    try { localStorage.setItem(FEED_EXCLUDE_TAGS_KEY, JSON.stringify(feedExcludeTags)); } catch {}
+    try {
+      localStorage.setItem(FEED_EXCLUDE_TAGS_KEY, JSON.stringify(feedExcludeTags));
+      // Notify Niji Cloud: this site's own localStorage writes are not
+      // observed through the browser's cross-tab "storage" event.
+      window.dispatchEvent(new Event('pixiv-feed-exclude-tags-changed'));
+    } catch {}
+  }
+
+  function receiveCloudExcludeTags() {
+    const incoming = readExcludeTags();
+    if (JSON.stringify(incoming) === JSON.stringify(feedExcludeTags)) return;
+    feedExcludeTags = incoming;
+    syncExcludeTagUi();
+    if (feedOpen) renderFeed(); // Update visible cards without re-fetching Pixiv.
   }
 
   function excludedTagSet() {
@@ -2132,6 +2145,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
   window.__pixivSavedSearchesUi = {open, close, count, render, storageKey: STORAGE_KEY, openNewest: openFeed};
   window.addEventListener('pixiv-saved-searches-changed', render);
+  window.addEventListener('pixiv-feed-exclude-tags-cloud-applied', receiveCloudExcludeTags);
+  window.addEventListener('storage', event => {
+    if (event.key === FEED_EXCLUDE_TAGS_KEY) receiveCloudExcludeTags();
+  });
   if (document.body) build(); else addEventListener('DOMContentLoaded', build, {once:true});
 })();
 
