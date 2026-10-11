@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.34
+// @version      0.6.35
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1052,8 +1052,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   const OFFSET = 78;
   const MAX_SAVED = 200;
   const FEED_STEP = 60;
-  const FEED_SEARCH_CONCURRENCY = 3;
-  const FEED_DETAIL_CONCURRENCY = 4;
+  const FEED_SEARCH_CONCURRENCY = 1;
+  const FEED_DETAIL_CONCURRENCY = 2;
+  const FEED_NETWORK_INTERVAL_MS = 1800;
+  const FEED_SEARCH_CACHE_MS = 120000;
+  const FEED_DETAIL_CACHE_MS = 300000;
+  const FEED_429_COOLDOWN_MS = 600000;
   let root = null;
 
   let feedOpen = false;
@@ -1068,6 +1072,56 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   let detailActive = 0;
   let feedAutoExpandTimer = null;
   let feedExcludeTags = readExcludeTags();
+  // Memory-only and bounded; no failed responses are cached.
+  let feedNetworkGate = Promise.resolve();
+  let feedNextNetworkAt = 0;
+  let feedBlockedUntil = 0;
+  const feedResponseCache = new Map();
+  function feedAbortError() {
+    const error = new Error('検索を中止しました');
+    error.name = 'AbortError';
+    return error;
+  }
+  function feed429Error() {
+    const error = new Error('429：Pixivのアクセス制限です。10分間は自動通信を停止します。');
+    error.rateLimited = true;
+    return error;
+  }
+  function feedCacheGet(key) {
+    const row = feedResponseCache.get(key);
+    if (!row) return null;
+    if (row.expires <= Date.now()) { feedResponseCache.delete(key); return null; }
+    return row.value;
+  }
+  function feedCachePut(key, value, ttl) {
+    feedResponseCache.delete(key);
+    feedResponseCache.set(key, {value, expires:Date.now() + ttl});
+    while (feedResponseCache.size > 240) feedResponseCache.delete(feedResponseCache.keys().next().value);
+  }
+  function feedSleep(ms, signal) {
+    if (signal?.aborted) return Promise.reject(feedAbortError());
+    return new Promise((resolve, reject) => {
+      let timer;
+      const onAbort = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); reject(feedAbortError()); };
+      timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); },ms);
+      signal?.addEventListener('abort',onAbort,{once:true});
+    });
+  }
+  async function feedReserveNetworkSlot(signal) {
+    let release;
+    const preceding = feedNetworkGate;
+    feedNetworkGate = new Promise(resolve => { release = resolve; });
+    try {
+      await preceding;
+      if (signal?.aborted) throw feedAbortError();
+      if (Date.now() < feedBlockedUntil) throw feed429Error();
+      const delay = Math.max(0, feedNextNetworkAt - Date.now());
+      if (delay) await feedSleep(delay,signal);
+      if (signal?.aborted) throw feedAbortError();
+      if (Date.now() < feedBlockedUntil) throw feed429Error();
+      feedNextNetworkAt = Date.now() + FEED_NETWORK_INTERVAL_MS;
+    } finally { release(); }
+  }
 
   function isSearchUrl(u) {
     if (/^\/tags\/[^/]+(?:\/(?:artworks|illustrations|manga|novels))?(?:\/|$)/.test(u.pathname)) return true;
@@ -1384,12 +1438,21 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     return {row, word, kind, params};
   }
 
-  async function pixivJson(url, signal) {
-    const response = await fetch(url, {credentials:'same-origin', signal, headers:{Accept:'application/json'}});
-    if (response.status === 429) throw new Error('429：Pixivのアクセス制限');
+  async function pixivJson(url, signal, cacheMs = FEED_SEARCH_CACHE_MS) {
+    const key = new URL(url,location.origin).href;
+    if (signal?.aborted) throw feedAbortError();
+    const cached = feedCacheGet(key);
+    if (cached !== null) return cached;
+    await feedReserveNetworkSlot(signal);
+    const response = await fetch(key, {credentials:'same-origin', signal, headers:{Accept:'application/json'}});
+    if (response.status === 429) {
+      feedBlockedUntil = Math.max(feedBlockedUntil, Date.now() + FEED_429_COOLDOWN_MS);
+      throw feed429Error();
+    }
     if (!response.ok) throw new Error('HTTP ' + response.status);
     const data = await response.json();
     if (!data || data.error) throw new Error(data?.message || 'Pixiv APIエラー');
+    if (cacheMs > 0) feedCachePut(key,data.body,cacheMs);
     return data.body;
   }
 
@@ -1451,7 +1514,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
   async function fetchDetail(work, signal) {
     const path = work.type === 'novel' ? '/ajax/novel/' : '/ajax/illust/';
-    return await pixivJson(path + encodeURIComponent(work.id), signal);
+    return await pixivJson(path + encodeURIComponent(work.id), signal, FEED_DETAIL_CACHE_MS);
   }
 
   function mergeWorks(rows, ctx) {
@@ -1744,7 +1807,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
         if (excludedByTag(work)) renderFeed();
         else updateFeedCard(work);
       }).catch(e => {
-        if (e?.name !== 'AbortError') {
+        if (e?.name !== 'AbortError' && !e?.rateLimited) {
           work.detailLoaded = true;
           updateFeedCard(work);
         }
@@ -1779,7 +1842,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     if (!root) return;
     syncExcludeTagUi();
     const status = root.querySelector('.pss-feed-status');
-    if (status) status.textContent = feedStatusText();
+    if (status) status.textContent = (Date.now() < feedBlockedUntil ? '⚠ Pixivのアクセス制限を検出：10分間は通信停止 ／ ' : '') + feedStatusText();
     renderCoverageBreakdown();
 
     const grid = root.querySelector('.pss-feed-grid');
@@ -1811,7 +1874,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     if (!feedLoading) observeFeedCards(visible, feedGeneration);
   }
 
-  async function refreshFeed() {
+  async function refreshFeed(force = false) {
+    if (force) feedResponseCache.clear();
     const rows = readSaved();
     feedAbort?.abort();
     feedAbort = new AbortController();
@@ -2084,7 +2148,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     root.querySelector('.pss-save-current').addEventListener('click', saveCurrent);
     root.querySelector('.pss-newest-open').addEventListener('click', openFeed);
     root.querySelector('.pss-feed-back').addEventListener('click', closeFeed);
-    root.querySelector('.pss-feed-refresh').addEventListener('click', () => void refreshFeed());
+    root.querySelector('.pss-feed-refresh').addEventListener('click', () => void refreshFeed(true));
     root.querySelector('.pss-feed-exclude-apply').addEventListener('click', applyExcludeTagInput);
     root.querySelector('.pss-feed-exclude-input').addEventListener('keydown', event => {
       if (event.key === 'Enter') {
