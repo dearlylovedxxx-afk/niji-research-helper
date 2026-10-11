@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.105
+// @version      1.0.106
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.105';
+  const VERSION = '1.0.106';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5486,6 +5486,189 @@
     const video = youtubeVideoElement();
     const n = Number(video?.currentTime || 0);
     return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  }
+
+
+  // ---------- Archived livestream wall clock beside YouTube playback time ----------
+  // The player-provided real start timestamp is preferred to Holodex metadata.
+  // Never infer an actual start from a scheduled time, upload date, or title.
+  const youtubeBroadcastClock = {
+    videoId:'', startMs:null, source:'', boundVideo:null,
+    lastPageProbe:0, lastFetchAttempt:0, fetching:false, fetched:false,
+  };
+  const youtubeBroadcastTimeFormatter = new Intl.DateTimeFormat('ja-JP', {
+    timeZone:'Asia/Tokyo', hour:'2-digit', minute:'2-digit',
+    second:'2-digit', hour12:false, hourCycle:'h23'
+  });
+  const youtubeBroadcastDateFormatter = new Intl.DateTimeFormat('ja-JP', {
+    timeZone:'Asia/Tokyo', year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false, hourCycle:'h23'
+  });
+
+  function youtubeBroadcastClockReset(videoId='') {
+    const stateClock=youtubeBroadcastClock;
+    if(stateClock.boundVideo){
+      stateClock.boundVideo.removeEventListener('timeupdate', updateYoutubeBroadcastClock);
+      stateClock.boundVideo.removeEventListener('loadedmetadata', updateYoutubeBroadcastClock);
+      stateClock.boundVideo=null;
+    }
+    stateClock.videoId=videoId;
+    stateClock.startMs=null;stateClock.source='';
+    stateClock.lastPageProbe=0;stateClock.lastFetchAttempt=0;
+    stateClock.fetching=false;stateClock.fetched=false;
+    $('#npf-yt-broadcast-clock')?.remove();
+  }
+
+  function youtubeBroadcastStartFromResponse(response,videoId) {
+    if(!response || String(response?.videoDetails?.videoId||'')!==videoId) return null;
+    const actual=response?.microformat?.playerMicroformatRenderer?.liveBroadcastDetails?.startTimestamp;
+    if(!actual || typeof actual!=='string')return null;
+    const ms=Date.parse(actual);
+    if(!Number.isFinite(ms) || ms<Date.UTC(2010,0,1) || ms>Date.now()+60000)return null;
+    return ms;
+  }
+
+  function youtubeBroadcastEmbeddedResponse(scriptText) {
+    // Extract the JSON assigned to ytInitialPlayerResponse without eval.
+    // Parse its balanced object because the contents may contain nested JSON.
+    const match=/(?:^|[;\n])\s*(?:(?:var|let|const)\s+)?(?:window\.)?ytInitialPlayerResponse\s*=\s*(\{)/m.exec(scriptText);
+    if(!match)return null;
+    const start=match.index+match[0].lastIndexOf('{');
+    let depth=0,quoted=false,escaped=false;
+    const limit=Math.min(scriptText.length,start+1800000);
+    for(let i=start;i<limit;i++){
+      const c=scriptText[i];
+      if(quoted){
+        if(escaped)escaped=false;
+        else if(c==='\\')escaped=true;
+        else if(c==='"')quoted=false;
+      }else if(c==='"')quoted=true;
+      else if(c==='{')depth++;
+      else if(c==='}' && --depth===0){
+        try{return JSON.parse(scriptText.slice(start,i+1));}catch{return null;}
+      }
+    }
+    return null;
+  }
+
+  function youtubeBroadcastStartFromPage(videoId) {
+    const hosts=[$('#movie_player'),$('ytd-player'),$('ytm-player')].filter(Boolean);
+    for(const host of hosts) {
+      try {
+        const response=host.getPlayerResponse?.() || host.player_?.getPlayerResponse?.();
+        const ms=youtubeBroadcastStartFromResponse(response,videoId);
+        if(ms!==null)return ms;
+      }catch{}
+    }
+    // Read embedded JSON rather than page globals; supports isolated userscript
+    // worlds and Macaque without requiring unsafeWindow or YouTube API keys.
+    for(const script of document.scripts){
+      const source=script.textContent||'';
+      if(!source.includes('ytInitialPlayerResponse') || !source.includes('liveBroadcastDetails'))continue;
+      const response=youtubeBroadcastEmbeddedResponse(source);
+      const ms=youtubeBroadcastStartFromResponse(response,videoId);
+      if(ms!==null)return ms;
+    }
+    return null;
+  }
+
+  function youtubeBroadcastStartFromHolodex(video) {
+    if(!video || video.type!=='stream' || !video.start_actual)return null;
+    const ms=Date.parse(video.start_actual);
+    if(!Number.isFinite(ms)||ms<Date.UTC(2010,0,1)||ms>Date.now()+60000)return null;
+    return ms;
+  }
+
+  function youtubeBroadcastClockAccept(videoId,ms,source) {
+    if(youtubeBroadcastClock.videoId!==videoId||!Number.isFinite(ms))return;
+    // Player metadata is more authoritative than the Holodex start time.
+    if(youtubeBroadcastClock.source==='YouTube' && source!=='YouTube')return;
+    youtubeBroadcastClock.startMs=ms;
+    youtubeBroadcastClock.source=source;
+    updateYoutubeBroadcastClock();
+  }
+
+  async function youtubeBroadcastClockResolve(videoId) {
+    const clock=youtubeBroadcastClock;
+    if(clock.videoId!==videoId||clock.fetching||clock.fetched)return;
+    clock.fetching=true;
+    try {
+      const cached=await nrhDbGet('videos',videoId).catch(()=>null);
+      if(clock.videoId!==videoId)return;
+      const oldStart=youtubeBroadcastStartFromHolodex(cached?.meta);
+      if(oldStart!==null)youtubeBroadcastClockAccept(videoId,oldStart,'Holodex');
+      if(clock.startMs!==null)return;
+      if(!state.apiKey)return; // Without an API key, page metadata still works.
+      clock.fetched=true;
+      const meta=await apiGet('/videos/'+encodeURIComponent(videoId)+'?lang=ja');
+      if(clock.videoId!==videoId)return;
+      const found=youtubeBroadcastStartFromHolodex(meta);
+      if(found!==null)youtubeBroadcastClockAccept(videoId,found,'Holodex');
+    }catch(error){
+      // Missing/private streams and 429 rate limits must never break playback.
+      console.debug('[NRH][broadcast clock]',String(error?.message||error));
+    }finally{clock.fetching=false;}
+  }
+
+  function updateYoutubeBroadcastClock() {
+    const clock=youtubeBroadcastClock;
+    const videoId=currentYoutubeVideoId()||'';
+    const video=youtubeVideoElement();
+    const root=$('#npf-yt-broadcast-clock');
+    if(!videoId||clock.videoId!==videoId||clock.startMs===null||
+       !video||!Number.isFinite(video.duration)||video.duration<=0||
+       !Number.isFinite(video.currentTime)){
+      if(root)root.remove();
+      return;
+    }
+    const host=youtubeTimestampPlayerHost();
+    const current=host?.querySelector?.('.ytp-time-current');
+    if(!current){root?.remove();return;}
+    let label=root;
+    if(!label||label.previousElementSibling!==current){
+      label?.remove();
+      label=document.createElement('span');
+      label.id='npf-yt-broadcast-clock';
+      label.style.cssText='display:inline-block!important;margin:0 5px!important;color:#c9dcff!important;white-space:nowrap!important;font-size:12px!important;font-weight:750!important;vertical-align:baseline!important;pointer-events:auto!important;';
+      label.setAttribute('aria-label','実際の配信時刻・日本時間');
+      current.insertAdjacentElement('afterend',label);
+    }
+    const value=new Date(clock.startMs+Math.max(0,video.currentTime)*1000);
+    const text='｜'+youtubeBroadcastTimeFormatter.format(value);
+    if(label.textContent!==text)label.textContent=text;
+    label.title='配信時刻（日本時間） '+youtubeBroadcastDateFormatter.format(value)+
+      ' ／ '+clock.source+'の実際の配信開始時刻＋動画再生位置から計算';
+  }
+
+  function syncYoutubeBroadcastClockFeature() {
+    const videoId=currentYoutubeVideoId()||'';
+    const clock=youtubeBroadcastClock;
+    if(clock.videoId!==videoId)youtubeBroadcastClockReset(videoId);
+    if(!videoId)return;
+    const video=youtubeVideoElement();
+    if(video!==clock.boundVideo){
+      if(clock.boundVideo){
+        clock.boundVideo.removeEventListener('timeupdate',updateYoutubeBroadcastClock);
+        clock.boundVideo.removeEventListener('loadedmetadata',updateYoutubeBroadcastClock);
+      }
+      clock.boundVideo=video;
+      video?.addEventListener('timeupdate',updateYoutubeBroadcastClock,{passive:true});
+      video?.addEventListener('loadedmetadata',updateYoutubeBroadcastClock,{passive:true});
+    }
+    if(clock.source!=='YouTube' && Date.now()-clock.lastPageProbe>2500){
+      clock.lastPageProbe=Date.now();
+      const actual=youtubeBroadcastStartFromPage(videoId);
+      if(actual!==null)youtubeBroadcastClockAccept(videoId,actual,'YouTube');
+    }
+    // Avoid network work while navigating menus; only watch-page archives
+    // with real, seekable media durations are eligible for this readout.
+    if(clock.startMs===null && !clock.fetching && !clock.fetched &&
+       video && Number.isFinite(video.duration) && video.duration>0 &&
+       Date.now()-clock.lastFetchAttempt>4000){
+      clock.lastFetchAttempt=Date.now();
+      void youtubeBroadcastClockResolve(videoId);
+    }
+    updateYoutubeBroadcastClock();
   }
 
   const YT_TS_MAX_SAVED_VIDEOS = 80;
@@ -11921,6 +12104,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       youtubePriorityOverlayUi.lastActive = -1;
       youtubePriorityOverlayUi.scrollTop = 0;
       resetYoutubePriorityBackground(id);
+      youtubeBroadcastClockReset(id);
       closeYoutubePanel();
     }
     setTimeout(() => {
@@ -11929,6 +12113,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       syncYoutubePanelVisibility();
       updateYoutubePanel();
       syncYoutubeTimestampFeature();
+      syncYoutubeBroadcastClockFeature();
     }, 180);
   }
 
@@ -11937,6 +12122,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       createShell();
       ensureYoutubePanel();
       handleYoutubeNavigation();
+      syncYoutubeBroadcastClockFeature();
       void applyYoutubeSeekHandoff();
       // Only one NIJI entry point on mobile. Research mounts as a tab inside it;
       // failures in archive initialization must not take down the proven mobile FAB.
@@ -11977,6 +12163,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
         syncYoutubePanelVisibility();
         updateYoutubePanel();
         syncYoutubeTimestampFeature();
+        syncYoutubeBroadcastClockFeature();
         if (research.holodexPaused || wikiRequestsPaused) updateResearchCooldownDisplay();
       }, 1000);
       ytBootBadge?.remove();
