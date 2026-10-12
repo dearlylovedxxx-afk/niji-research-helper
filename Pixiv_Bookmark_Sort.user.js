@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.35
+// @version      0.6.36
 // @description  Pixivツールを1つのパネルに統合。全体ブックマーク調査・小説TXT・検索条件の保存と呼び出しに対応。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -1374,8 +1374,41 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     writeSaved(rows);
   }
 
+  // Legacy Pixiv search URLs and obsolete query keys can break normal
+  // saved-search navigation. Normalize only at open time; leave stored data
+  // and the all-saved-search newest feed intact.
+  function savedSearchNavigationHref(row) {
+    const original = new URL(row.href, location.origin);
+    if (original.origin !== location.origin || !isSearchUrl(original)) {
+      throw new Error('保存検索URLが正しくありません');
+    }
+    const tag = original.pathname.match(new RegExp('^/tags/([^/]+)(?:/(artworks|illustrations|manga|novels))?(?:/|$)'));
+    const word = tag ? decodeURIComponent(tag[1])
+      : (original.searchParams.get('word') || original.searchParams.get('q') || row.word || '');
+    if (!word) throw new Error('保存検索の検索語がありません');
+    const type = original.searchParams.get('type') || '';
+    const kind = tag?.[2] || row.kind
+      || (original.pathname === '/novel/search.php' || ['novel', 'novels'].includes(type) ? 'novels'
+        : type === 'manga' ? 'manga'
+        : ['illust', 'illustrations'].includes(type) ? 'illustrations' : 'artworks');
+    const safeKind = ['novels','artworks','illustrations','manga'].includes(kind) ? kind : 'artworks';
+    const target = new URL('/tags/' + encodeURIComponent(word) + '/' + safeKind, location.origin);
+    const allowed = ['order','mode','scd','ecd','ai_type','work_lang','lang','csw',
+      ...(safeKind === 'novels' ? ['tlt','tgt','wlt','wgt','original_only','genre','gs']
+        : ['wlt','wgt','hlt','hgt','ratio','tool'])];
+    for (const key of allowed) {
+      for (const value of original.searchParams.getAll(key)) target.searchParams.append(key,value);
+    }
+    if (safeKind === 'illustrations' && ['illust','ugoira','illust_and_ugoira'].includes(type)) {
+      target.searchParams.set('type',type);
+    }
+    target.searchParams.set('s_mode',savedTagPartialMode(safeKind));
+    return target.href;
+  }
+
   function openRow(row) {
-    location.assign(new URL(row.href, location.origin).href);
+    try { location.assign(savedSearchNavigationHref(row)); }
+    catch (error) { alert('保存検索を開けません：' + (error?.message || error)); }
   }
 
   function ageMode(v) {
