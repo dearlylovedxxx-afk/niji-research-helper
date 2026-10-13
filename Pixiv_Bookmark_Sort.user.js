@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.38
-// @description  Pixiv統合ツール：全体ブックマーク・原寸画像PNG/ZIP保存・小説TXT・保存検索・表示設定。
+// @version      0.6.39
+// @description  Pixiv統合ツール：全体ブクマ・原寸画像PNG/ZIP保存・iPhone共有シート（ファイル/pCloud）・小説TXT・保存検索。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
 // @grant        GM.xmlHttpRequest
@@ -2525,6 +2525,9 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   let listNode = null;
   let titleInput = null;
   let found = [];
+  let preparedFiles = [];
+  const DELIVERY_KEY = 'pixiv-image-save-delivery-v1';
+  const SHARE_MAX_BYTES = 180 * 1024 * 1024;
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -2694,11 +2697,93 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     });
   }
 
+
+  function shareMode() {
+    return root?.querySelector('.pbi-delivery')?.value === 'share';
+  }
+
+  function clearPrepared() {
+    preparedFiles = [];
+    const share = root?.querySelector('.pbi-share-ready');
+    const download = root?.querySelector('.pbi-download-ready');
+    if (share) share.hidden = true;
+    if (download) download.hidden = true;
+  }
+
+  function prepareShare(files, label) {
+    if (!files.length) {
+      statusNode.textContent = '共有できる画像がありませんでした。';
+      return;
+    }
+    const bytes = files.reduce((total, file) => total + file.size, 0);
+    if (bytes > SHARE_MAX_BYTES) {
+      clearPrepared();
+      statusNode.textContent = '合計180MBを超えるため共有準備を中止しました。保存範囲を分けてください。';
+      return;
+    }
+    preparedFiles = files;
+    root.querySelector('.pbi-share-ready').hidden = false;
+    root.querySelector('.pbi-download-ready').hidden = false;
+    statusNode.textContent = label + 'を準備しました（' + files.length + 'ファイル／'
+      + (bytes / (1024 * 1024)).toFixed(1) + 'MB）。'
+      + '「📤 共有シートを開く」を押して「ファイルに保存」やpCloudを選んでください。';
+  }
+
+  function openShareSheet() {
+    // Called directly by the user. Do not await work before invoking
+    // navigator.share: iOS Safari requires transient user activation.
+    if (!preparedFiles.length) {
+      statusNode.textContent = '共有するファイルを先に準備してください。';
+      return;
+    }
+    if (typeof navigator.share !== 'function') {
+      statusNode.textContent = 'このブラウザでは共有シートを利用できません。「準備済みをダウンロード」を使ってください。';
+      return;
+    }
+    const files = preparedFiles.slice();
+    if (typeof navigator.canShare === 'function' && !navigator.canShare({files})) {
+      statusNode.textContent = 'この形式またはファイル数は共有できません。ZIPで準備するか「準備済みをダウンロード」を使ってください。';
+      return;
+    }
+    try {
+      const promise = navigator.share({files, title:files.length === 1 ? files[0].name : 'Pixiv画像'});
+      Promise.resolve(promise).then(() => {
+        statusNode.textContent = '共有シートを閉じました。選んだ保存先で保存完了を確認してください。';
+      }).catch(error => {
+        statusNode.textContent = error?.name === 'AbortError'
+          ? '共有をキャンセルしました。再度「共有シートを開く」を押せます。'
+          : '共有できませんでした：' + String(error?.message || error);
+      });
+    } catch(error) {
+      statusNode.textContent = '共有シートを開けませんでした：' + String(error?.message || error);
+    }
+  }
+
+  async function downloadPrepared() {
+    if (!preparedFiles.length) return;
+    const button=root.querySelector('.pbi-download-ready');
+    button.disabled=true;
+    let count=0;
+    try {
+      for (const file of preparedFiles) {
+        await saveBlob(file,file.name);
+        count++;
+        await sleep(180);
+      }
+      statusNode.textContent = '通常ダウンロード：' + count + 'ファイル。iPhoneの「ファイル」からpCloudへ移動できます。';
+    } catch(error) {
+      statusNode.textContent = count + '件ダウンロード後にエラー：' + String(error?.message || error);
+    } finally {button.disabled=false;}
+  }
+
   async function saveOne(row, index, total) {
     const name = buildFileName(index, total);
 
     try {
       const png = await getPngBlob(row.url);
+      if (shareMode()) {
+        return {ok:true, file:new File([png], name, {type:'image/png'})};
+      }
       await saveBlob(png, name);
       return {ok:true};
     } catch (err) {
@@ -2742,6 +2827,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
 
   async function saveRowsAsZip(entries, zipName) {
+    clearPrepared();
     if (!entries.length) {
       statusNode.textContent = 'ZIPに入れる画像がありません。';
       return;
@@ -2780,11 +2866,15 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       // PNGは既に圧縮済みなのでZIP側はlevel 0。
       // JSZipよりメモリ負荷と処理時間を抑えやすい。
       const blob = zipStore(files);
-      await saveBlob(blob, zipName);
-
-      statusNode.textContent = failed
-        ? 'ZIP保存完了：' + ok + '枚／失敗 ' + failed + '枚'
-        : 'ZIP保存完了：' + ok + '枚';
+      if (shareMode()) {
+        prepareShare([new File([blob], zipName, {type:'application/zip'})],
+          'ZIP ' + ok + '枚分' + (failed ? '（失敗 '+failed+'枚）' : ''));
+      } else {
+        await saveBlob(blob, zipName);
+        statusNode.textContent = failed
+          ? 'ZIP保存完了：' + ok + '枚／失敗 ' + failed + '枚'
+          : 'ZIP保存完了：' + ok + '枚';
+      }
     } catch (err) {
       statusNode.textContent =
         'ZIP作成に失敗しました：' + (err?.message || err || '不明なエラー');
@@ -2858,61 +2948,63 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       statusNode.textContent = '保存できる画像がありません。';
       return;
     }
-
-    const {start, end} = readRange();
-    const rows = found.slice(start - 1, end).map((row, offset) => ({
-      row,
-      index: start - 1 + offset
-    }));
-
-    const btn = root.querySelector('.pbi-save-range');
-    if (btn) btn.disabled = true;
-
-    let ok = 0;
-    let failed = 0;
-
-    for (let i = 0; i < rows.length; i++) {
-      const entry = rows[i];
-      statusNode.textContent =
-        start + '〜' + end + '枚目を保存中… ' + (i + 1) + ' / ' + rows.length;
-      const result = await saveOne(entry.row, entry.index, found.length);
-      if (result.ok) ok++;
-      else failed++;
-      await sleep(180);
-    }
-
-    if (btn) btn.disabled = false;
-    statusNode.textContent = failed
-      ? start + '〜' + end + '枚目：' + ok + '枚保存／失敗 ' + failed + '枚'
-      : start + '〜' + end + '枚目を保存しました（' + ok + '枚）。';
+    clearPrepared();
+    const {start,end}=readRange();
+    const rows=found.slice(start-1,end).map((row,offset)=>({row,index:start-1+offset}));
+    const btn=root.querySelector('.pbi-save-range');
+    btn.disabled=true;
+    let ok=0,failed=0,files=[];
+    try {
+      for (let i=0;i<rows.length;i++) {
+        const entry=rows[i];
+        statusNode.textContent=start+'〜'+end+'枚目を'+(shareMode()?'共有用に準備中… ':'保存中… ')
+          +(i+1)+' / '+rows.length;
+        const result=await saveOne(entry.row,entry.index,found.length);
+        if (result.ok) {
+          ok++;
+          if(result.file)files.push(result.file);
+        } else failed++;
+        await sleep(180);
+      }
+      if (shareMode()) {
+        if (ok)prepareShare(files,'画像 '+ok+'枚'+(failed?'（失敗 '+failed+'枚）':''));
+        else statusNode.textContent='共有用の画像を準備できませんでした。';
+      } else {
+        statusNode.textContent=start+'〜'+end+'枚目：'+ok+'枚保存'
+          +(failed?'／失敗 '+failed+'枚':'');
+      }
+    } finally {btn.disabled=false;}
   }
 
   async function saveSelected() {
-    const selected = selectedRows();
-    if (!selected.length) {
-      statusNode.textContent = '保存する画像を選択してください。';
+    const rows=selectedRows();
+    if(!rows.length) {
+      statusNode.textContent='保存する画像を選択してください。';
       return;
     }
-
-    const saveBtn = root.querySelector('.pbi-save-selected');
-    if (saveBtn) saveBtn.disabled = true;
-
-    let ok = 0;
-    let failed = 0;
-
-    for (let i = 0; i < selected.length; i++) {
-      const entry = selected[i];
-      statusNode.textContent = '保存中… ' + (i + 1) + ' / ' + selected.length;
-      const result = await saveOne(entry.row, entry.index, found.length);
-      if (result.ok) ok++;
-      else failed++;
-      await sleep(180);
-    }
-
-    if (saveBtn) saveBtn.disabled = false;
-    statusNode.textContent = failed
-      ? '保存完了：' + ok + '枚／失敗 ' + failed + '枚。失敗した画像は各カードの「画像を開く」から確認できます。'
-      : '保存完了：' + ok + '枚';
+    clearPrepared();
+    const btn=root.querySelector('.pbi-save-selected');
+    btn.disabled=true;
+    let ok=0,failed=0,files=[];
+    try {
+      for(let i=0;i<rows.length;i++) {
+        const entry=rows[i];
+        statusNode.textContent=(shareMode()?'共有用に準備中… ':'保存中… ')
+          +(i+1)+' / '+rows.length;
+        const result=await saveOne(entry.row,entry.index,found.length);
+        if(result.ok) {
+          ok++;
+          if(result.file)files.push(result.file);
+        } else failed++;
+        await sleep(180);
+      }
+      if(shareMode()) {
+        if(ok)prepareShare(files,'画像 '+ok+'枚'+(failed?'（失敗 '+failed+'枚）':''));
+        else statusNode.textContent='共有用の画像を準備できませんでした。';
+      } else {
+        statusNode.textContent='保存完了：'+ok+'枚'+(failed?'／失敗 '+failed+'枚':'');
+      }
+    } finally {btn.disabled=false;}
   }
 
   function render() {
@@ -2961,10 +3053,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       save.textContent = '⬇️ この1枚を保存';
       save.addEventListener('click', async () => {
         save.disabled = true;
-        statusNode.textContent = '画像 ' + (index + 1) + ' を保存中…';
+        clearPrepared();
+        statusNode.textContent = '画像 ' + (index + 1) + (shareMode() ? ' を共有用に準備中…' : ' を保存中…');
         const result = await saveOne(row, index, found.length);
         save.disabled = false;
-        statusNode.textContent = result.ok
+        if (result.file) prepareShare([result.file], '画像 '+(index+1));
+        else statusNode.textContent = result.ok
           ? '画像 ' + (index + 1) + ' を保存しました。'
           : '保存失敗：' + (result.error?.message || result.error || '不明なエラー');
       });
@@ -2998,6 +3092,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
   async function detect() {
     if(!isItemPage()||!root)return;
+    clearPrepared();
     const id=itemId();
     statusNode.textContent='原寸画像を取得中…';
     found=[];listNode.replaceChildren();
@@ -3041,6 +3136,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       '#' + ROOT_ID + ' .pbi-primary{background:#7356a8;color:#fff;border-color:#7356a8}',
       '#' + ROOT_ID + ' .pbi-meta{max-width:980px;margin:8px auto 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;color:#59636e}',
       '#' + ROOT_ID + ' .pbi-meta input[type=text]{min-width:220px;max-width:100%;border:1px solid #ccd2d9;border-radius:7px;padding:6px}',
+      '#' + ROOT_ID + ' .pbi-meta select{padding:7px;border:1px solid #ccd2d9;border-radius:7px;background:#fff;color:#202124;max-width:100%}',
       '#' + ROOT_ID + ' .pbi-range{max-width:980px;margin:8px auto 0;display:flex;gap:7px;align-items:center;flex-wrap:wrap;font-size:12px;color:#59636e}',
       '#' + ROOT_ID + ' .pbi-range input[type=number]{width:72px;border:1px solid #ccd2d9;border-radius:7px;padding:6px;background:#fff;color:#202124}',
       '#' + ROOT_ID + ' .pbi-status{max-width:980px;margin:7px auto 0;font-size:12px;color:#59636e;overflow-wrap:anywhere}',
@@ -3079,9 +3175,13 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
           '<button type="button" class="pbi-clear-all">全部解除</button>' +
           '<button type="button" class="pbi-save-selected">⬇️ 選択をPNG保存</button>' +
           '<button type="button" class="pbi-zip-selected pbi-primary">📦 選択をZIP</button>' +
+          '<button type="button" class="pbi-share-ready pbi-primary" hidden>📤 共有シートを開く</button>' +
+          '<button type="button" class="pbi-download-ready" hidden>⬇️ 準備済みをダウンロード</button>' +
           '<button type="button" class="pbi-close">閉じる</button>' +
         '</div>' +
-        '<div class="pbi-meta"><label>ファイル名：<input type="text" class="pbi-title" placeholder="作品タイトル"></label><span>保存形式はPNG。01・02…の連番で保存します。</span></div>' +
+        '<div class="pbi-meta"><label>ファイル名：<input type="text" class="pbi-title" placeholder="作品タイトル"></label>' +
+          '<label>保存方法：<select class="pbi-delivery"><option value="share">📤 iPhone共有（ファイル／pCloud）</option><option value="download">⬇️ 通常ダウンロード</option></select></label>' +
+          '<span>PNG・ZIPを共有する場合は、準備完了後に共有シートを開きます。</span></div>' +
         '<div class="pbi-range"><strong>保存範囲：</strong><input type="number" class="pbi-range-start" min="1" value="1"><span>〜</span><input type="number" class="pbi-range-end" min="1" value="1"><span>枚目</span><button type="button" class="pbi-save-range">⬇️ PNG保存</button><button type="button" class="pbi-zip-range pbi-primary">📦 この範囲をZIP</button></div>' +
         '<div class="pbi-status">まだ検出していません。</div>' +
       '</div>' +
@@ -3090,6 +3190,21 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     statusNode = root.querySelector('.pbi-status');
     listNode = root.querySelector('.pbi-list');
     titleInput = root.querySelector('.pbi-title');
+    const delivery=root.querySelector('.pbi-delivery');
+    const nativeShare=typeof navigator.share==='function' && typeof File==='function';
+    let requestedMode='';
+    try{requestedMode=localStorage.getItem(DELIVERY_KEY)||'';}catch{}
+    delivery.value=nativeShare && requestedMode!=='download' ? 'share' : 'download';
+    if(!nativeShare) delivery.querySelector('option[value="share"]').disabled=true;
+    delivery.addEventListener('change',()=>{
+      clearPrepared();
+      try{localStorage.setItem(DELIVERY_KEY,delivery.value);}catch{}
+      statusNode.textContent=delivery.value==='share'
+        ? 'ファイルを作成した後、もう一度「共有シートを開く」を押すと保存先を選べます。'
+        : '通常ダウンロードを使用します。';
+    });
+    root.querySelector('.pbi-share-ready').addEventListener('click',openShareSheet);
+    root.querySelector('.pbi-download-ready').addEventListener('click',()=>void downloadPrepared());
 
     root.querySelector('.pbi-detect').addEventListener('click', detect);
     root.querySelector('.pbi-save-selected').addEventListener('click', saveSelected);
@@ -3116,6 +3231,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
 
   function closePanel() {
+    clearPrepared();
     root?.classList.remove('open');
   }
 
