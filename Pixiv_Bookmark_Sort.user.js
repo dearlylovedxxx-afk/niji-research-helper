@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.39
+// @version      0.6.40
 // @description  Pixiv統合ツール：全体ブクマ・原寸画像PNG/ZIP保存・iPhone共有シート（ファイル/pCloud）・小説TXT・保存検索。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -101,6 +101,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   const RESEARCH_DB = 'pixiv-bookmark-sort-cross-page-v02';
   const EXTRA_DB = 'pixiv-bookmark-sort-extras-v01';
   const SORT_KEY = 'pixiv-bsort-view-sort-v055';
+  const EXCLUDE_WORDS_KEY = 'pixiv-bsort-excluded-tag-words-v1'; // display only
   const MAX_VIEW = 1000;
   const DETAIL_WAIT = 2600;
   const $new = (tag, klass, text) => {
@@ -255,10 +256,51 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     }));
   }
   const extras = new Map(), extrasQueue = [], extrasPending = new Set();
+  const failedExtraKeys = new Set();
   let extraBusy = false, extraHalted = false, lastExtraRequest = 0;
   let overlay, results, summary, extraStatus, sortSelect, ageSelect, fromInput, toInput, limitSelect, minInput;
+  let excludeInput, excludeSummary, baseSummary = '';
   let viewContext = null, viewSeq = 0, viewTimer, open = false, observer;
   let attached = false;
+  function normalizeExcludeWord(value) {
+    return String(value || '').normalize('NFKC').trim().toLocaleLowerCase('ja-JP');
+  }
+  function parseExcludeWords(value) {
+    const parts=String(value||'').split(/[\n,、]+/).map(x=>x.trim()).filter(Boolean);
+    const kept=new Map();
+    for(const part of parts) {
+      const normalized=normalizeExcludeWord(part);
+      if(normalized && !kept.has(normalized))kept.set(normalized,part);
+    }
+    return [...kept.values()].slice(0,100);
+  }
+  function readExcludeWords() {
+    try {
+      const value=JSON.parse(localStorage.getItem(EXCLUDE_WORDS_KEY)||'[]');
+      return Array.isArray(value)?parseExcludeWords(value.join('\n')):[];
+    } catch {return [];}
+  }
+  let excludeWords = readExcludeWords();
+  function excludedByTagWords(tags) {
+    if (!excludeWords.length || !Array.isArray(tags))return false;
+    const needles=excludeWords.map(normalizeExcludeWord);
+    return tags.some(tag=>{
+      const value=normalizeExcludeWord(typeof tag==='string'?tag:tag?.tag);
+      return value && needles.some(needle=>value.includes(needle));
+    });
+  }
+  function syncExcludeWordUi() {
+    if(excludeInput && document.activeElement!==excludeInput)excludeInput.value=excludeWords.join(', ');
+    if(excludeSummary)excludeSummary.textContent=excludeWords.length
+      ?'🚫 タグの除外ワード '+excludeWords.length+'件':'🚫 タグ除外ワードなし';
+  }
+  function applyExcludeWords() {
+    excludeWords=parseExcludeWords(excludeInput?.value||'');
+    try{localStorage.setItem(EXCLUDE_WORDS_KEY,JSON.stringify(excludeWords));}catch{}
+    syncExcludeWordUi();
+    // Stored research results and extras stay intact; the filter is only UI.
+    renderList();
+  }
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   function extraKey(row) {
     const novel = viewContext?.kind === 'novels';
@@ -278,6 +320,49 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     if (!tags.childNodes.length) tags.textContent = 'タグなし';
     node.append(tags, $new('div', 'pbs-extra-caption', extra.caption ? 'キャプション：' + extra.caption : 'キャプションの記載なし'));
   }
+
+  function refreshFilteredResults() {
+    if (!open || !excludeWords.length || !results?.isConnected) return;
+    const rows=[...results.querySelectorAll('.pbs-new-row')];
+    const target=Math.max(1,Number(limitSelect?.value)||100);
+    let shown=0,hidden=0,pending=0,unknown=0,reserved=0;
+    const need=[];
+    for(const row of rows){
+      const info=row.querySelector('.pbs-extra'), key=info?.dataset?.key;
+      const extra=key?extras.get(key):null;
+      if(extra){
+        if(excludedByTagWords(extra.tags)){
+          row.hidden=true;row.style.display='none';hidden++;
+        }else if(shown<target){
+          row.hidden=false;row.style.removeProperty('display');shown++;
+          drawExtra(info,extra);
+        }else{
+          row.hidden=true;row.style.display='none';
+        }
+      }else{
+        row.hidden=true;row.style.display='none';
+        if(key && failedExtraKeys.has(key)){unknown++;continue;}
+        pending++;
+        if(key && shown+reserved<target && !extraHalted) {
+          if(!extrasPending.has(key)){need.push({key,node:info});}
+          reserved++;
+        }
+      }
+    }
+    summary.textContent=baseSummary
+      +' ／ 表示 '+shown+'/'+target+'件'
+      +' ／ 除外 '+hidden+'件'
+      +(pending?' ／ タグ確認待ち '+pending+'件':'')
+      +(unknown?' ／ 取得不可 '+unknown+'件':'');
+    if(extraHalted) {
+      if(!extraStatus.textContent.includes('停止'))extraStatus.textContent='⚠ タグ取得を停止しています。未確認の作品は表示していません。';
+    }else{
+      extraStatus.textContent='除外ワードは作品タグのみ部分一致。タグ確認済みの作品だけを表示します。'
+        +'（調査データは消去しません）';
+    }
+    for(const item of need) queueExtra(item.key,item.node);
+  }
+
   function queueExtra(key, node) {
     if (!key || extrasPending.has(key) || extraHalted || !open) return;
     if (extras.has(key)) { drawExtra(node, extras.get(key)); return; }
@@ -303,8 +388,16 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
             try { response = await fetch('/ajax/' + key.replace(':', '/'), {credentials:'same-origin', headers:{Accept:'application/json'}}); }
             catch { extraHalted = true; extraStatus.textContent = '追加情報の通信に失敗しました。再読み込み後にお試しください。'; break; }
             if (!response.ok) {
-              if (response.status === 404) { node.textContent = '作品情報がありません（404）'; extrasPending.delete(key); continue; }
-              extraHalted = true; extraStatus.textContent = `追加情報を停止しました（HTTP ${response.status}）。時間を置いて再読み込みしてください。`; break;
+              if (response.status === 404) {
+                failedExtraKeys.add(key);
+                node.textContent = '作品情報がありません（404）';
+                extrasPending.delete(key);
+                refreshFilteredResults();
+                continue;
+              }
+              extraHalted = true; extraStatus.textContent = `追加情報を停止しました（HTTP ${response.status}）。時間を置いて再読み込みしてください。`;
+              refreshFilteredResults();
+              break;
             }
             const json = await response.json().catch(() => null);
             if (!json?.body || json.error) { extraHalted = true; extraStatus.textContent = '追加情報を確認できず停止しました。'; break; }
@@ -317,6 +410,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
         }
         extrasPending.delete(key);
         drawExtra(node, item);
+        if(excludeWords.length)refreshFilteredResults();
       }
     } finally { extraBusy = false; }
   }
@@ -337,11 +431,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       summary.textContent = '投稿日を確認してください。開始日は終了日以前に指定してください。'; results.replaceChildren(); return;
     }
     const min = Math.max(0, Number(minInput.value) || 0);
-    const max = Number(limitSelect.value) || 100;
+    const max = excludeWords.length ? MAX_VIEW : (Number(limitSelect.value) || 100);
     summary.textContent = '保存済みの調査データを並べ替え中…';
     topRows(ctx.key, min, sortSelect.value, from, to, max).then(({rows, matched, unknownDates}) => {
       if (!open || token !== viewSeq || ctx.key !== viewContext?.key) return;
-      summary.textContent = `${ctx.kind === 'novels' ? '小説' : 'イラスト・漫画'}「${ctx.word}」／ ${sortSelect.value === 'newest' ? '投稿日が新しい順' : 'ブクマ数が多い順'} ／ 条件一致 ${matched.toLocaleString('ja-JP')}件・表示 ${rows.length}件${(from || to) && unknownDates ? `（投稿日不明 ${unknownDates}件は期間指定から除外）` : ''}`;
+      baseSummary = `${ctx.kind === 'novels' ? '小説' : 'イラスト・漫画'}「${ctx.word}」／ ${sortSelect.value === 'newest' ? '投稿日が新しい順' : 'ブクマ数が多い順'} ／ 条件一致 ${matched.toLocaleString('ja-JP')}件${(from || to) && unknownDates ? `（投稿日不明 ${unknownDates}件は期間指定から除外）` : ''}`;
+      summary.textContent = baseSummary + (excludeWords.length?' ／ タグを照合中…':' ／ 表示 '+rows.length+'件');
       observer?.disconnect(); observer = null;
       results.replaceChildren();
       const fragment = document.createDocumentFragment();
@@ -364,6 +459,13 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
           ? 'この年齢区分の保存済み作品はまだありません。調査を開始／再開すると順次ここに表示されます。'
           : '該当する保存済み作品がありません。調査を進めるか、絞り込みを変えてください。'));
       results.append(fragment);
+      if(excludeWords.length){
+        // Unknown tags must not flash into view. Manually fetch candidate
+        // metadata because display:none disables IntersectionObserver.
+        for(const card of results.querySelectorAll('.pbs-new-row')){card.hidden=true;card.style.display='none';}
+        refreshFilteredResults();
+        return;
+      }
       if ('IntersectionObserver' in window) {
         observer = new IntersectionObserver(entries => {
           for (const entry of entries) if (entry.isIntersecting) { observer.unobserve(entry.target); queueExtra(entry.target.dataset.key, entry.target); }
@@ -424,9 +526,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     css.textContent = `
       .pbs-new-button{display:block!important;width:100%!important;margin:10px 0 0!important;padding:13px!important;background:#1976d2!important;color:#fff!important;border:0!important;border-radius:9px!important;font-weight:700!important;font-size:15px!important}
       .pbs-new-overlay{display:none!important;position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;z-index:2147483647!important;background:#f5f6fb!important;overflow-y:auto!important;-webkit-overflow-scrolling:touch!important;color:#263040!important;font:14px/1.5 -apple-system,BlinkMacSystemFont,'Noto Sans JP',sans-serif!important}
-      .pbs-new-overlay.pbs-open{display:block!important}.pbs-new-header{position:sticky;top:0;z-index:1;background:#fff;border-bottom:1px solid #dce1e9;padding:12px}.pbs-new-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}.pbs-new-toolbar strong{font-size:17px}.pbs-new-filters{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:10px}.pbs-new-filters label{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;font-size:12px}.pbs-new-filters input[type=date]{width:145px;max-width:100%}.pbs-new-filters input[type=number]{width:95px}.pbs-new-filters select{max-width:100%}.pbs-new-summary,.pbs-extra-status{font-size:12px;color:#586277;margin-top:8px;line-height:1.5}.pbs-new-list{max-width:920px;margin:auto;padding:10px 10px 75px}.pbs-new-row{display:flex;align-items:flex-start;gap:12px;background:white;color:#263040!important;text-decoration:none!important;border:1px solid #e2e6ed;border-radius:10px;padding:10px;margin-bottom:10px}.pbs-new-row img{width:76px;height:100px;flex:none;object-fit:contain;background:#eef0f4}.pbs-new-info{min-width:0;flex:1;overflow-wrap:anywhere}.pbs-new-bookmarks{font-weight:800;color:#c52650;font-size:16px}.pbs-new-title{font-weight:700;margin-top:4px}.pbs-new-author,.pbs-new-date{font-size:12px;color:#667286;margin-top:4px}.pbs-extra{margin-top:9px;font-size:12px;color:#4b5870}.pbs-extra-tags{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}.pbs-extra-tag{border-radius:5px;padding:2px 5px;background:#edf5fe;color:#24689d;font-size:11px}.pbs-extra-caption{white-space:pre-line;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;overflow:hidden}.pbs-new-empty{padding:15px;color:#586277}.pbs-new-help{color:#586277;font-size:11px;margin-top:7px}.pbs-new-overlay button,.pbs-new-overlay input,.pbs-new-overlay select{font:inherit;border:1px solid #d5d9e2;border-radius:7px;background:white;color:#263040;padding:7px;max-width:100%}.pbs-new-overlay .pbs-new-apply{background:#1976d2;color:white;border:0}
+      .pbs-new-overlay.pbs-open{display:block!important}.pbs-new-row[hidden]{display:none!important}.pbs-new-header{position:sticky;top:0;z-index:1;background:#fff;border-bottom:1px solid #dce1e9;padding:12px}.pbs-new-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}.pbs-new-toolbar strong{font-size:17px}.pbs-new-filters{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:10px}.pbs-new-filters label{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;font-size:12px}.pbs-new-filters input[type=date]{width:145px;max-width:100%}.pbs-new-filters input[type=number]{width:95px}.pbs-new-filters select{max-width:100%}.pbs-new-summary,.pbs-extra-status{font-size:12px;color:#586277;margin-top:8px;line-height:1.5}.pbs-new-list{max-width:920px;margin:auto;padding:10px 10px 75px}.pbs-new-row{display:flex;align-items:flex-start;gap:12px;background:white;color:#263040!important;text-decoration:none!important;border:1px solid #e2e6ed;border-radius:10px;padding:10px;margin-bottom:10px}.pbs-new-row img{width:76px;height:100px;flex:none;object-fit:contain;background:#eef0f4}.pbs-new-info{min-width:0;flex:1;overflow-wrap:anywhere}.pbs-new-bookmarks{font-weight:800;color:#c52650;font-size:16px}.pbs-new-title{font-weight:700;margin-top:4px}.pbs-new-author,.pbs-new-date{font-size:12px;color:#667286;margin-top:4px}.pbs-extra{margin-top:9px;font-size:12px;color:#4b5870}.pbs-extra-tags{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}.pbs-extra-tag{border-radius:5px;padding:2px 5px;background:#edf5fe;color:#24689d;font-size:11px}.pbs-extra-caption{white-space:pre-line;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:5;overflow:hidden}.pbs-new-empty{padding:15px;color:#586277}.pbs-new-help{color:#586277;font-size:11px;margin-top:7px}.pbs-new-overlay button,.pbs-new-overlay input,.pbs-new-overlay select{font:inherit;border:1px solid #d5d9e2;border-radius:7px;background:white;color:#263040;padding:7px;max-width:100%}.pbs-new-overlay .pbs-new-apply{background:#1976d2;color:white;border:0}
       @media(max-width:600px){.pbs-new-header{padding:10px}.pbs-new-filters{gap:7px}.pbs-new-filters label{font-size:11px}.pbs-new-filters input[type=date]{width:133px}.pbs-new-row img{width:66px;height:88px}}
     `;
+    css.textContent += '.pbs-new-exclude-box{margin-top:10px;background:#f8faff;border:1px solid #dce1e9;border-radius:8px;padding:8px 10px}.pbs-new-exclude-summary{font-weight:700;cursor:pointer}.pbs-new-exclude-row{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:7px}.pbs-new-exclude-input{flex:1;min-width:180px;resize:vertical;min-height:55px;padding:8px;border:1px solid #d5d9e2;border-radius:7px;background:white;color:#263040;font:inherit}.pbs-new-exclude-row button{padding:8px 10px}';
     root.append(css);
     const openButton = $new('button', 'pbs-new-button', '📚 ブクマ順・新着順の結果を見る');
     openButton.type = 'button'; counted.after(openButton);
@@ -456,10 +559,27 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const toLabel = $new('label', '', 'まで'); toLabel.append(toInput);
     const applyButton = $new('button', 'pbs-new-apply', 'この期間で検索'); applyButton.type='button';
     filters.append(sortLabel, ageLabel, limitLabel, minLabel, fromLabel, toLabel, applyButton);
+    const excludeBox=$new('details','pbs-new-exclude-box');
+    excludeSummary=$new('summary','pbs-new-exclude-summary');
+    const excludeRow=$new('div','pbs-new-exclude-row');
+    excludeInput=$new('textarea','pbs-new-exclude-input');
+    excludeInput.rows=2;
+    excludeInput.placeholder='例：女体化, R-18, 苦手なタグの一部';
+    excludeInput.setAttribute('aria-label','タグ除外ワード');
+    const applyExclude=$new('button','pbs-new-exclude-apply','除外ワードを適用');
+    applyExclude.type='button';
+    const clearExclude=$new('button','pbs-new-exclude-clear','解除');
+    clearExclude.type='button';
+    excludeRow.append(excludeInput,applyExclude,clearExclude);
+    excludeBox.append(excludeSummary,excludeRow,
+      $new('p','pbs-new-help','複数ワードはカンマ・読点・改行で区切る。大文字小文字を区別せず、作品タグに一部分でも含まれれば除外。タイトルやキャプションは判定対象外。'));
+    syncExcludeWordUi();
+    applyExclude.addEventListener('click',applyExcludeWords);
+    clearExclude.addEventListener('click',()=>{excludeInput.value='';applyExcludeWords();});
     summary = $new('div', 'pbs-new-summary');
     const help = $new('div', 'pbs-new-help', '日付はまず保存済み作品を絞り込みます。「この期間で検索」を押すとpixivの検索条件にも適用し、対象期間の調査を別データとして開始・再開できます。未調査の作品は一覧に含まれません。');
     extraStatus = $new('div', 'pbs-extra-status');
-    header.append(bar, filters, summary, help, extraStatus);
+    header.append(bar, filters, excludeBox, summary, help, extraStatus);
     results = $new('div', 'pbs-new-list'); overlay.append(header, results); root.append(overlay);
     openButton.addEventListener('click', () => {
       viewContext = searchContext();
@@ -470,6 +590,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       fromInput.value = viewContext.from;
       toInput.value = viewContext.to;
       open = true; overlay.classList.add('pbs-open'); overlay.scrollTop = 0;
+      syncExcludeWordUi();
       renderList();
     });
     back.addEventListener('click', hide);
