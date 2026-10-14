@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.106
+// @version      1.0.107
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.106';
+  const VERSION = '1.0.107';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5426,6 +5426,91 @@
       || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
       || ipadDesktopMode
       || (navigator.maxTouchPoints > 1 && window.innerWidth <= 900));
+  }
+
+
+  // Ctrl+C on YouTube video pages toggles YouTube's own comments and
+  // live chat/replay. Preserve normal copy if a selection or editor has focus.
+  const YOUTUBE_COMMENT_HIDE_CLASS = 'npf-yt-comments-hidden';
+  const YOUTUBE_COMMENT_STYLE_ID = 'npf-yt-comments-shortcut-style';
+  let youtubeCommentShortcutInstalled = false;
+  let youtubeCommentToastTimer = null;
+
+  function isYoutubeCommentShortcutPage() {
+    if (!isYoutubeHost()) return false;
+    return location.pathname === '/watch'
+      || /^\/(?:live|shorts)\/[A-Za-z0-9_-]{11}(?:\/|$)/.test(location.pathname);
+  }
+
+  function youtubeShortcutHasEditableTarget(event) {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+    for (const element of path) {
+      if (!(element instanceof Element)) continue;
+      if (element.matches('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[role="searchbox"],[role="combobox"]')
+        || element.isContentEditable) return true;
+    }
+    const selection = window.getSelection?.();
+    if (selection && !selection.isCollapsed && String(selection).length > 0) return true;
+    return false;
+  }
+
+  function installYoutubeCommentShortcut() {
+    if (!isYoutubeHost() || youtubeCommentShortcutInstalled) return;
+    youtubeCommentShortcutInstalled = true;
+
+    if (!document.getElementById(YOUTUBE_COMMENT_STYLE_ID)) {
+      const css = document.createElement('style');
+      css.id = YOUTUBE_COMMENT_STYLE_ID;
+      css.textContent = [
+        // Standard comments below a desktop watch video.
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytd-watch-flexy #comments',
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytd-comments#comments',
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytd-comments',
+        // Native chat and chat replay alongside the video.
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytd-watch-flexy #chat',
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytd-watch-flexy #chat-container',
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytd-watch-flexy ytd-live-chat-frame',
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-comments-section"]',
+        // Mobile website and Shorts comments.
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytm-comments-section-renderer',
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytm-comments-entry-point-header-renderer',
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytm-live-chat-frame',
+        'html.' + YOUTUBE_COMMENT_HIDE_CLASS + ' ytm-engagement-panel-section-list-renderer[target-id="engagement-panel-comments-section"]',
+      ].join(',\n') + '{display:none!important;visibility:hidden!important;}';
+      (document.head || document.documentElement).appendChild(css);
+    }
+
+    document.addEventListener('keydown', event => {
+      const key = String(event.key || '').toLowerCase();
+      if (!isYoutubeCommentShortcutPage() || event.defaultPrevented || event.repeat
+        || event.isComposing || !event.ctrlKey || event.metaKey || event.shiftKey || event.altKey
+        || (key !== 'c' && event.code !== 'KeyC') || youtubeShortcutHasEditableTarget(event)) return;
+
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const hidden = document.documentElement.classList.toggle(YOUTUBE_COMMENT_HIDE_CLASS);
+
+      // A small notice confirms the state without changing playback or
+      // YouTube's own chat toggle. Hide the notice automatically.
+      let note = document.getElementById('npf-yt-comments-shortcut-toast');
+      if (!note) {
+        note = document.createElement('div');
+        note.id = 'npf-yt-comments-shortcut-toast';
+        note.setAttribute('role', 'status');
+        note.style.cssText = [
+          'position:fixed','left:50%','bottom:90px','transform:translateX(-50%)',
+          'padding:9px 14px','border-radius:999px',
+          'background:rgba(20,20,20,.9)','color:white','font:700 13px/1.3 sans-serif',
+          'z-index:2147483600','pointer-events:none','max-width:85vw','text-align:center'
+        ].join(';');
+        (document.body || document.documentElement).append(note);
+      }
+      note.textContent = hidden ? 'コメント欄・チャットを非表示（Ctrl+Cで戻す）'
+        : 'コメント欄・チャットを再表示';
+      note.style.display = 'block';
+      clearTimeout(youtubeCommentToastTimer);
+      youtubeCommentToastTimer = setTimeout(() => { note.style.display = 'none'; }, 1900);
+    }, true);
   }
 
   function currentYoutubeVideoId() {
@@ -12182,6 +12267,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
   // 実機でここが待ち状態になると従来は「読み込み中」もボタンも出なくなりえた。
   // 起動したパネルは、保存済み設定の読込後に再描画する。
   const mobileYoutubeBoot = isMobileYoutubeUi();
+  if (isYoutubeHost()) installYoutubeCommentShortcut();
   if (mobileYoutubeBoot) startYoutubeHelper();
 
   state.apiKey = await gmGet(KEY_API, '');
