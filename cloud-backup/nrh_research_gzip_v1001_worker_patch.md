@@ -3,6 +3,9 @@
 ## Cause
 Niji Research Helper v1.0.109+ uses dbVersion=1001 with a `gzip-base64-v1` envelope after its merged research JSON exceeds 16 MiB. The 2026-09-18 backup Worker only accepts dbVersion===1 on POST /v1/backups, so it responds with HTTP 400 `invalid_backup_format`.
 
+## Update (2026-10-15): critical fix
+The first gzip v1001 Worker patch used a repeated-group Base64 regex. With ~8 MB encoded input, V8 can throw `RangeError: Maximum call stack size exceeded`, leading to HTTP 503. The snippet below now uses a non-recursive character check plus padding validation. Do not deploy the earlier patch. A full, tested replacement is also available in the ChatGPT conversation.
+
 ## Important
 This repository does **not** contain the current deployed Worker. Do not deploy the historical full Worker source: it can remove later routes such as `/v1/app-backups/`. First back up the currently deployed code in Cloudflare Workers & Pages > `niji-research-backup` > Edit code. Replace **only** the validation block beginning `if (payload.app !== 'Niji Research Helper' || payload.dbVersion !== 1 ||` and ending at the `invalid_backup_format` response.
 
@@ -30,7 +33,14 @@ This repository does **not** contain the current deployed Worker. Do not deploy 
       typeof packedText === 'string' &&
       packedText.length >= 8 && packedText.length % 4 === 0 &&
       packedText.length <= Math.ceil(LIMIT_BYTES / 3) * 4 + 8 &&
-      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(packedText) &&
+      // Avoid a repeating Base64 regexp on large strings (V8 stack overflow).
+      !/[^A-Za-z0-9+/=]/.test(packedText) &&
+      (() => {
+        const i = packedText.indexOf('=');
+        if (i < 0) return true;
+        const n = packedText.length - i;
+        return n <= 2 && packedText.slice(i) === '='.repeat(n);
+      })() &&
       (() => {
         try {
           const prefix = atob(packedText.slice(0, 8));
