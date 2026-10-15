@@ -1,0 +1,25 @@
+name: Verify NRH cloud backup
+on:
+  push:
+    branches: [main, fix-nrh-cloud-20mb-gzip-backup]
+    paths:
+      - Niji_Research_Helper.user.js
+      - Niji_Research_Helper.meta.js
+      - tests/research-backup-codec.test.mjs
+      - .github/workflows/verify-nrh-cloud-backup.yml
+  pull_request:
+    paths:
+      - Niji_Research_Helper.user.js
+      - Niji_Research_Helper.meta.js
+      - tests/research-backup-codec.test.mjs
+      - .github/workflows/verify-nrh-cloud-backup.yml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check Niji_Research_Helper.user.js
+      - run: node --test tests/research-backup-codec.test.mjs
