@@ -9,12 +9,12 @@ const end='// END NRH CLOUD V2 CODEC';
 const start=script.indexOf(begin),stop=script.indexOf(end,start);
 assert.ok(start>=0&&stop>start,'test must execute the actual embedded codec');
 const code=script.slice(start+begin.length,stop);
-const makeCodec=new Function('NRH_DB_VERSION','CLOUD_STORES','VERSION',
- code+'\nreturn {researchCloudEncode,researchCloudDecode,researchCloudSha};');
-const {researchCloudEncode:encode,researchCloudDecode:decode,researchCloudSha:sha}
- =makeCodec(1,['videos','channels','wiki','pairs'],'1.0.109');
+const makeCodec=new Function('NRH_DB_VERSION','CLOUD_STORES','VERSION','RESEARCH_CLOUD_DEVICE',
+ code+'\nreturn {researchCloudEncode,researchCloudDecode,researchCloudSha,researchCloudCanUseMergedGlobal};');
+const {researchCloudEncode:encode,researchCloudDecode:decode,researchCloudSha:sha,researchCloudCanUseMergedGlobal:fastMerge}
+ =makeCodec(1,['videos','channels','wiki','pairs'],'1.0.110','nrh-research-global');
 const payload=({count=2,large=false}={})=>({
- app:'Niji Research Helper',version:'1.0.109',dbVersion:1,
+ app:'Niji Research Helper',version:'1.0.110',dbVersion:1,
  exportedAt:'2026-10-15T12:00:00.000Z',
  sourceOrigin:'https://www.youtube.com',device:'nrh-research-global',
  stores:{
@@ -76,6 +76,31 @@ test('all research read, restore and verification paths share the validated deco
  assert.match(script,/cloud\.status='☁️ 圧縮バックアップを読み戻して検証中/);
  assert.match(script,/const RESEARCH_CLOUD_COMPRESSED_VERSION = NRH_DB_VERSION \+ 1000/);
  assert.match(script,/\/v1\/backups/);
- assert.match(script,/\/\/ @version\s+1\.0\.109/);
- assert.match(meta,/\/\/ @version\s+1\.0\.109/);
+ assert.match(script,/\/\/ @version\s+1\.0\.110/);
+ assert.match(meta,/\/\/ @version\s+1\.0\.110/);
+});
+
+test('safe complete-merged global backup subsumes only older device backups',()=>{
+ const global={id:'global-1',device:'nrh-research-global',createdAt:'2026-10-15T09:00:00Z'};
+ const pc={id:'pc',device:'desktop-old',createdAt:'2026-10-14T09:00:00Z'};
+ const mobile={id:'mobile',device:'iphone-old',createdAt:'2026-10-15T08:00:00Z'};
+ const entries=new Map([global,pc,mobile].map(x=>[x.device,x]));
+ const complete={preferences:{backupMode:'complete-merged-v1'}};
+ assert.equal(fastMerge(entries,complete),true);
+ assert.equal(fastMerge(entries,{preferences:{}}),false,'non-merged global is not authoritative');
+ const newer=new Map([...entries,['ipad-new',{id:'ipad',device:'ipad-new',createdAt:'2026-10-15T12:00:00Z'}]]);
+ assert.equal(fastMerge(newer,complete),false,'newer legacy device must be merged as well');
+ assert.equal(fastMerge(new Map([['desktop-old',pc]]),complete),false,'without global there is no shortcut');
+ assert.equal(fastMerge(new Map([...entries,['invalid',{id:'x',device:'invalid',createdAt:''}]]),complete),false);
+});
+test('the previously silent merge now reports steps and never drops newer device states',()=>{
+ assert.match(script,/端末内の研究DBを読み込み中/);
+ assert.match(script,/クラウド研究DBを統合中…/);
+ assert.match(script,/統合完了。バックアップを圧縮・検証中/);
+ assert.match(script,/圧縮バックアップをクラウドへ保存中/);
+ assert.match(script,/researchCloudCanUseMergedGlobal\(latestByDevice,cachedGlobal\)/);
+ assert.match(script,/const required=useGlobalOnly\?\[globalItem\]:candidates/);
+ assert.match(script,/await new Promise\(resolve=>setTimeout\(resolve,0\)\)/);
+ assert.match(script,/\/\/ @version\s+1\.0\.110/);
+ assert.match(meta,/\/\/ @version\s+1\.0\.110/);
 });

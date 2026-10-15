@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.109
+// @version      1.0.110
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.109';
+  const VERSION = '1.0.110';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -1434,7 +1434,12 @@
 
   async function cloudSnapshot() {
     const stores = {};
-    for (const name of CLOUD_STORES) stores[name] = await nrhDbGetAll(name);
+    for (let i=0;i<CLOUD_STORES.length;i++){
+      const name=CLOUD_STORES[i];
+      cloud.status='☁️ 端末内の研究DBを読み込み中… '+(i+1)+'/'+CLOUD_STORES.length+'（'+name+'）';
+      cloudUpdateUi();
+      stores[name] = await nrhDbGetAll(name);
+    }
     return { app:'Niji Research Helper', version:VERSION, dbVersion:NRH_DB_VERSION,
       exportedAt:new Date().toISOString(), sourceOrigin:location.origin,
       device:cloudDevice(), stores,
@@ -1594,6 +1599,20 @@
       throw new Error('圧縮バックアップの出所が一致しません');
     return original;
   }
+  // A previously verified complete global snapshot subsumes all older
+  // device snapshots. Do not re-download 12 outdated full DBs at every sync.
+  // If any device snapshot is newer, or the global payload wasn't marked
+  // merged, retain the legacy multi-device merge to avoid losing records.
+  function researchCloudCanUseMergedGlobal(latestByDevice,globalData) {
+    const globalItem=latestByDevice.get(RESEARCH_CLOUD_DEVICE);
+    const globalTime=Date.parse(globalItem?.createdAt||'');
+    return !!globalItem && Number.isFinite(globalTime) &&
+      globalData?.preferences?.backupMode==='complete-merged-v1' &&
+      [...latestByDevice.values()].every(item=>
+        Number.isFinite(Date.parse(item?.createdAt||'')) &&
+        Date.parse(item.createdAt)<=globalTime
+      );
+  }
   // END NRH CLOUD V2 CODEC
 
   async function cloudFetchResearchSnapshot(item,token=cloud.token) {
@@ -1620,54 +1639,71 @@
   }
 
   async function cloudBuildCompleteSnapshot(localPayload) {
+    cloud.status='☁️ クラウドの既存バックアップ一覧を確認中…';cloudUpdateUi();
     const listed = await cloudRequest('GET', '/v1/backups');
     const allResearch = (Array.isArray(listed.backups) ? listed.backups : [])
       .filter(isResearchCloudBackupItem);
     const latestByDevice = new Map();
     for (const item of allResearch) {
-      const key = String(item?.device || '');
-      if (!key) continue;
-      const prev = latestByDevice.get(key);
-      if (!prev || Date.parse(item.createdAt || 0) > Date.parse(prev.createdAt || 0)) latestByDevice.set(key, item);
+      const key=String(item?.device||'');
+      if(!key)continue;
+      const prev=latestByDevice.get(key);
+      if(!prev||Date.parse(item.createdAt||0)>Date.parse(prev.createdAt||0))
+        latestByDevice.set(key,item);
     }
-    const candidates = [...latestByDevice.values()]
-      .sort((a, b) => (Number(b.size || 0) - Number(a.size || 0)) ||
-        (Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0)))
-      .slice(0, 12);
-
-    let merged = {
+    const candidates=[...latestByDevice.values()]
+      .sort((a,b)=>(Number(b.size||0)-Number(a.size||0))||
+        (Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0)))
+      .slice(0,12);
+    const globalItem=latestByDevice.get(RESEARCH_CLOUD_DEVICE);
+    // Ensure the authoritative all-device baseline is always evaluated
+    // even when more than 12 legacy device names appear in the listing.
+    if(globalItem&&!candidates.some(x=>x.id===globalItem.id)){
+      candidates.pop();candidates.unshift(globalItem);
+    }
+    let cachedGlobal=null;
+    if(globalItem){
+      cloud.status='☁️ 全端末共通の最新バックアップを照合中…';cloudUpdateUi();
+      try {cachedGlobal=await cloudFetchResearchSnapshot(globalItem)}
+      catch(e){console.warn('[NRH][cloud global baseline]',e)}
+    }
+    const useGlobalOnly=researchCloudCanUseMergedGlobal(latestByDevice,cachedGlobal);
+    const required=useGlobalOnly?[globalItem]:candidates;
+    let merged={
       ...localPayload,
-      stores: Object.fromEntries(CLOUD_STORES.map(name => [name, [...(localPayload.stores?.[name] || [])]])),
-      preferences: { ...(localPayload.preferences || {}) },
+      stores:Object.fromEntries(CLOUD_STORES.map(name=>[name,[...(localPayload.stores?.[name]||[])]])),
+      preferences:{...(localPayload.preferences||{})}
     };
-
-    if (candidates.length) {
-      let validCount = 0;
-      for (const item of candidates) {
-        try {
-          const remote = await cloudFetchResearchSnapshot(item);
+    if(required.length){
+      let validCount=0;
+      for(const [index,item] of required.entries()){
+        cloud.status='☁️ クラウド研究DBを統合中… '+(index+1)+'/'+required.length+
+          (useGlobalOnly?'（最新の完全版のみ）':'（古い端末の記録も照合）');
+        cloudUpdateUi();
+        try{
+          const remote=(cachedGlobal&&item.id===globalItem?.id)
+            ?cachedGlobal:await cloudFetchResearchSnapshot(item);
           validCount++;
-          for (const name of CLOUD_STORES) {
-            merged.stores[name] = cloudMergeStoreRows(name, remote.stores?.[name], merged.stores?.[name]);
-          }
-          merged.preferences = cloudMergePreferences(merged.preferences, remote.preferences || {});
-        } catch (e) {
-          console.warn('[NRH][cloud complete merge] skipped backup', item?.id, e);
-        }
+          for(const name of CLOUD_STORES)
+            merged.stores[name]=cloudMergeStoreRows(name,remote.stores?.[name],merged.stores?.[name]);
+          merged.preferences=cloudMergePreferences(merged.preferences,remote.preferences||{});
+        }catch(e){console.warn('[NRH][cloud complete merge] skipped backup',item?.id,e)}
+        // Yield between large IndexedDB maps so the YouTube page can paint
+        // status and respond to the user, instead of appearing frozen.
+        await new Promise(resolve=>setTimeout(resolve,0));
       }
-      if (!validCount) throw new Error('既存の研究DBバックアップを確認できないため、完全版の上書きを中止しました');
+      if(!validCount)
+        throw new Error('既存の研究DBバックアップを確認できないため、完全版の上書きを中止しました');
     }
-
-    merged.app = 'Niji Research Helper';
-    merged.version = VERSION;
-    merged.dbVersion = NRH_DB_VERSION;
-    merged.exportedAt = new Date().toISOString();
-    merged.sourceOrigin = location.origin;
-    merged.device = cloudDevice();
-    merged.preferences = cloudMergePreferences(merged.preferences, {});
-    merged.preferences.researchBackupSummary = Object.fromEntries(
-      CLOUD_STORES.map(name => [name, merged.stores[name]?.length || 0])
-    );
+    merged.app='Niji Research Helper';
+    merged.version=VERSION;
+    merged.dbVersion=NRH_DB_VERSION;
+    merged.exportedAt=new Date().toISOString();
+    merged.sourceOrigin=location.origin;
+    merged.device=cloudDevice();
+    merged.preferences=cloudMergePreferences(merged.preferences,{});
+    merged.preferences.researchBackupSummary=Object.fromEntries(
+      CLOUD_STORES.map(name=>[name,merged.stores[name]?.length||0]));
     return merged;
   }
 
@@ -1690,10 +1726,13 @@
       if (!populated) throw new Error('DBが空のため、既存バックアップの保護を優先して保存しません');
       // Macaque reliably sends JSON text, not an ArrayBuffer request body.
       // Gzip v2 preserves the complete merged DB even beyond 20MB of raw JSON.
+      cloud.status='☁️ 統合完了。バックアップを圧縮・検証中…（動画'+
+        payload.stores.videos.length.toLocaleString()+'件）';cloudUpdateUi();
       const encoded=await researchCloudEncode(payload);
       const jsonText=encoded.text,bytes=encoded.bytes;
       const sha=await researchCloudSha(bytes);
       uploadSha=sha;uploadSize=bytes.byteLength;uploadCompressed=encoded.compressed;
+      cloud.status='☁️ 圧縮バックアップをクラウドへ保存中…';cloudUpdateUi();
       const result = await cloudRequest('POST', '/v1/backups', jsonText, {
         'content-type':'application/json', 'x-nrh-device':cloudDevice(),
         'x-nrh-origin':location.origin, 'x-nrh-sha256':sha, 'x-nrh-version':VERSION,

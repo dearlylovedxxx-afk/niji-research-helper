@@ -1,7 +1,7 @@
 name: Verify NRH cloud backup
 on:
   push:
-    branches: [main, fix-nrh-cloud-20mb-gzip-backup]
+    branches: [main, fix-nrh-cloud-20mb-gzip-backup, fix-nrh-merge-progress-fastpath]
     paths:
       - Niji_Research_Helper.user.js
       - Niji_Research_Helper.meta.js
