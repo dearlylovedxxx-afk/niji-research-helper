@@ -1505,11 +1505,103 @@
     };
   }
 
-  async function cloudFetchResearchSnapshot(item) {
+
+  // Research backup codec v2: preserve EVERY IndexedDB row, but gzip a large
+  // complete snapshot before sending it through the legacy 20MB JSON gateway.
+  // dbVersion 1001 is intentional: old clients MUST reject the compressed
+  // envelope rather than mistake its empty compatibility stores for an empty DB.
+  // BEGIN NRH CLOUD V2 CODEC
+  const RESEARCH_CLOUD_COMPRESSED_VERSION = NRH_DB_VERSION + 1000;
+  const RESEARCH_CLOUD_UPLOAD_LIMIT = 20 * 1024 * 1024;
+  const RESEARCH_CLOUD_COMPRESSION_THRESHOLD = 16 * 1024 * 1024;
+  const RESEARCH_CLOUD_MAX_RAW_BYTES = 150 * 1024 * 1024;
+  async function researchCloudSha(bytes) {
+    const sha = new Uint8Array(await crypto.subtle.digest('SHA-256',bytes));
+    return [...sha].map(x=>x.toString(16).padStart(2,'0')).join('');
+  }
+  function researchCloudToBase64(bytes) {
+    const segments=[];
+    for(let i=0;i<bytes.length;i+=32768)
+      segments.push(String.fromCharCode(...bytes.subarray(i,i+32768)));
+    return btoa(segments.join(''));
+  }
+  function researchCloudFromBase64(input) {
+    if(typeof input!=='string'||!input.length||!/^[A-Za-z0-9+/]+={0,2}$/.test(input))
+      throw new Error('圧縮バックアップのデータ形式が不正です');
+    return Uint8Array.from(atob(input),c=>c.charCodeAt(0));
+  }
+  function researchCloudValidate(data) {
+    if(data?.app!=='Niji Research Helper'||data?.dbVersion!==NRH_DB_VERSION||
+       !Array.isArray(data?.stores?.videos)||
+       CLOUD_STORES.some(name=>!Array.isArray(data?.stores?.[name])))
+      throw new Error('研究DBの復元データが不正です。元のデータは変更していません');
+    return data;
+  }
+  async function researchCloudEncode(payload) {
+    researchCloudValidate(payload);
+    const raw = new TextEncoder().encode(JSON.stringify(payload));
+    if(raw.byteLength<=RESEARCH_CLOUD_COMPRESSION_THRESHOLD)
+      return {text:new TextDecoder().decode(raw),bytes:raw,compressed:false};
+    if(raw.byteLength>RESEARCH_CLOUD_MAX_RAW_BYTES)
+      throw new Error('研究DBが大きすぎて安全に圧縮できません。ローカルのJSONを保存してください');
+    if(typeof CompressionStream!=='function')
+      throw new Error('このブラウザはgzip圧縮に未対応です。ブラウザを更新してください');
+    const zipped=new Uint8Array(await new Response(
+      new Blob([raw]).stream().pipeThrough(new CompressionStream('gzip'))
+    ).arrayBuffer());
+    const wrapped={
+      app:'Niji Research Helper',version:VERSION,
+      dbVersion:RESEARCH_CLOUD_COMPRESSED_VERSION,
+      exportedAt:payload.exportedAt,sourceOrigin:payload.sourceOrigin,
+      device:payload.device,
+      stores:Object.fromEntries(CLOUD_STORES.map(name=>[name,[]])),
+      preferences:{},
+      compressedResearch:{
+        format:'gzip-base64-v1',
+        originalBytes:raw.byteLength,
+        originalSha256:await researchCloudSha(raw),
+        payload:researchCloudToBase64(zipped)
+      }
+    };
+    const text=JSON.stringify(wrapped),bytes=new TextEncoder().encode(text);
+    if(bytes.byteLength>RESEARCH_CLOUD_UPLOAD_LIMIT)
+      throw new Error('圧縮してもクラウド保存の20MB上限を超えました。端末内のデータは保持しています');
+    return {text,bytes,compressed:true};
+  }
+  async function researchCloudDecode(data) {
+    if(data?.dbVersion===NRH_DB_VERSION)return researchCloudValidate(data);
+    const packed=data?.compressedResearch;
+    if(data?.app!=='Niji Research Helper'||
+       data?.dbVersion!==RESEARCH_CLOUD_COMPRESSED_VERSION||
+       packed?.format!=='gzip-base64-v1'||
+       !Number.isSafeInteger(packed.originalBytes)||
+       packed.originalBytes<1||packed.originalBytes>RESEARCH_CLOUD_MAX_RAW_BYTES||
+       !/^[a-f0-9]{64}$/i.test(String(packed.originalSha256||''))||
+       CLOUD_STORES.some(name=>!Array.isArray(data?.stores?.[name])||
+         data.stores[name].length!==0))
+      throw new Error('圧縮バックアップの形式が不正です');
+    if(typeof DecompressionStream!=='function')
+      throw new Error('このブラウザはgzipの展開に未対応です');
+    const zipped=researchCloudFromBase64(packed.payload);
+    const raw=new Uint8Array(await new Response(
+      new Blob([zipped]).stream().pipeThrough(new DecompressionStream('gzip'))
+    ).arrayBuffer());
+    if(raw.byteLength!==packed.originalBytes||
+       await researchCloudSha(raw)!==packed.originalSha256)
+      throw new Error('圧縮バックアップの内容検証に失敗しました（元データは変更していません）');
+    const original=researchCloudValidate(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)));
+    if(original.device!==data.device||original.sourceOrigin!==data.sourceOrigin)
+      throw new Error('圧縮バックアップの出所が一致しません');
+    return original;
+  }
+  // END NRH CLOUD V2 CODEC
+
+  async function cloudFetchResearchSnapshot(item,token=cloud.token) {
+    if(!item?.id||!item?.sha256)throw new Error('バックアップの識別情報が不正です');
     const res = await gmRequest({
       method:'GET',
       url:CLOUD_URL + '/v1/backups/' + encodeURIComponent(item.id),
-      headers:{ authorization:`Bearer ${cloud.token}` },
+      headers:{ authorization:`Bearer ${token}` },
       responseType:'arraybuffer',
       timeout:45000
     });
@@ -1519,15 +1611,11 @@
         : new TextEncoder().encode(res.responseText || String(res.response || ''));
     if (Number(item.size || 0) && raw.byteLength !== Number(item.size))
       throw new Error('既存バックアップのサイズが一致しません');
-    const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', raw))]
-      .map(x => x.toString(16).padStart(2,'0')).join('');
-    if (item.sha256 && sha !== item.sha256) throw new Error('既存バックアップのチェックサムが一致しません');
-    const data = JSON.parse(new TextDecoder('utf-8', { fatal:true }).decode(raw));
-    if (data?.app !== 'Niji Research Helper' || data?.dbVersion !== NRH_DB_VERSION ||
-        CLOUD_STORES.some(name => !Array.isArray(data?.stores?.[name])) ||
-        data?.preferences?.chatArchive) {
-      throw new Error('既存バックアップの形式が違います');
-    }
+    if (await researchCloudSha(raw)!==item.sha256)
+      throw new Error('既存バックアップのチェックサムが一致しません');
+    const envelope=JSON.parse(new TextDecoder('utf-8', { fatal:true }).decode(raw));
+    const data=await researchCloudDecode(envelope);
+    if(data?.preferences?.chatArchive)throw new Error('既存バックアップの形式が違います');
     return data;
   }
 
