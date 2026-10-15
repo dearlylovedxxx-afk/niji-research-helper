@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.108
+// @version      1.0.109
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.108';
+  const VERSION = '1.0.109';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -1505,11 +1505,103 @@
     };
   }
 
-  async function cloudFetchResearchSnapshot(item) {
+
+  // Research backup codec v2: preserve EVERY IndexedDB row, but gzip a large
+  // complete snapshot before sending it through the legacy 20MB JSON gateway.
+  // dbVersion 1001 is intentional: old clients MUST reject the compressed
+  // envelope rather than mistake its empty compatibility stores for an empty DB.
+  // BEGIN NRH CLOUD V2 CODEC
+  const RESEARCH_CLOUD_COMPRESSED_VERSION = NRH_DB_VERSION + 1000;
+  const RESEARCH_CLOUD_UPLOAD_LIMIT = 20 * 1024 * 1024;
+  const RESEARCH_CLOUD_COMPRESSION_THRESHOLD = 16 * 1024 * 1024;
+  const RESEARCH_CLOUD_MAX_RAW_BYTES = 150 * 1024 * 1024;
+  async function researchCloudSha(bytes) {
+    const sha = new Uint8Array(await crypto.subtle.digest('SHA-256',bytes));
+    return [...sha].map(x=>x.toString(16).padStart(2,'0')).join('');
+  }
+  function researchCloudToBase64(bytes) {
+    const segments=[];
+    for(let i=0;i<bytes.length;i+=32768)
+      segments.push(String.fromCharCode(...bytes.subarray(i,i+32768)));
+    return btoa(segments.join(''));
+  }
+  function researchCloudFromBase64(input) {
+    if(typeof input!=='string'||!input.length||!/^[A-Za-z0-9+/]+={0,2}$/.test(input))
+      throw new Error('圧縮バックアップのデータ形式が不正です');
+    return Uint8Array.from(atob(input),c=>c.charCodeAt(0));
+  }
+  function researchCloudValidate(data) {
+    if(data?.app!=='Niji Research Helper'||data?.dbVersion!==NRH_DB_VERSION||
+       !Array.isArray(data?.stores?.videos)||
+       CLOUD_STORES.some(name=>!Array.isArray(data?.stores?.[name])))
+      throw new Error('研究DBの復元データが不正です。元のデータは変更していません');
+    return data;
+  }
+  async function researchCloudEncode(payload) {
+    researchCloudValidate(payload);
+    const raw = new TextEncoder().encode(JSON.stringify(payload));
+    if(raw.byteLength<=RESEARCH_CLOUD_COMPRESSION_THRESHOLD)
+      return {text:new TextDecoder().decode(raw),bytes:raw,compressed:false};
+    if(raw.byteLength>RESEARCH_CLOUD_MAX_RAW_BYTES)
+      throw new Error('研究DBが大きすぎて安全に圧縮できません。ローカルのJSONを保存してください');
+    if(typeof CompressionStream!=='function')
+      throw new Error('このブラウザはgzip圧縮に未対応です。ブラウザを更新してください');
+    const zipped=new Uint8Array(await new Response(
+      new Blob([raw]).stream().pipeThrough(new CompressionStream('gzip'))
+    ).arrayBuffer());
+    const wrapped={
+      app:'Niji Research Helper',version:VERSION,
+      dbVersion:RESEARCH_CLOUD_COMPRESSED_VERSION,
+      exportedAt:payload.exportedAt,sourceOrigin:payload.sourceOrigin,
+      device:payload.device,
+      stores:Object.fromEntries(CLOUD_STORES.map(name=>[name,[]])),
+      preferences:{},
+      compressedResearch:{
+        format:'gzip-base64-v1',
+        originalBytes:raw.byteLength,
+        originalSha256:await researchCloudSha(raw),
+        payload:researchCloudToBase64(zipped)
+      }
+    };
+    const text=JSON.stringify(wrapped),bytes=new TextEncoder().encode(text);
+    if(bytes.byteLength>RESEARCH_CLOUD_UPLOAD_LIMIT)
+      throw new Error('圧縮してもクラウド保存の20MB上限を超えました。端末内のデータは保持しています');
+    return {text,bytes,compressed:true};
+  }
+  async function researchCloudDecode(data) {
+    if(data?.dbVersion===NRH_DB_VERSION)return researchCloudValidate(data);
+    const packed=data?.compressedResearch;
+    if(data?.app!=='Niji Research Helper'||
+       data?.dbVersion!==RESEARCH_CLOUD_COMPRESSED_VERSION||
+       packed?.format!=='gzip-base64-v1'||
+       !Number.isSafeInteger(packed.originalBytes)||
+       packed.originalBytes<1||packed.originalBytes>RESEARCH_CLOUD_MAX_RAW_BYTES||
+       !/^[a-f0-9]{64}$/i.test(String(packed.originalSha256||''))||
+       CLOUD_STORES.some(name=>!Array.isArray(data?.stores?.[name])||
+         data.stores[name].length!==0))
+      throw new Error('圧縮バックアップの形式が不正です');
+    if(typeof DecompressionStream!=='function')
+      throw new Error('このブラウザはgzipの展開に未対応です');
+    const zipped=researchCloudFromBase64(packed.payload);
+    const raw=new Uint8Array(await new Response(
+      new Blob([zipped]).stream().pipeThrough(new DecompressionStream('gzip'))
+    ).arrayBuffer());
+    if(raw.byteLength!==packed.originalBytes||
+       await researchCloudSha(raw)!==packed.originalSha256)
+      throw new Error('圧縮バックアップの内容検証に失敗しました（元データは変更していません）');
+    const original=researchCloudValidate(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(raw)));
+    if(original.device!==data.device||original.sourceOrigin!==data.sourceOrigin)
+      throw new Error('圧縮バックアップの出所が一致しません');
+    return original;
+  }
+  // END NRH CLOUD V2 CODEC
+
+  async function cloudFetchResearchSnapshot(item,token=cloud.token) {
+    if(!item?.id||!item?.sha256)throw new Error('バックアップの識別情報が不正です');
     const res = await gmRequest({
       method:'GET',
       url:CLOUD_URL + '/v1/backups/' + encodeURIComponent(item.id),
-      headers:{ authorization:`Bearer ${cloud.token}` },
+      headers:{ authorization:`Bearer ${token}` },
       responseType:'arraybuffer',
       timeout:45000
     });
@@ -1519,15 +1611,11 @@
         : new TextEncoder().encode(res.responseText || String(res.response || ''));
     if (Number(item.size || 0) && raw.byteLength !== Number(item.size))
       throw new Error('既存バックアップのサイズが一致しません');
-    const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', raw))]
-      .map(x => x.toString(16).padStart(2,'0')).join('');
-    if (item.sha256 && sha !== item.sha256) throw new Error('既存バックアップのチェックサムが一致しません');
-    const data = JSON.parse(new TextDecoder('utf-8', { fatal:true }).decode(raw));
-    if (data?.app !== 'Niji Research Helper' || data?.dbVersion !== NRH_DB_VERSION ||
-        CLOUD_STORES.some(name => !Array.isArray(data?.stores?.[name])) ||
-        data?.preferences?.chatArchive) {
-      throw new Error('既存バックアップの形式が違います');
-    }
+    if (await researchCloudSha(raw)!==item.sha256)
+      throw new Error('既存バックアップのチェックサムが一致しません');
+    const envelope=JSON.parse(new TextDecoder('utf-8', { fatal:true }).decode(raw));
+    const data=await researchCloudDecode(envelope);
+    if(data?.preferences?.chatArchive)throw new Error('既存バックアップの形式が違います');
     return data;
   }
 
@@ -1591,6 +1679,7 @@
     const initialWrites = cloud.writes;
     let uploadSha = '';
     let uploadSize = 0;
+    let uploadCompressed = false;
     cloud.status = '☁️ バックアップを作成中…'; cloudUpdateUi();
     try {
       cloud.status = '☁️ 既存DBと統合して完全版を作成中…'; cloudUpdateUi();
@@ -1599,18 +1688,28 @@
         || payload.preferences.favorites?.length || payload.preferences.liverFavorites?.length
         || Object.keys(payload.preferences.syncPoints || {}).length;
       if (!populated) throw new Error('DBが空のため、既存バックアップの保護を優先して保存しません');
-      // Send JSON text: Macaque may alter ArrayBuffer request bodies.
-      const jsonText = JSON.stringify(payload);
-      const bytes = new TextEncoder().encode(jsonText);
-      if (bytes.byteLength > 20 * 1024 * 1024)
-        throw new Error('バックアップが20MBを超えました。ローカルJSONを先に退避してください');
-      const digest = await crypto.subtle.digest('SHA-256', bytes);
-      const sha = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, '0')).join('');
-      uploadSha = sha; uploadSize = bytes.byteLength;
+      // Macaque reliably sends JSON text, not an ArrayBuffer request body.
+      // Gzip v2 preserves the complete merged DB even beyond 20MB of raw JSON.
+      const encoded=await researchCloudEncode(payload);
+      const jsonText=encoded.text,bytes=encoded.bytes;
+      const sha=await researchCloudSha(bytes);
+      uploadSha=sha;uploadSize=bytes.byteLength;uploadCompressed=encoded.compressed;
       const result = await cloudRequest('POST', '/v1/backups', jsonText, {
         'content-type':'application/json', 'x-nrh-device':cloudDevice(),
         'x-nrh-origin':location.origin, 'x-nrh-sha256':sha, 'x-nrh-version':VERSION,
       });
+      // For the new compressed format, read it back and check both the
+      // envelope SHA and the uncompressed, full-database SHA before success.
+      if(uploadCompressed){
+        cloud.status='☁️ 圧縮バックアップを読み戻して検証中…';cloudUpdateUi();
+        const listed=await cloudRequest('GET','/v1/backups?device='+encodeURIComponent(cloudDevice()));
+        const item=(listed.backups||[]).find(x=>
+          x.sha256===sha&&Number(x.size)===uploadSize&&x.origin===location.origin);
+        if(!item)throw new Error('圧縮バックアップの保存記録が見つかりません');
+        const restored=await cloudFetchResearchSnapshot(item);
+        if(restored?.stores?.videos?.length!==payload.stores.videos.length)
+          throw new Error('圧縮バックアップの読み戻し件数が一致しません');
+      }
       cloud.lastSavedAt = Date.now(); cloud.nextRetryAt = 0;
       cloud.lastRemoteId = String(result?.backup?.id || cloud.lastRemoteId || '');
       if (!cloud.lastRemoteId) {
@@ -1647,7 +1746,13 @@
             const digest = await crypto.subtle.digest('SHA-256', received);
             const remoteSha = [...new Uint8Array(digest)]
               .map(x => x.toString(16).padStart(2, '0')).join('');
-            confirmed = remoteSha === uploadSha;
+            if(remoteSha===uploadSha){
+              if(uploadCompressed){
+                const readback=await researchCloudDecode(JSON.parse(text));
+                confirmed=readback?.stores?.videos&&
+                  Array.isArray(readback.stores.videos);
+              }else confirmed=true;
+            }
           }
         }
       }
@@ -1840,18 +1945,7 @@
     if (!confirm(`${backup.device} / ${new Date(backup.createdAt).toLocaleString('ja-JP')} のバックアップを\nこのブラウザのDBに統合しますか？\n\n既存データは削除せず、日時が新しいレコードを優先します。APIキーは復元されません。`)) return;
     cloud.status = '📥 クラウドから読み込み中…'; cloudUpdateUi();
     try {
-      const res = await gmRequest({ method:'GET', url:CLOUD_URL + '/v1/backups/' + encodeURIComponent(backup.id),
-        headers:{ authorization:`Bearer ${cloud.token}` }, responseType:'arraybuffer', timeout:45000 });
-      if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-      const raw = res.response instanceof ArrayBuffer ? new Uint8Array(res.response)
-        : ArrayBuffer.isView(res.response) ? new Uint8Array(res.response.buffer, res.response.byteOffset, res.response.byteLength)
-          : new TextEncoder().encode(res.responseText || String(res.response || ''));
-      const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', raw))]
-        .map(x => x.toString(16).padStart(2,'0')).join('');
-      if (sha !== backup.sha256) throw new Error('チェックサム不一致。復元を中止しました');
-      const data = JSON.parse(new TextDecoder('utf-8', { fatal:true }).decode(raw));
-      if (data.app !== 'Niji Research Helper' || data.dbVersion !== NRH_DB_VERSION
-        || CLOUD_STORES.some(name => !Array.isArray(data.stores?.[name]))) throw new Error('バックアップ形式が違います');
+      const data=await cloudFetchResearchSnapshot(backup);
       const db = await nrhDbOpen();
       for (const name of CLOUD_STORES) {
         await new Promise((resolve, reject) => {
@@ -1939,17 +2033,9 @@
       if (!listed.ok || !Array.isArray(listed.backups)) throw new Error('バックアップ一覧の形式が違います');
       const item = listed.backups.find(x => x.device === cloudDevice() && x.origin === location.origin);
       if (!item) throw new Error('この端末・YouTube URLのバックアップが見つかりません');
-      const text = await get('/v1/backups/' + encodeURIComponent(item.id));
-      const bytes = new TextEncoder().encode(text);
-      if (bytes.byteLength !== item.size) throw new Error('取得ファイルのサイズが一致しません');
-      const digest = await crypto.subtle.digest('SHA-256', bytes);
-      const sha = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2,'0')).join('');
-      if (sha !== item.sha256) throw new Error('取得ファイルのチェックサムが一致しません');
-      const data = JSON.parse(text);
-      if (data.app !== 'Niji Research Helper' || data.dbVersion !== NRH_DB_VERSION
-          || data.device !== item.device || data.sourceOrigin !== item.origin
-          || CLOUD_STORES.some(name => !Array.isArray(data.stores?.[name])))
-        throw new Error('取得ファイルのデータ形式が違います');
+      const data=await cloudFetchResearchSnapshot(item,token);
+      if(data.device!==item.device||data.sourceOrigin!==item.origin)
+        throw new Error('取得ファイルの出所が一致しません');
       cloud.status = `✅ 保存済みファイルの読み取り・整合性確認OK（${new Date(item.createdAt).toLocaleString('ja-JP')}、動画${data.stores.videos.length}件、お気に入り${data.preferences?.favorites?.length || 0}件）。DBは変更していません。`;
     } catch (e) {
       cloud.status = `⚠️ 読み取り検証失敗：${String(e?.message || e?.error?.message || e?.statusText || e?.status || '通信エラー').slice(0, 110)}`;
