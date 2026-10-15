@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.107
+// @version      1.0.108
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.107';
+  const VERSION = '1.0.108';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -6668,35 +6668,47 @@
     }
   }
 
+  // YouTube's rendered comment and the Data API represent line breaks/emojis
+  // differently. Author + ordered timestamps reliably identify a timestamp
+  // memo; other comments use whitespace-normalized text.
+  function youtubePriorityCommentFingerprint(authorKey, text, items = []) {
+    const author = String(authorKey || '').trim().toLowerCase();
+    if (!author) return '';
+    const raw = String(text || '');
+    const seconds = Array.isArray(items) && items.length >= 2
+      ? items.map(item => Math.floor(Number(item?.seconds))).filter(Number.isFinite)
+      : youtubePriorityTextItems(raw).map(item => Math.floor(Number(item.seconds)));
+    const times = [...new Set(seconds)].sort((a,b) => a-b);
+    if (times.length >= 2) return author + '\u0000times:' + times.join(',');
+    const clean = raw.normalize('NFKC')
+      .replace(/[\u200b-\u200d\ufeff\s]/g, '')
+      .toLocaleLowerCase('ja-JP');
+    return author + '\u0000text:' + clean.slice(0, 1200);
+  }
+
   function youtubePriorityOverlayEntries() {
     const favorites = preferredCommentAuthors();
     if (!favorites.length) return [];
-
-    const entries = [];
-    const seen = new Set();
-
+    const entries = [], seen = new Set();
     if (youtubePriorityBackground.videoId === currentYoutubeVideoId()) {
       for (const snapshot of youtubePriorityBackground.found || []) {
-        const key = String(snapshot.info?.key || '');
-        const text = String(snapshot.text || '').replace(/\s+/g, ' ').trim();
-        const sig = key + '\u0000' + text;
-        if (!key || seen.has(sig)) continue;
+        const key = String(snapshot.targetKey || snapshot.info?.key || '');
+        const sig = youtubePriorityCommentFingerprint(key, snapshot.text, snapshot.items);
+        if (!sig || seen.has(sig)) continue;
         seen.add(sig);
         entries.push({type:'api', snapshot, info:snapshot.info || {}, signature:sig});
       }
     }
-
     for (const root of youtubeCommentRoots()) {
       const info = youtubeCommentAuthorInfo(root);
-      if (!info || !favorites.some(x => x.key === info.key)) continue;
+      const preferred = info && favorites.find(x => x.key === info.key);
+      if (!preferred) continue;
       const body = youtubeCommentBody(root);
-      const text = String(body?.textContent || '').replace(/\s+/g, ' ').trim();
-      const sig = info.key + '\u0000' + text;
-      if (seen.has(sig)) continue;
+      const sig = youtubePriorityCommentFingerprint(preferred.key, body?.textContent || '');
+      if (!sig || seen.has(sig)) continue;
       seen.add(sig);
       entries.push({type:'dom', root, body, info, signature:sig});
     }
-
     return entries.slice(0, 8);
   }
 
@@ -6789,9 +6801,19 @@
     }
   }
 
+  function youtubePinnedTimestampOverridesPriority(videoId = currentYoutubeVideoId()) {
+    return !!(videoId && state.youtubeTimestampPins?.[videoId]?.items?.length);
+  }
+
   function ensureYoutubePriorityOverlay(force = false) {
     const videoId = currentYoutubeVideoId();
     const existing = $('#npf-yt-priority-overlay');
+    // A manual pin overrides the preferred-user portal; never stack both.
+    if (youtubePinnedTimestampOverridesPriority(videoId)) {
+      existing?.remove();
+      youtubePriorityOverlayUi.stamp = '';
+      return null;
+    }
     if (!videoId || !preferredCommentAuthors().length) {
       existing?.remove();
       youtubePriorityOverlayUi.stamp = '';
@@ -7112,28 +7134,8 @@
     title.style.cssText = 'font-size:14px;font-weight:850;margin-bottom:8px;';
     box.appendChild(title);
 
-    const matched = [];
-    const seen = new Set();
-    for (const root of roots) {
-      const info = youtubeCommentAuthorInfo(root);
-      if (!info || !favorites.some(x => x.key === info.key)) continue;
-      const bodyText = String(youtubeCommentBody(root)?.textContent || '').replace(/\s+/g, ' ').trim();
-      const signature = info.key + '\u0000' + bodyText;
-      if (seen.has(signature)) continue;
-      seen.add(signature);
-      matched.push({ root, info, signature });
-    }
-
-    const apiMatched = [];
-    if (youtubePriorityBackground.videoId === currentYoutubeVideoId()) {
-      for (const snapshot of youtubePriorityBackground.found) {
-        const signature = String(snapshot.info?.key || '') + '\u0000' +
-          String(snapshot.text || '').replace(/\s+/g, ' ').trim();
-        if (seen.has(signature)) continue;
-        seen.add(signature);
-        apiMatched.push(snapshot);
-      }
-    }
+    // Render the same de-duplicated entries used by the player overlay.
+    const entries = youtubePriorityOverlayEntries();
 
     const status = document.createElement('div');
     status.style.cssText = 'font-size:11px;line-height:1.5;opacity:.68;margin:-2px 0 8px;';
@@ -7163,7 +7165,7 @@
       box.appendChild(setup);
     }
 
-    if (!matched.length && !apiMatched.length) {
+    if (!entries.length) {
       const waiting = document.createElement('div');
       waiting.textContent = youtubePriorityBackground.running
         ? '優先ユーザーのコメントを探しています。コメント欄をスクロールする必要はありません。'
@@ -7175,8 +7177,11 @@
 
     const list = document.createElement('div');
     list.style.cssText = 'display:grid;gap:8px;';
-    for (const snapshot of apiMatched) list.appendChild(makeYoutubePriorityApiCard(snapshot));
-    for (const {root, info} of matched) list.appendChild(makeYoutubePriorityCommentCard(root, info));
+    for (const entry of entries) {
+      list.appendChild(entry.type === 'api'
+        ? makeYoutubePriorityApiCard(entry.snapshot)
+        : makeYoutubePriorityCommentCard(entry.root, entry.info));
+    }
     box.appendChild(list);
   }
 
@@ -7247,6 +7252,8 @@
     youtubeTimestampUi.manualOpen = true;
     youtubeTimestampUi.manualClosed = false;
     youtubeTimestampUi.videoId = videoId;
+    $('#npf-yt-priority-overlay')?.remove();
+    youtubePriorityOverlayUi.stamp = '';
     ensureYoutubeTimestampOverlay(true);
     return true;
   }
@@ -7258,6 +7265,7 @@
     youtubeTimestampUi.manualOpen = false;
     youtubeTimestampUi.manualClosed = false;
     $('#npf-yt-ts-overlay')?.remove();
+    ensureYoutubePriorityOverlay(true);
     toast('📌 この動画の固定タイムスタンプを解除しました');
   }
 
