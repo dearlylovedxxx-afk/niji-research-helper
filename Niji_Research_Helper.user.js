@@ -1945,18 +1945,7 @@
     if (!confirm(`${backup.device} / ${new Date(backup.createdAt).toLocaleString('ja-JP')} のバックアップを\nこのブラウザのDBに統合しますか？\n\n既存データは削除せず、日時が新しいレコードを優先します。APIキーは復元されません。`)) return;
     cloud.status = '📥 クラウドから読み込み中…'; cloudUpdateUi();
     try {
-      const res = await gmRequest({ method:'GET', url:CLOUD_URL + '/v1/backups/' + encodeURIComponent(backup.id),
-        headers:{ authorization:`Bearer ${cloud.token}` }, responseType:'arraybuffer', timeout:45000 });
-      if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-      const raw = res.response instanceof ArrayBuffer ? new Uint8Array(res.response)
-        : ArrayBuffer.isView(res.response) ? new Uint8Array(res.response.buffer, res.response.byteOffset, res.response.byteLength)
-          : new TextEncoder().encode(res.responseText || String(res.response || ''));
-      const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', raw))]
-        .map(x => x.toString(16).padStart(2,'0')).join('');
-      if (sha !== backup.sha256) throw new Error('チェックサム不一致。復元を中止しました');
-      const data = JSON.parse(new TextDecoder('utf-8', { fatal:true }).decode(raw));
-      if (data.app !== 'Niji Research Helper' || data.dbVersion !== NRH_DB_VERSION
-        || CLOUD_STORES.some(name => !Array.isArray(data.stores?.[name]))) throw new Error('バックアップ形式が違います');
+      const data=await cloudFetchResearchSnapshot(backup);
       const db = await nrhDbOpen();
       for (const name of CLOUD_STORES) {
         await new Promise((resolve, reject) => {
@@ -2044,17 +2033,9 @@
       if (!listed.ok || !Array.isArray(listed.backups)) throw new Error('バックアップ一覧の形式が違います');
       const item = listed.backups.find(x => x.device === cloudDevice() && x.origin === location.origin);
       if (!item) throw new Error('この端末・YouTube URLのバックアップが見つかりません');
-      const text = await get('/v1/backups/' + encodeURIComponent(item.id));
-      const bytes = new TextEncoder().encode(text);
-      if (bytes.byteLength !== item.size) throw new Error('取得ファイルのサイズが一致しません');
-      const digest = await crypto.subtle.digest('SHA-256', bytes);
-      const sha = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2,'0')).join('');
-      if (sha !== item.sha256) throw new Error('取得ファイルのチェックサムが一致しません');
-      const data = JSON.parse(text);
-      if (data.app !== 'Niji Research Helper' || data.dbVersion !== NRH_DB_VERSION
-          || data.device !== item.device || data.sourceOrigin !== item.origin
-          || CLOUD_STORES.some(name => !Array.isArray(data.stores?.[name])))
-        throw new Error('取得ファイルのデータ形式が違います');
+      const data=await cloudFetchResearchSnapshot(item,token);
+      if(data.device!==item.device||data.sourceOrigin!==item.origin)
+        throw new Error('取得ファイルの出所が一致しません');
       cloud.status = `✅ 保存済みファイルの読み取り・整合性確認OK（${new Date(item.createdAt).toLocaleString('ja-JP')}、動画${data.stores.videos.length}件、お気に入り${data.preferences?.favorites?.length || 0}件）。DBは変更していません。`;
     } catch (e) {
       cloud.status = `⚠️ 読み取り検証失敗：${String(e?.message || e?.error?.message || e?.statusText || e?.status || '通信エラー').slice(0, 110)}`;
