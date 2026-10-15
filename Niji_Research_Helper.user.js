@@ -1679,6 +1679,7 @@
     const initialWrites = cloud.writes;
     let uploadSha = '';
     let uploadSize = 0;
+    let uploadCompressed = false;
     cloud.status = '☁️ バックアップを作成中…'; cloudUpdateUi();
     try {
       cloud.status = '☁️ 既存DBと統合して完全版を作成中…'; cloudUpdateUi();
@@ -1687,18 +1688,28 @@
         || payload.preferences.favorites?.length || payload.preferences.liverFavorites?.length
         || Object.keys(payload.preferences.syncPoints || {}).length;
       if (!populated) throw new Error('DBが空のため、既存バックアップの保護を優先して保存しません');
-      // Send JSON text: Macaque may alter ArrayBuffer request bodies.
-      const jsonText = JSON.stringify(payload);
-      const bytes = new TextEncoder().encode(jsonText);
-      if (bytes.byteLength > 20 * 1024 * 1024)
-        throw new Error('バックアップが20MBを超えました。ローカルJSONを先に退避してください');
-      const digest = await crypto.subtle.digest('SHA-256', bytes);
-      const sha = [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, '0')).join('');
-      uploadSha = sha; uploadSize = bytes.byteLength;
+      // Macaque reliably sends JSON text, not an ArrayBuffer request body.
+      // Gzip v2 preserves the complete merged DB even beyond 20MB of raw JSON.
+      const encoded=await researchCloudEncode(payload);
+      const jsonText=encoded.text,bytes=encoded.bytes;
+      const sha=await researchCloudSha(bytes);
+      uploadSha=sha;uploadSize=bytes.byteLength;uploadCompressed=encoded.compressed;
       const result = await cloudRequest('POST', '/v1/backups', jsonText, {
         'content-type':'application/json', 'x-nrh-device':cloudDevice(),
         'x-nrh-origin':location.origin, 'x-nrh-sha256':sha, 'x-nrh-version':VERSION,
       });
+      // For the new compressed format, read it back and check both the
+      // envelope SHA and the uncompressed, full-database SHA before success.
+      if(uploadCompressed){
+        cloud.status='☁️ 圧縮バックアップを読み戻して検証中…';cloudUpdateUi();
+        const listed=await cloudRequest('GET','/v1/backups?device='+encodeURIComponent(cloudDevice()));
+        const item=(listed.backups||[]).find(x=>
+          x.sha256===sha&&Number(x.size)===uploadSize&&x.origin===location.origin);
+        if(!item)throw new Error('圧縮バックアップの保存記録が見つかりません');
+        const restored=await cloudFetchResearchSnapshot(item);
+        if(restored?.stores?.videos?.length!==payload.stores.videos.length)
+          throw new Error('圧縮バックアップの読み戻し件数が一致しません');
+      }
       cloud.lastSavedAt = Date.now(); cloud.nextRetryAt = 0;
       cloud.lastRemoteId = String(result?.backup?.id || cloud.lastRemoteId || '');
       if (!cloud.lastRemoteId) {
@@ -1735,7 +1746,13 @@
             const digest = await crypto.subtle.digest('SHA-256', received);
             const remoteSha = [...new Uint8Array(digest)]
               .map(x => x.toString(16).padStart(2, '0')).join('');
-            confirmed = remoteSha === uploadSha;
+            if(remoteSha===uploadSha){
+              if(uploadCompressed){
+                const readback=await researchCloudDecode(JSON.parse(text));
+                confirmed=readback?.stores?.videos&&
+                  Array.isArray(readback.stores.videos);
+              }else confirmed=true;
+            }
           }
         }
       }
