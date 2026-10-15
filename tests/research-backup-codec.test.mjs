@@ -41,7 +41,7 @@ test('legacy small JSON research backups stay byte-compatible',async()=>{
  assert.deepEqual(await decode(JSON.parse(packed.text)),original);
 });
 test('large raw research DB compresses below 20MiB without losing any local records',async()=>{
- const original=payload({count:70,large:true});
+ const original=payload({count:95,large:true});
  const packed=await encode(original);
  assert.equal(packed.compressed,true);
  assert.ok(JSON.stringify(original).length>20*1024*1024,'reproduce the reported warning');
@@ -53,7 +53,7 @@ test('large raw research DB compresses below 20MiB without losing any local reco
  assert.ok(wrapper.compressedResearch.originalSha256);
 });
 test('rejects corrupt compressed payload and does not accept empty compatibility stores',async()=>{
- const packed=await encode(payload({count:70,large:true})),wrapper=JSON.parse(packed.text);
+ const packed=await encode(payload({count:95,large:true})),wrapper=JSON.parse(packed.text);
  const corrupted={...wrapper,compressedResearch:{...wrapper.compressedResearch,originalSha256:'0'.repeat(64)}};
  await assert.rejects(decode(corrupted),/検証に失敗/);
  const missing={...wrapper,compressedResearch:{...wrapper.compressedResearch,payload:''}};
@@ -63,7 +63,7 @@ test('rejects corrupt compressed payload and does not accept empty compatibility
  assert.notEqual(wrapper.dbVersion,1);
 });
 test('conflicting origin and malformed legacy data cannot overwrite valid DB',async()=>{
- const packed=await encode(payload({count:70,large:true})),wrapper=JSON.parse(packed.text);
+ const packed=await encode(payload({count:95,large:true})),wrapper=JSON.parse(packed.text);
  await assert.rejects(decode({...wrapper,sourceOrigin:'https://attacker.example'}),/出所が一致/);
  await assert.rejects(decode({app:'Niji Research Helper',dbVersion:1,stores:{videos:[]}}),/復元データが不正/);
 });
