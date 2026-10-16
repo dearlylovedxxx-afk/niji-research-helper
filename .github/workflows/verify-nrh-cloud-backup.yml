@@ -6,12 +6,14 @@ on:
       - Niji_Research_Helper.user.js
       - Niji_Research_Helper.meta.js
       - tests/research-backup-codec.test.mjs
+      - tests/wiki-auto-refresh.test.mjs
       - .github/workflows/verify-nrh-cloud-backup.yml
   pull_request:
     paths:
       - Niji_Research_Helper.user.js
       - Niji_Research_Helper.meta.js
       - tests/research-backup-codec.test.mjs
+      - tests/wiki-auto-refresh.test.mjs
       - .github/workflows/verify-nrh-cloud-backup.yml
 jobs:
   test:
@@ -22,4 +24,4 @@ jobs:
         with:
           node-version: '22'
       - run: node --check Niji_Research_Helper.user.js
-      - run: node --test tests/research-backup-codec.test.mjs
+      - run: node --test tests/research-backup-codec.test.mjs tests/wiki-auto-refresh.test.mjs
