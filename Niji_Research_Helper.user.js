@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.110
+// @version      1.0.111
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.110';
+  const VERSION = '1.0.111';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -265,12 +265,12 @@
     }
   }
 
-  async function nrhDbSaveWikiInfo(id, info, sourceUrl = '') {
+  async function nrhDbSaveWikiInfo(id, info, sourceUrl = '', fetchedAt = Date.now()) {
     if (!id || !nrhDbEnabled()) return;
     await nrhDbMergeVideo(id, {
       wikiInfo: info || null,
       wikiSourceUrl: sourceUrl || info?.sourceUrl || '',
-      wikiFetchedAt: Date.now(),
+      wikiFetchedAt: Number(fetchedAt) > 0 ? Number(fetchedAt) : Date.now(),
       wikiCacheVersion: WIKI_CACHE_FORMAT_VERSION,
     });
   }
@@ -309,6 +309,7 @@
         entry.wikiInfo = rec.wikiInfo;
         entry.wikiSourceUrl = rec.wikiSourceUrl || rec.wikiInfo?.sourceUrl || '';
         const wikiFetchedAt = Number(rec.wikiFetchedAt || 0);
+        entry.wikiFetchedAt = wikiFetchedAt;
         entry.wikiChecked = Number(rec.wikiCacheVersion || 0) >= WIKI_CACHE_FORMAT_VERSION
           && wikiFetchedAt > 0 && wikiFetchedAt + WIKI_CACHE_TTL > Date.now();
       }
@@ -9632,17 +9633,25 @@
     return p;
   }
 
+  function wikiEntryNeedsRefresh(entry, at = Date.now()) {
+    const stamp=Number(entry?.wikiFetchedAt || 0);
+    return !!entry?.meta && (!entry.wikiChecked || !stamp ||
+      stamp + WIKI_CACHE_TTL <= at);
+  }
+
   function wikiApplyToEntry(entry, info, dataset = null) {
     entry.wikiChecked = true;
     entry.wikiError = '';
     entry.wikiSkipReason = '';
-    // 新しい年別ページが一時的に欠けても、DBの既存コラボ情報を消さない。
-    // A successful refresh adds new participants without discarding saved ones.
-    entry.wikiInfo = info && entry.wikiInfo
-      ? wikiMergeEntries({[entry.id]: entry.wikiInfo}, {[entry.id]: info})[entry.id]
-      : (info || entry.wikiInfo || null);
+    // Replace corrected names from a successful Wiki dataset instead of
+    // keeping obsolete participants forever via union. A missing video on
+    // a transiently incomplete page never deletes last-known-good evidence.
+    if (info) entry.wikiInfo = info;
+    else entry.wikiInfo ||= null;
     entry.wikiSourceUrl = info?.sourceUrl || entry.wikiInfo?.sourceUrl || dataset?.sourceUrl || '';
-    if (entry?.id) void nrhDbSaveWikiInfo(entry.id, entry.wikiInfo, entry.wikiSourceUrl).catch(() => {});
+    entry.wikiFetchedAt = Number(dataset?.fetchedAt) || Date.now();
+    if (entry?.id) void nrhDbSaveWikiInfo(entry.id, entry.wikiInfo,
+      entry.wikiSourceUrl, entry.wikiFetchedAt).catch(() => {});
   }
 
   function queueResearchWiki(entry, force = false, preferCached = true) {
@@ -9650,7 +9659,7 @@
     if ((!research.collectionActive && !force) || !entry?.id || !entry?.meta || entry.wikiLoading) return;
     entry.wikiError = '';
     entry.wikiSkipReason = '';
-    if (entry.wikiChecked && !force) return;
+    if (!force && !wikiEntryNeedsRefresh(entry)) return;
     // 他の正しいチャンネル/年で取得済みの動画も、ローカルID一致で先に回収する。
     // 全件手動更新だけはpreferCached=falseにしてネット上の最新版を要求可能にする。
     const saved = preferCached ? wikiFindCachedVideo(entry) : null;
@@ -10400,7 +10409,7 @@
       domChannel: (card.querySelector('ytd-channel-name a, #channel-name a')?.textContent || mobileChannel).trim(),
       meta: research.metaCache.get(id) || null,
       game: '', categories: [], date: '', durationSec: null, collabCount: null, url: youtubeUrl(id), mentions: [],
-      collaborators: [], wikiInfo: null, wikiSourceUrl: '', wikiChecked: false, wikiLoading: false, wikiError: '', wikiSkipReason: '',
+      collaborators: [], wikiInfo: null, wikiSourceUrl: '', wikiFetchedAt: 0, wikiChecked: false, wikiLoading: false, wikiError: '', wikiSkipReason: '',
     };
     research.entries.add(entry);
     renderResearchEntry(entry);
@@ -10476,6 +10485,25 @@
     updateResearchStatus();
   }
 
+  // Refresh cards already on-screen when the source Wiki's 12-hour cache
+  // expires. Only while active collection is enabled and tab is visible.
+  // Bounded scans and per-(channel,year) request dedupe respect Wiki's 429.
+  function refreshVisibleResearchWiki() {
+    if (!isYoutubeResearchPage() || !research.collectionActive ||
+        wikiRequestsPaused || document.hidden) return 0;
+    const entries=currentResearchEntries().filter(e=>e.meta && !e.wikiLoading &&
+      !e.wikiError && wikiLikelyNijisanji(e,e.meta));
+    let queued=0;
+    for(const entry of entries){
+      if(queued>=12)break;
+      if(!wikiEntryNeedsRefresh(entry))continue;
+      if(!wikiChannelNameForEntry(entry,entry.meta))continue;
+      queueResearchWiki(entry);
+      queued++;
+    }
+    return queued;
+  }
+
   function startResearchCollection() {
     if (!isYoutubeResearchPage()) return;
     research.collectionActive = true;
@@ -10483,7 +10511,7 @@
     scanYoutubeResearchCards();
     // 開いている間にDBから読み込んだ動画も、開始後に未取得分だけ調べる。
     for (const entry of currentResearchEntries()) {
-      if (entry.meta && !entry.wikiChecked && !entry.wikiLoading) queueResearchWiki(entry);
+      if (wikiEntryNeedsRefresh(entry) && !entry.wikiLoading && !entry.wikiError) queueResearchWiki(entry);
       if (!state.apiKey || research.dbLookupPending.has(entry.id)) continue;
       if (!nrhDbEnabled()) {
         if (!entry.meta) queueResearchMeta(entry);
@@ -10498,6 +10526,7 @@
         if (research.collectionActive && entry.el?.isConnected) queueResearchMeta(entry, false, !!entry.meta);
       });
     }
+    refreshVisibleResearchWiki();
     updateResearchStatus();
   }
 
@@ -12454,12 +12483,14 @@ e.el.classList.toggle('npf-r-hidden', !show);
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
+    refreshVisibleResearchWiki();
     if (state.preferenceCloudToken) void preferenceCloudSync({force:true});
     if (isYoutubeHost() && cloud.enabled) void cloudSyncShared({force:true});
     if (state.apiSecretReady) void apiSecretSync();
   });
   setInterval(() => {
     if (document.hidden) return;
+    refreshVisibleResearchWiki();
     if (state.preferenceCloudToken) void preferenceCloudSync();
     if (isYoutubeHost() && cloud.enabled) void cloudSyncShared();
     if (state.apiSecretReady) void apiSecretSync();
