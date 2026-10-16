@@ -11,7 +11,7 @@ const {wikiEntryNeedsRefresh,isFresh,wikiApplyToEntry}=new Function(
  'WIKI_CACHE_TTL','nrhDbSaveWikiInfo',
  script.slice(start,end)+
  '\nreturn {wikiEntryNeedsRefresh,isFresh:null,wikiApplyToEntry}'
-)(12*60*60*1000,(id,info,sourceUrl,at)=>operations.push({id,info,sourceUrl,at}));
+)(12*60*60*1000,(id,info,sourceUrl,at)=>{operations.push({id,info,sourceUrl,at}); return Promise.resolve()});
 
 test('previously checked on-screen videos become eligible after 12h, not stuck forever',()=>{
  const now=Date.now(),entry={id:'video123456',meta:{},wikiFetchedAt:now-12*3600_000+1,wikiChecked:true};
