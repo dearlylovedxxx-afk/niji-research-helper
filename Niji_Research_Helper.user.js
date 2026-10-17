@@ -6614,7 +6614,7 @@
     forceYoutubePriorityTimestampLinks(container);
   }
 
-  function makeYoutubePriorityApiCard(snapshot) {
+  function makeYoutubePriorityApiCard(snapshot, fallback = false) {
     const info = snapshot.info || {};
     const card = document.createElement('div');
     card.className = 'npf-yt-priority-card npf-yt-priority-api-card';
@@ -6626,11 +6626,11 @@
     const head = document.createElement('div');
     head.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:7px;';
     const author = document.createElement(info.href ? 'a' : 'span');
-    author.textContent = `⭐ ${info.name || '優先ユーザー'}`;
+    author.textContent = fallback ? `⏱ ${info.name || 'コメント投稿者'}` : `⭐ ${info.name || '優先ユーザー'}`;
     author.style.cssText = 'font-weight:800;font-size:13px;color:inherit;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
     if (info.href) author.href = info.href;
     const badge = document.createElement('span');
-    badge.textContent = '自動取得';
+    badge.textContent = fallback ? '最多タイムスタンプ ' + Number(snapshot.timestampCount || snapshot.items?.length || 0) + '件' : '自動取得';
     badge.style.cssText = 'font-size:10px;opacity:.58;white-space:nowrap;';
     head.append(author, badge);
     card.appendChild(head);
@@ -6681,7 +6681,7 @@
     return card;
   }
 
-  function makeYoutubePriorityCommentCard(root, info) {
+  function makeYoutubePriorityCommentCard(root, info, fallback = false, timestampCount = 0) {
     const body = youtubeCommentBody(root);
     const card = document.createElement('div');
     card.className = 'npf-yt-priority-card';
@@ -6694,7 +6694,7 @@
     head.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:7px;';
 
     const author = document.createElement(info.href ? 'a' : 'span');
-    author.textContent = `⭐ ${info.name || '優先ユーザー'}`;
+    author.textContent = fallback ? `⏱ ${info.name || 'コメント投稿者'}` : `⭐ ${info.name || '優先ユーザー'}`;
     author.style.cssText = 'font-weight:800;font-size:13px;color:inherit;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
     if (info.href) author.href = info.href;
 
@@ -6713,7 +6713,14 @@
       void togglePreferredCommentAuthor(info);
     });
 
-    head.append(author, unstar);
+    if (fallback) {
+      const badge = document.createElement('span');
+      badge.textContent = '最多タイムスタンプ ' + timestampCount + '件';
+      badge.style.cssText = 'font-size:10px;opacity:.68;white-space:nowrap;';
+      head.append(author, badge);
+    } else {
+      head.append(author, unstar);
+    }
     card.appendChild(head);
 
     const text = document.createElement('div');
@@ -7263,8 +7270,12 @@
     window.alert([
       'NIJI 優先コメント診断 v' + VERSION,
       '優先登録ユーザー: ' + favs.length + '人',
-      '一致コメント: ' + entries.length + '件 (API ' +
+      '一致コメント: ' + entries.filter(e => !e.fallback).length + '件 (API ' +
         (youtubePriorityBackground.found?.length || 0) + '件)',
+      'タイムスタンプ最多候補: ' + (entries.find(e => e.fallback)
+        ? entries.find(e => e.fallback).timestampCount + '件（' +
+          (entries.find(e => e.fallback).type === 'api' ? 'API' : '表示済みコメント') + '）'
+        : 'なし'),
       '取得状況: ' + (youtubePriorityBackground.error || (
         youtubePriorityBackground.running ? '検索中' :
         youtubePriorityBackground.needsApiKey ? 'YouTube APIキー未設定' :
@@ -7301,7 +7312,8 @@
     const favorites = preferredCommentAuthors();
     const roots = youtubeCommentRoots().filter(root => !root.closest?.('#npf-yt-priority-comments'));
     const mount = priorityCommentMount(roots);
-    if (!mount || !roots.length || !favorites.length) {
+    const entries = youtubePriorityOverlayEntries();
+    if (!mount || !roots.length || (!favorites.length && !entries.length)) {
       $('#npf-yt-priority-comments')?.remove();
       return;
     }
@@ -7325,7 +7337,8 @@
     box.appendChild(title);
 
     // Render the same de-duplicated entries used by the player overlay.
-    const entries = youtubePriorityOverlayEntries();
+    const fallback = entries.length === 1 && entries[0].fallback;
+    if (fallback) title.textContent = '⏱ タイムスタンプ最多コメント';
 
     const status = document.createElement('div');
     status.style.cssText = 'font-size:11px;line-height:1.5;opacity:.68;margin:-2px 0 8px;';
@@ -7341,6 +7354,14 @@
       status.textContent = '優先ユーザーを裏で自動検索します。';
     }
     box.appendChild(status);
+    if (fallback) {
+      const notice = document.createElement('div');
+      notice.textContent = '登録した優先ユーザーの一致コメントがないため、' +
+        '確認できたコメントから時刻リンク最多の1件を自動表示しています。' +
+        (youtubePriorityBackground.running ? '（検索中・候補は更新されます）' : '');
+      notice.style.cssText = 'font-size:11px;line-height:1.5;margin:0 0 8px;opacity:.8;';
+      box.appendChild(notice);
+    }
 
     if (youtubePriorityBackground.needsApiKey) {
       const setup = document.createElement('button');
@@ -7369,8 +7390,8 @@
     list.style.cssText = 'display:grid;gap:8px;';
     for (const entry of entries) {
       list.appendChild(entry.type === 'api'
-        ? makeYoutubePriorityApiCard(entry.snapshot)
-        : makeYoutubePriorityCommentCard(entry.root, entry.info));
+        ? makeYoutubePriorityApiCard(entry.snapshot, !!entry.fallback)
+        : makeYoutubePriorityCommentCard(entry.root, entry.info, !!entry.fallback, entry.timestampCount || 0));
     }
     box.appendChild(list);
   }
