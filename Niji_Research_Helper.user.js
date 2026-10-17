@@ -6842,9 +6842,8 @@
 
   function youtubePriorityOverlayEntries() {
     const favorites = preferredCommentAuthors();
-    if (!favorites.length) return [];
     const entries = [], seen = new Set();
-    if (youtubePriorityBackground.videoId === currentYoutubeVideoId()) {
+    if (favorites.length && youtubePriorityBackground.videoId === currentYoutubeVideoId()) {
       for (const snapshot of youtubePriorityBackground.found || []) {
         const key = String(snapshot.targetKey || snapshot.info?.key || '');
         const sig = youtubePriorityCommentFingerprint(key, snapshot.text, snapshot.items);
@@ -6853,17 +6852,49 @@
         entries.push({type:'api', snapshot, info:snapshot.info || {}, signature:sig});
       }
     }
-    for (const root of youtubeCommentRoots()) {
-      const info = youtubeCommentAuthorInfo(root);
-      const preferred = info && favorites.find(x => x.key === info.key);
-      if (!preferred) continue;
-      const body = youtubeCommentBody(root);
-      const sig = youtubePriorityCommentFingerprint(preferred.key, body?.textContent || '');
-      if (!sig || seen.has(sig)) continue;
-      seen.add(sig);
-      entries.push({type:'dom', root, body, info, signature:sig});
+    const roots = youtubeCommentRoots();
+    if (favorites.length) {
+      for (const root of roots) {
+        const info = youtubeCommentAuthorInfo(root);
+        const preferred = info && favorites.find(x => x.key === info.key);
+        if (!preferred) continue;
+        const body = youtubeCommentBody(root);
+        const sig = youtubePriorityCommentFingerprint(preferred.key, body?.textContent || '');
+        if (!sig || seen.has(sig)) continue;
+        seen.add(sig);
+        entries.push({type:'dom', root, body, info, signature:sig});
+      }
     }
-    return entries.slice(0, 8);
+    // A matching registered user always wins, even when their post has no timestamps.
+    if (entries.length) return entries.slice(0, 8);
+
+    let best = null, rank = null;
+    if (youtubePriorityBackground.videoId === currentYoutubeVideoId()) {
+      const snapshot = youtubePriorityBackground.bestFallback;
+      if (snapshot?.timestampCount >= 2) {
+        rank = snapshot;
+        best = {type:'api', snapshot, info:snapshot.info || {}, fallback:true,
+          timestampCount:snapshot.timestampCount,
+          signature:'fallback-api:' + snapshot.id + ':' + snapshot.timestampCount};
+      }
+    }
+    // Without a YouTube API key, select the best comment currently loaded on page.
+    for (const root of roots) {
+      const body = youtubeCommentBody(root);
+      const info = youtubeCommentAuthorInfo(root);
+      if (!body || !info) continue;
+      const timestampCount = youtubePriorityTextItems(body.textContent || '', Infinity).length;
+      const candidate = {
+        id:'dom:' + info.key + ':' + String(body.textContent || '').slice(0, 100),
+        timestampCount, likeCount:0
+      };
+      if (!youtubePriorityFallbackBetter(candidate, rank)) continue;
+      const sig = youtubePriorityCommentFingerprint(info.key, body.textContent || '');
+      rank = candidate;
+      best = {type:'dom',root,body,info,fallback:true,timestampCount,
+        signature:'fallback-dom:' + sig + ':' + timestampCount};
+    }
+    return best ? [best] : [];
   }
 
   function youtubePriorityOverlayStamp(entries) {
@@ -6968,7 +6999,7 @@
       youtubePriorityOverlayUi.stamp = '';
       return null;
     }
-    if (!videoId || !preferredCommentAuthors().length) {
+    if (!videoId) {
       existing?.remove();
       youtubePriorityOverlayUi.stamp = '';
       return null;
@@ -7074,7 +7105,10 @@
 
       const title = document.createElement('button');
       title.type = 'button';
-      title.textContent = youtubePriorityOverlayUi.collapsed ? '⭐ 優先' : '⭐ 優先コメント';
+      const fallbackOnly = entries.length === 1 && entries[0].fallback;
+      title.textContent = fallbackOnly
+        ? (youtubePriorityOverlayUi.collapsed ? '⏱ 最多目次' : '⏱ タイムスタンプ最多')
+        : (youtubePriorityOverlayUi.collapsed ? '⭐ 優先' : '⭐ 優先コメント');
       title.title = youtubePriorityOverlayUi.collapsed ? '優先コメントを開く' : '優先コメントを折りたたむ';
       title.style.cssText = [
         'appearance:none','-webkit-appearance:none','border:0','background:transparent',
@@ -7164,7 +7198,9 @@
           ].join(';');
 
           const author = document.createElement('div');
-          author.textContent = entry.info?.name ? '⭐ ' + entry.info.name : '⭐ 優先ユーザー';
+          author.textContent = entry.fallback
+            ? '⏱ ' + (entry.info?.name || 'コメント投稿者') + '（' + entry.timestampCount + '件）'
+            : (entry.info?.name ? '⭐ ' + entry.info.name : '⭐ 優先ユーザー');
           author.style.cssText = 'font-size:11px;font-weight:850;margin-bottom:4px;opacity:.92;min-width:0;overflow-wrap:anywhere;word-break:break-word;';
           block.appendChild(author);
 
