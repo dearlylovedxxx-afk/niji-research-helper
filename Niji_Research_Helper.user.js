@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.111
+// @version      1.0.112
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -12,6 +12,7 @@
 // @match        https://youtube.com/*
 // @grant        GM.getValue
 // @grant        GM.setValue
+// @grant        GM.setClipboard
 // @grant        GM.addStyle
 // @grant        GM.xmlHttpRequest
 // @grant        GM.xmlhttpRequest
@@ -52,7 +53,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.111';
+  const VERSION = '1.0.112';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2174,6 +2175,43 @@
     }
   }
 
+  // Explicit user-initiated export only; never show or log the saved token.
+  async function copySavedCloudToken() {
+    const config = await gmGet(CLOUD_CONFIG_KEY, null);
+    const token = config?.enabled && typeof config.token === 'string' ? config.token : '';
+    if (!token) {
+      toast('⚠️ 保存済みのNiji Cloudトークンがありません');
+      return;
+    }
+    if (!confirm('保存済みNiji Cloudトークンをクリップボードにコピーしますか？\\n秘密情報なので、新しいPCの接続欄以外には貼り付けないでください。')) return;
+    try {
+      if (typeof GM?.setClipboard === 'function') {
+        await GM.setClipboard(token);
+        toast('🔑 Niji Cloudトークンをコピーしました', 5500);
+        return;
+      }
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(token);
+        toast('🔑 Niji Cloudトークンをコピーしました', 5500);
+        return;
+      }
+      const field = document.createElement('textarea');
+      field.value = token;
+      field.readOnly = true;
+      field.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0';
+      (document.body || document.documentElement).appendChild(field);
+      try {
+        field.focus(); field.select(); field.setSelectionRange(0, token.length);
+        if (!document.execCommand('copy')) throw new Error('コピーを許可できませんでした');
+      } finally {
+        field.remove();
+      }
+      toast('🔑 Niji Cloudトークンをコピーしました', 5500);
+    } catch (e) {
+      toast('⚠️ コピーに失敗しました。Macaqueのクリップボード権限を確認してください', 6000);
+    }
+  }
+
   function createCloudBackupUi() {
     const wrap = document.createElement('section'); wrap.id = 'npf-cloud-backup';
     wrap.style.cssText = 'border:1px solid #63769a;border-radius:12px;padding:10px;margin:12px 0;';
@@ -2201,7 +2239,10 @@
     show.textContent = '📥 履歴・復元'; show.addEventListener('click', () => void cloudShowBackups());
     const disable = document.createElement('button'); disable.type = 'button'; disable.className = 'npf-r-btn';
     disable.textContent = '⏸ この端末の同期を停止'; disable.addEventListener('click', () => void cloudDisable());
-    actions.append(upload, show, disable);
+    const copyTokenButton = document.createElement('button'); copyTokenButton.type = 'button'; copyTokenButton.className = 'npf-r-btn';
+    copyTokenButton.textContent = '🔑 保存済みNiji Cloudトークンをコピー';
+    copyTokenButton.addEventListener('click', () => void copySavedCloudToken());
+    actions.append(upload, show, copyTokenButton, disable);
     const list = document.createElement('div'); list.id = 'npf-cloud-list';
     wrap.append(heading, status, setup, actions, list);
     cloudUpdateUi();
