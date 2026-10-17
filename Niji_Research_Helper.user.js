@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.113
+// @version      1.0.114
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.113';
+  const VERSION = '1.0.114';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -7356,7 +7356,7 @@
     box.appendChild(status);
     if (fallback) {
       const notice = document.createElement('div');
-      notice.textContent = '登録した優先ユーザーの一致コメントがないため、' +
+      notice.textContent = (favorites.length ? '登録した優先ユーザーの一致コメントがないため、' : '優先ユーザーが未登録のため、') +
         '確認できたコメントから時刻リンク最多の1件を自動表示しています。' +
         (youtubePriorityBackground.running ? '（検索中・候補は更新されます）' : '');
       notice.style.cssText = 'font-size:11px;line-height:1.5;margin:0 0 8px;opacity:.8;';
