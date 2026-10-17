@@ -6020,6 +6020,7 @@
     pages: 0,
     scanned: 0,
     found: [],
+    bestFallback: null,
     error: '',
     needsApiKey: false,
   };
@@ -6032,11 +6033,12 @@
     youtubePriorityBackground.pages = 0;
     youtubePriorityBackground.scanned = 0;
     youtubePriorityBackground.found = [];
+    youtubePriorityBackground.bestFallback = null;
     youtubePriorityBackground.error = '';
     youtubePriorityBackground.needsApiKey = false;
   }
 
-  function youtubePriorityTextItems(text) {
+  function youtubePriorityTextItems(text, limit = YT_TS_MAX_ITEMS) {
     const items = [];
     const seen = new Set();
     for (const rawLine of String(text || '').replace(/\r/g, '').split('\n')) {
@@ -6057,7 +6059,18 @@
         items.push({seconds: Math.floor(sec), label});
       }
     }
-    return items.sort((a,b) => a.seconds - b.seconds).slice(0, YT_TS_MAX_ITEMS);
+    return items.sort((a,b) => a.seconds - b.seconds).slice(0, limit);
+  }
+
+  // Rank by number of distinct timestamps; likes break ties.
+  function youtubePriorityFallbackBetter(candidate, current) {
+    if (!candidate || Number(candidate.timestampCount || 0) < 2) return false;
+    if (!current) return true;
+    const diff = Number(candidate.timestampCount || 0) - Number(current.timestampCount || 0);
+    if (diff) return diff > 0;
+    const likes = Number(candidate.likeCount || 0) - Number(current.likeCount || 0);
+    if (likes) return likes > 0;
+    return String(candidate.id || '') < String(current.id || '');
   }
 
   async function youtubePriorityDataApi(path, key) {
@@ -6202,6 +6215,7 @@
     youtubePriorityBackground.pages = 0;
     youtubePriorityBackground.scanned = 0;
     youtubePriorityBackground.found = [];
+    youtubePriorityBackground.bestFallback = null;
     renderYoutubePriorityComments();
 
     try {
@@ -6228,6 +6242,18 @@
 
         for (const item of items) {
           const snippet = item?.snippet?.topLevelComment?.snippet || {};
+          const commentId = String(item?.snippet?.topLevelComment?.id || item?.id || '');
+          // Rank all distinct timestamps; the rendered/pinned list still caps at 180.
+          const timestampCount = youtubePriorityTextItems(
+            snippet.textOriginal || snippet.textDisplay || '', Infinity).length;
+          if (timestampCount >= 2 && commentId) {
+            const candidateRank = {id:commentId,timestampCount,likeCount:Number(snippet.likeCount || 0)};
+            if (youtubePriorityFallbackBetter(candidateRank, youtubePriorityBackground.bestFallback)) {
+              const candidate = youtubePriorityApiSnapshot(item, null);
+              candidate.timestampCount = timestampCount;
+              youtubePriorityBackground.bestFallback = candidate;
+            }
+          }
           const target = youtubePriorityApiMatch(snippet, targets);
           if (!target) continue;
           const snap = youtubePriorityApiSnapshot(item, target);
@@ -6238,6 +6264,7 @@
         }
 
         renderYoutubePriorityComments();
+        ensureYoutubePriorityOverlay();
 
         const allSatisfied = targets.length > 0 &&
           targets.every(t => youtubePriorityTargetSatisfied(t, youtubePriorityBackground.found));
@@ -6254,6 +6281,7 @@
       if (token === youtubePriorityBackground.token) {
         youtubePriorityBackground.running = false;
         renderYoutubePriorityComments();
+        ensureYoutubePriorityOverlay();
       }
     }
   }
