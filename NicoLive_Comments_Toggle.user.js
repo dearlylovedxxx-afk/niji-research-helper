@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ニコ生 コメント初期非表示・ワンクリック切替
 // @namespace    https://github.com/dearlylovedxxx-afk/niji-research-helper
-// @version      1.1.1
-// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/Lで10秒送り・戻し、K/Spaceで再生・一時停止できます。
+// @version      1.1.2
+// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/Lで10秒送り・戻し、K/Spaceで安定して再生・一時停止できます。
 // @author       Marina
 // @match        https://live.nicovideo.jp/watch/*
 // @run-at       document-start
@@ -174,7 +174,7 @@
   }
 
   function handlePlaybackShortcut(event) {
-    if (!currentWatchId || event.defaultPrevented || event.isComposing ||
+    if (!currentWatchId || event.isComposing ||
         event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
 
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
@@ -182,16 +182,20 @@
     if (key !== 'j' && key !== 'k' && key !== 'l' && !isSpace) return;
     if (isTyping(event)) return;
 
-    // Leave Space available for focused links, buttons, sliders, and other UI controls.
-    if (isSpace && event.target instanceof Element &&
-        event.target.closest('button, a[href], summary, [role="button"], [role="checkbox"], [role="switch"], [role="radio"], [role="slider"], [role="menuitem"]')) return;
-
     const video = getPlayerVideo();
     if (!video) return;
-    let handled = false;
+
+    // Handle BOTH key phases. Otherwise NicoLive or the browser may act on
+    // keyup after we already toggled playback on keydown (double-toggle).
+    // Button focus is not an exception: Space must control the player anywhere
+    // on the watch page unless the user is entering text.
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    if (event.type === 'keyup') return;
+    if ((key === 'k' || isSpace) && event.repeat) return;
 
     if (key === 'k' || isSpace) {
-      if (event.repeat) return; // Prevent holding the key from toggling rapidly.
       try {
         if (video.paused) {
           const promise = video.play();
@@ -199,20 +203,16 @@
         } else {
           video.pause();
         }
-        handled = true;
       } catch {
-        handled = false;
+        // Avoid passing the key on to a second, conflicting player handler.
       }
     } else {
-      handled = seekVideo(video, key === 'j' ? -10 : 10);
+      seekVideo(video, key === 'j' ? -10 : 10);
     }
-
-    if (!handled) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
   }
 
   window.addEventListener('keydown', handlePlaybackShortcut, true);
+  window.addEventListener('keyup', handlePlaybackShortcut, true);
 
   function maintain() {
     checkNavigation();
