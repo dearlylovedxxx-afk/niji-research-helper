@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ニコ生 コメント初期非表示・ワンクリック切替
 // @namespace    https://github.com/dearlylovedxxx-afk/niji-research-helper
-// @version      1.1.0
-// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/K/Lで10秒送り・戻しと再生停止も行えます。
+// @version      1.1.1
+// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/Lで10秒送り・戻し、K/Spaceで再生・一時停止できます。
 // @author       Marina
 // @match        https://live.nicovideo.jp/watch/*
 // @run-at       document-start
@@ -120,7 +120,7 @@
     }
   }
 
-  // N3 dial / keyboard: J = -10s, K = play/pause, L = +10s.
+  // N3 dial / keyboard: J = -10s, K or Space = play/pause, L = +10s.
   // Do not intercept typing in chat/search fields or modified shortcuts.
   function isTyping(event) {
     const path = typeof event.composedPath === 'function'
@@ -178,14 +178,19 @@
         event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
 
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
-    if (key !== 'j' && key !== 'k' && key !== 'l') return;
+    const isSpace = key === ' ' || key === 'spacebar' || event.code === 'Space';
+    if (key !== 'j' && key !== 'k' && key !== 'l' && !isSpace) return;
     if (isTyping(event)) return;
+
+    // Leave Space available for focused links, buttons, sliders, and other UI controls.
+    if (isSpace && event.target instanceof Element &&
+        event.target.closest('button, a[href], summary, [role="button"], [role="checkbox"], [role="switch"], [role="radio"], [role="slider"], [role="menuitem"]')) return;
 
     const video = getPlayerVideo();
     if (!video) return;
     let handled = false;
 
-    if (key === 'k') {
+    if (key === 'k' || isSpace) {
       if (event.repeat) return; // Prevent holding the key from toggling rapidly.
       try {
         if (video.paused) {
