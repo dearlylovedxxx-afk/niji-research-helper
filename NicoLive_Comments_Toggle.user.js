@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ニコ生 コメント初期非表示・ワンクリック切替
 // @namespace    https://github.com/dearlylovedxxx-afk/niji-research-helper
-// @version      1.0.0
-// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンでまとめて切り替えます。
+// @version      1.1.0
+// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/K/Lで10秒送り・戻しと再生停止も行えます。
 // @author       Marina
 // @match        https://live.nicovideo.jp/watch/*
 // @run-at       document-start
@@ -119,6 +119,95 @@
       setCommentsVisible(false);
     }
   }
+
+  // N3 dial / keyboard: J = -10s, K = play/pause, L = +10s.
+  // Do not intercept typing in chat/search fields or modified shortcuts.
+  function isTyping(event) {
+    const path = typeof event.composedPath === 'function'
+      ? event.composedPath()
+      : [event.target];
+    return path.some((node) =>
+      node instanceof Element &&
+      Boolean(node.closest('input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])'))
+    );
+  }
+
+  function getPlayerVideo() {
+    // Prefer the largest visible, initialized video over hidden previews.
+    return [...document.querySelectorAll('video')]
+      .filter((video) => video.readyState > 0 && video.getClientRects().length > 0)
+      .sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0] || null;
+  }
+
+  function seekVideo(video, deltaSeconds) {
+    const now = video.currentTime;
+    if (!Number.isFinite(now)) return false;
+
+    const target = now + deltaSeconds;
+    const ranges = video.seekable;
+    let next = null;
+
+    if (ranges.length > 0) {
+      // Stay inside the actual seekable ranges (important for timeshift streams).
+      let nearestDistance = Infinity;
+      for (let index = 0; index < ranges.length; index += 1) {
+        const start = ranges.start(index);
+        const end = ranges.end(index);
+        const candidate = Math.max(start, Math.min(end, target));
+        const distance = Math.abs(candidate - target);
+        if (distance < nearestDistance) {
+          next = candidate;
+          nearestDistance = distance;
+        }
+      }
+    } else if (Number.isFinite(video.duration) && video.duration > 0) {
+      next = Math.max(0, Math.min(video.duration, target));
+    }
+
+    if (next === null || Math.abs(next - now) < 0.01) return false;
+    try {
+      video.currentTime = next;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function handlePlaybackShortcut(event) {
+    if (!currentWatchId || event.defaultPrevented || event.isComposing ||
+        event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+
+    const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+    if (key !== 'j' && key !== 'k' && key !== 'l') return;
+    if (isTyping(event)) return;
+
+    const video = getPlayerVideo();
+    if (!video) return;
+    let handled = false;
+
+    if (key === 'k') {
+      if (event.repeat) return; // Prevent holding the key from toggling rapidly.
+      try {
+        if (video.paused) {
+          const promise = video.play();
+          if (promise && typeof promise.catch === 'function') promise.catch(() => {});
+        } else {
+          video.pause();
+        }
+        handled = true;
+      } catch {
+        handled = false;
+      }
+    } else {
+      handled = seekVideo(video, key === 'j' ? -10 : 10);
+    }
+
+    if (!handled) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
+  window.addEventListener('keydown', handlePlaybackShortcut, true);
 
   function maintain() {
     checkNavigation();
