@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.2.5
+// @version      0.2.6
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
@@ -34,6 +34,7 @@ const app=APPS[location.hostname.toLowerCase()];if (!app) return;
 const GATEWAY='https://niji-research-backup.dearlylovedxxx.workers.dev';
 const CONFIG='ncb_app_cloud_v1_'+app.id;
 const GLOBAL_TOKEN_KEY='ncb_client_token_v1';
+const AUTH_SECRET_NAME=app.id==='x'?'NRH_X_BACKUP_TOKEN':app.id==='or'?'NRH_OR_BACKUP_TOKEN':app.id==='pixiv'?'NRH_PIXIV_BACKUP_TOKEN':'NIJI_CLIENT_TOKEN';
 const CHUNK=3*1024*1024, MAX_PARTS=80;
 const PIXIV_EXCLUDE_TAGS_KEY='pixiv-saved-searches-feed-exclude-tags-v1';
 // Same NFKC + case-insensitive rules as Pixiv's saved-search feed.
@@ -65,7 +66,8 @@ try {
  const savedConfig=await GM.getValue(CONFIG,null);
  if(savedConfig&&typeof savedConfig==='object')settings={...settings,...savedConfig};
  const globalToken=String(await GM.getValue(GLOBAL_TOKEN_KEY,'')||'').trim();
- if(!settings.token&&globalToken&&savedConfig===null){
+ // Only pictBLand uses the shared NIJI_CLIENT_TOKEN. Other apps require per-app secrets.
+ if(app.id==='pictbland'&&!settings.token&&globalToken&&savedConfig===null){
   settings.token=globalToken;settings.enabled=true;
  }
 }catch(e){console.warn('[NCB] config read',e);}
@@ -592,15 +594,19 @@ const host=el('div');host.id='ncb-backup-root';host.style.cssText='all:initial!i
 const css=el('style');css.textContent=`:host{all:initial}*{box-sizing:border-box}button,input{font:inherit}button{cursor:pointer}#launch{position:fixed;left:10px;bottom:70px;z-index:3;min-height:45px;padding:10px 13px;border:0;border-radius:24px;color:#fff;background:#156a89;box-shadow:0 4px 14px #0005;pointer-events:auto;font:700 13px system-ui}#panel{position:fixed;inset:0;z-index:4;width:100vw;height:100dvh;overflow:auto;background:#f6f8fc;color:#172337;pointer-events:auto;padding:24px max(14px,calc((100vw - 690px)/2));font:15px/1.5 system-ui}#panel[hidden]{display:none!important}h2{font-size:21px;margin:0 0 12px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}button:not(#launch){padding:10px 12px;min-height:44px;border-radius:9px;border:1px solid #95a7bf;background:white;color:#14304c;font-weight:600}button:disabled{opacity:.5}input{width:100%;min-height:42px;padding:8px;border:1px solid #9eb0c5;border-radius:8px}.status{border:1px solid #ced9e7;border-radius:9px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;background:white;margin:13px 0}.entry{padding:12px;border-bottom:1px solid #ccd6e2;display:flex;gap:9px;align-items:center;justify-content:space-between;flex-wrap:wrap}.note{font-size:12px;color:#526178;margin:10px 0}label{display:block;font-weight:600;margin:12px 0 6px}@media(max-width:600px){#panel{padding:15px 13px 70px}h2{font-size:18px}}`;
 shadow.append(css);const launch=el('button','',`☁️ ${app.label}`);launch.id='launch';launch.style.setProperty('display','none','important');const panel=el('section');panel.id='panel';panel.hidden=true;shadow.append(launch,panel);if(app.id==='x')launch.style.setProperty('display','none','important');
 const header=el('h2','',`☁️ ${app.label}：Niji Cloud同期`);
-const note=el('p','note','このデータはPC・iPhone・iPadで共通です。ページを開いた時・復帰時・定期的にクラウドと双方向同期します。世代履歴は復旧用に残します。Xの一時的ないいね順一覧は共有しません。');
-const tokenLabel=el('label','','NIJI CLIENT TOKEN');const tokenInput=el('input');tokenInput.type='password';tokenInput.placeholder='Cloudflareに設定した専用トークン（チャットには送らない）';tokenInput.autocomplete='off';
+const note=el('p','note','このデータはPC・iPhone・iPadで共通です。ページを開いた時・復帰時・定期的にクラウドと双方向同期します。世代履歴は復旧用に残します。Xの一時的ないいね順一覧は共有しません。'
+ + (app.id==='pictbland'?'':' このアプリの接続には専用の'+AUTH_SECRET_NAME+'が必要です。にじリサーチヘルパーのNIJI_CLIENT_TOKENとは別設定です。'));
+const tokenLabel=el('label','',app.id==='pictbland'?'NIJI CLIENT TOKEN':'Cloudflareの'+AUTH_SECRET_NAME+'（このアプリ専用）');
+const tokenInput=el('input');tokenInput.type='password';
+tokenInput.placeholder='Cloudflareの'+AUTH_SECRET_NAME+'と同じ値（チャットには送らない）';
+tokenInput.autocomplete='off';
 const actions=el('div','actions'),connect=el('button','','接続・初回同期'),backup=el('button','','今すぐ同期・検証'),listButton=el('button','','履歴・復元'),disconnect=el('button','','この端末の同期を停止'),close=el('button','','閉じる');
 actions.append(connect,backup,listButton,disconnect,close);const info=el('div','status');const backupList=el('div');panel.append(header,note,tokenLabel,tokenInput,actions,info,backupList);
 function stateText(s){notice=s;info.textContent=s;}
 function update(){connect.disabled=working;backup.disabled=working||!settings.enabled;listButton.disabled=working||!settings.token;disconnect.disabled=working||!settings.enabled;}
 launch.onclick=()=>{panel.hidden=!panel.hidden;update();};close.onclick=()=>{panel.hidden=true;};
 connect.onclick=async()=>{
- const token=tokenInput.value.trim();if(token.length<24){stateText('24文字以上のNIJI CLIENT TOKENを入力してください');return;}
+ const token=tokenInput.value.trim();if(token.length<24){stateText('24文字以上の'+AUTH_SECRET_NAME+'を入力してください');return;}
  if(working)return;working=true;update();
  try{
   stateText('Niji Cloud接続を確認中…');
@@ -609,10 +615,14 @@ connect.onclick=async()=>{
   else status=await xhr('GET','/status',null,token);
   if(!status.connected||!status.remoteOk)throw Error('pCloudが接続されていません');
   settings.token=token;settings.enabled=true;settings.syncInitialized=false;settings.lastContentSha='';settings.lastRemoteId='';settings.lastSyncAt=0;
-  await GM.setValue(GLOBAL_TOKEN_KEY,token);
+  if(app.id==='pictbland')await GM.setValue(GLOBAL_TOKEN_KEY,token);
   await saveSettings();tokenInput.value='';
   stateText('接続OK。全端末共通データを初回同期します。');
- }catch(e){stateText('⚠️ 接続できません：'+String(e.message||e));}
+ }catch(e){
+  const detail=String(e.message||e);
+  stateText('⚠️ 接続できません：'+detail+
+    (/HTTP 401\b/.test(detail)?'\nCloudflare側の'+AUTH_SECRET_NAME+'と入力値が一致しないか、Secretが未設定です。':''));
+ }
  finally{working=false;update();}
  if(settings.enabled)void syncShared({force:true});
 };
