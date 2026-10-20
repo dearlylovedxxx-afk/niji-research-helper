@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ニコ生 コメント初期非表示・ワンクリック切替
 // @namespace    https://github.com/dearlylovedxxx-afk/niji-research-helper
-// @version      1.1.2
-// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/Lで10秒送り・戻し、K/Spaceで安定して再生・一時停止できます。
+// @version      1.2.0
+// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/Lで10秒送り・戻し、K/Spaceでプレーヤーの再生ボタンを操作します。
 // @author       Marina
 // @match        https://live.nicovideo.jp/watch/*
 // @run-at       document-start
@@ -173,10 +173,41 @@
     }
   }
 
+
+  // NicoLive may restore playback after video.pause()/play(). Control
+  // playback through the site's own button instead.
+  const PLAYBACK_COOLDOWN_MS = 350;
+  let lastToggleAt = -Infinity;
+
+  function getPlaybackButton(video) {
+    const wantPlay = video.paused;
+    const english = wantPlay ? /^(play|resume)(?: video)?$/i : /^pause(?: video)?$/i;
+    const japanese = wantPlay
+      ? /^(再生|再生する|再生を再開|再開|再生・一時停止|再生[/]一時停止)$/
+      : /^(一時停止|一時停止する|再生を一時停止|再生・一時停止|再生[/]一時停止)$/;
+    const stateToken = wantPlay ? /(?:^|[-_ ])(?:play|resume)(?:$|[-_ ])/i
+                                : /(?:^|[-_ ])pause(?:$|[-_ ])/i;
+
+    return [...document.querySelectorAll('button, [role="button"]')].find((button) => {
+      if (button.id === BUTTON_ID || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+      if (!button.getClientRects().length) return false;
+      const labels = [
+        button.getAttribute('aria-label'),
+        button.getAttribute('title'),
+        button.getAttribute('data-tooltip'),
+        button.getAttribute('data-tip'),
+        button.textContent?.trim()
+      ].filter(Boolean);
+      const byLabel = labels.some((value) => japanese.test(value.trim()) || english.test(value.trim()));
+      const byName = stateToken.test(String(button.className || '')) ||
+        stateToken.test(button.getAttribute('data-testid') || '');
+      return byLabel || byName;
+    }) || null;
+  }
+
   function handlePlaybackShortcut(event) {
     if (!currentWatchId || event.isComposing ||
         event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
-
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
     const isSpace = key === ' ' || key === 'spacebar' || event.code === 'Space';
     if (key !== 'j' && key !== 'k' && key !== 'l' && !isSpace) return;
@@ -185,30 +216,25 @@
     const video = getPlayerVideo();
     if (!video) return;
 
-    // Handle BOTH key phases. Otherwise NicoLive or the browser may act on
-    // keyup after we already toggled playback on keydown (double-toggle).
-    // Button focus is not an exception: Space must control the player anywhere
-    // on the watch page unless the user is entering text.
+    if (key === 'k' || isSpace) {
+      const button = getPlaybackButton(video);
+      // If the site's controls are unknown, let native Space operate as before.
+      // Avoid the unreliable direct video.pause() fallback.
+      if (!button) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.type === 'keyup' || event.repeat) return;
+      const now = performance.now();
+      if (now - lastToggleAt < PLAYBACK_COOLDOWN_MS) return;
+      lastToggleAt = now;
+      button.click();
+      return;
+    }
+
     event.preventDefault();
     event.stopImmediatePropagation();
-
     if (event.type === 'keyup') return;
-    if ((key === 'k' || isSpace) && event.repeat) return;
-
-    if (key === 'k' || isSpace) {
-      try {
-        if (video.paused) {
-          const promise = video.play();
-          if (promise && typeof promise.catch === 'function') promise.catch(() => {});
-        } else {
-          video.pause();
-        }
-      } catch {
-        // Avoid passing the key on to a second, conflicting player handler.
-      }
-    } else {
-      seekVideo(video, key === 'j' ? -10 : 10);
-    }
+    seekVideo(video, key === 'j' ? -10 : 10);
   }
 
   window.addEventListener('keydown', handlePlaybackShortcut, true);
