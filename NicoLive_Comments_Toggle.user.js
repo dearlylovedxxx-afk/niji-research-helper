@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ニコ生 コメント初期非表示・ワンクリック切替
 // @namespace    https://github.com/dearlylovedxxx-afk/niji-research-helper
-// @version      1.2.0
-// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/Lで10秒送り・戻し、K/Spaceでプレーヤーの再生ボタンを操作します。
+// @version      1.2.1
+// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/Lで10秒送り・戻し、K/Spaceの再生・停止操作と、Spaceによるページスクロールを抑制します。
 // @author       Marina
 // @match        https://live.nicovideo.jp/watch/*
 // @run-at       document-start
@@ -181,27 +181,28 @@
 
   function getPlaybackButton(video) {
     const wantPlay = video.paused;
-    const english = wantPlay ? /^(play|resume)(?: video)?$/i : /^pause(?: video)?$/i;
-    const japanese = wantPlay
-      ? /^(再生|再生する|再生を再開|再開|再生・一時停止|再生[/]一時停止)$/
-      : /^(一時停止|一時停止する|再生を一時停止|再生・一時停止|再生[/]一時停止)$/;
-    const stateToken = wantPlay ? /(?:^|[-_ ])(?:play|resume)(?:$|[-_ ])/i
-                                : /(?:^|[-_ ])pause(?:$|[-_ ])/i;
-
-    return [...document.querySelectorAll('button, [role="button"]')].find((button) => {
-      if (button.id === BUTTON_ID || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
-      if (!button.getClientRects().length) return false;
+    const expected = wantPlay
+      ? /(?:^|[^一時停止])(?:再生(?:する|を再開)?|再開|play|resume)(?:$|[\s/・(（])/i
+      : /(?:一時停止|pause|再生[／/・]一時停止)/i;
+    const excludes = /(?:再生速度|自動再生|連続再生|プレイリスト|次の動画|おすすめ動画)/i;
+    const candidates = document.querySelectorAll(
+      'button, [role="button"], [class*="_play-button_"], [class*="_pause-button_"], ' +
+      '[data-testid*="play"], [data-testid*="pause"]'
+    );
+    return [...candidates].find((button) => {
+      if (button.id === BUTTON_ID || button.disabled ||
+          button.getAttribute('aria-disabled') === 'true' ||
+          !button.getClientRects().length) return false;
       const labels = [
         button.getAttribute('aria-label'),
         button.getAttribute('title'),
         button.getAttribute('data-tooltip'),
+        button.getAttribute('data-testid'),
         button.getAttribute('data-tip'),
-        button.textContent?.trim()
-      ].filter(Boolean);
-      const byLabel = labels.some((value) => japanese.test(value.trim()) || english.test(value.trim()));
-      const byName = stateToken.test(String(button.className || '')) ||
-        stateToken.test(button.getAttribute('data-testid') || '');
-      return byLabel || byName;
+        button.textContent?.trim(),
+        button.className?.baseVal || button.className
+      ].filter((value) => typeof value === 'string');
+      return labels.some((value) => expected.test(value) && !excludes.test(value));
     }) || null;
   }
 
@@ -213,14 +214,20 @@
     if (key !== 'j' && key !== 'k' && key !== 'l' && !isSpace) return;
     if (isTyping(event)) return;
 
+    // Space normally scrolls the webpage. Prevent that regardless of whether
+    // the video or NicoLive's control buttons have finished mounting.
+    if (isSpace) event.preventDefault();
+
     const video = getPlayerVideo();
     if (!video) return;
 
     if (key === 'k' || isSpace) {
       const button = getPlaybackButton(video);
-      // If the site's controls are unknown, let native Space operate as before.
-      // Avoid the unreliable direct video.pause() fallback.
-      if (!button) return;
+      if (!button) {
+        // Unknown player layout: let NicoLive's own listeners handle the key,
+        // while Space's browser-default page scrolling remains disabled.
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
       if (event.type === 'keyup' || event.repeat) return;
