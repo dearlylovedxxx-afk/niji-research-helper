@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ニコ生 コメント初期非表示・ワンクリック切替
 // @namespace    https://github.com/dearlylovedxxx-afk/niji-research-helper
-// @version      1.2.1
-// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、J/Lで10秒送り・戻し、K/Spaceの再生・停止操作と、Spaceによるページスクロールを抑制します。
+// @version      1.3.0
+// @description  ニコニコ生放送の映像コメントとコメント欄を初期非表示にし、右上のボタンで切り替え、←/→で5秒、J/Lで10秒送り・戻し、K/Spaceの再生・停止操作と、Spaceによるページスクロールを抑制します。
 // @author       Marina
 // @match        https://live.nicovideo.jp/watch/*
 // @run-at       document-start
@@ -120,7 +120,7 @@
     }
   }
 
-  // N3 dial / keyboard: J = -10s, K or Space = play/pause, L = +10s.
+  // N3 dial / keyboard: Left/Right = -/+5s; J/L = -/+10s; K/Space = play/pause.
   // Do not intercept typing in chat/search fields or modified shortcuts.
   function isTyping(event) {
     const path = typeof event.composedPath === 'function'
@@ -211,12 +211,14 @@
         event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
     const isSpace = key === ' ' || key === 'spacebar' || event.code === 'Space';
-    if (key !== 'j' && key !== 'k' && key !== 'l' && !isSpace) return;
+    const isLeft = key === 'arrowleft' || event.code === 'ArrowLeft';
+    const isRight = key === 'arrowright' || event.code === 'ArrowRight';
+    if (key !== 'j' && key !== 'k' && key !== 'l' && !isSpace && !isLeft && !isRight) return;
     if (isTyping(event)) return;
 
-    // Space normally scrolls the webpage. Prevent that regardless of whether
-    // the video or NicoLive's control buttons have finished mounting.
-    if (isSpace) event.preventDefault();
+    // Space and arrow keys may scroll the page if the player isn't ready.
+    // Prevent browser scrolling even when no seekable video exists yet.
+    if (isSpace || isLeft || isRight) event.preventDefault();
 
     const video = getPlayerVideo();
     if (!video) return;
@@ -241,7 +243,8 @@
     event.preventDefault();
     event.stopImmediatePropagation();
     if (event.type === 'keyup') return;
-    seekVideo(video, key === 'j' ? -10 : 10);
+    const deltaSeconds = isLeft ? -5 : isRight ? 5 : key === 'j' ? -10 : 10;
+    seekVideo(video, deltaSeconds);
   }
 
   window.addEventListener('keydown', handlePlaybackShortcut, true);
