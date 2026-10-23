@@ -2,7 +2,7 @@
 // @name         X Full-width Timeline Search Box
 // @name:ja      X 全幅タイムライン用 検索ボックス
 // @namespace    local.x-ui-tweaks
-// @version      1.3.0
+// @version      1.3.1
 // @description  Display only X's own native search bar over the full-width timeline; no custom or fallback search boxes.
 // @description:ja 全幅タイムライン上にX純正の検索欄のみ表示。自作・代替検索欄は一切表示しません。
 // @match        https://x.com/*
@@ -40,7 +40,7 @@
   const css = document.createElement('style');
   css.id = 'cpft-native-only-search-css';
   css.textContent = `
-    body.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
+    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
       div[data-testid="sidebarColumn"] {
       display: block !important;
       position: fixed !important;
@@ -58,21 +58,21 @@
       pointer-events: none !important;
       z-index: 2147483000 !important;
     }
-    body.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
+    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
       div[data-testid="sidebarColumn"] * {
       visibility: hidden !important;
       pointer-events: none !important;
     }
-    body.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
+    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
       div[data-testid="sidebarColumn"] .cpft-native-search-ancestor {
       visibility: visible !important;
       overflow: visible !important;
     }
-    body.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
+    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
       div[data-testid="sidebarColumn"] .cpft-native-search-hidden-ancestor {
       display: block !important;
     }
-    body.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
+    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
       div[data-testid="sidebarColumn"] form.cpft-native-search-form {
       position: fixed !important;
       top: 8px !important;
@@ -89,15 +89,15 @@
       pointer-events: auto !important;
       z-index: 2147483001 !important;
     }
-    body.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
+    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
       div[data-testid="sidebarColumn"] form.cpft-native-search-form,
-    body.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
+    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
       div[data-testid="sidebarColumn"] form.cpft-native-search-form * {
       visibility: visible !important;
       pointer-events: auto !important;
     }
     @media (max-width: 1050px) {
-      body.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
+      body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
         div[data-testid="sidebarColumn"] form.cpft-native-search-form {
         right: 6px !important;
         width: min(265px, calc(100vw - 12px)) !important;
