@@ -2,7 +2,7 @@
 // @name         X Full-width Timeline Search Box
 // @name:ja      X 全幅タイムライン用 検索ボックス
 // @namespace    local.x-ui-tweaks
-// @version      1.1.0
+// @version      1.1.1
 // @description  Restores X's native search box (history and suggestions) as an overlay when Control Panel for Twitter uses full-width timelines.
 // @description:ja Control Panel for Twitterの全幅表示を保ちながら、履歴・候補付きのX純正検索欄を右上に表示。
 // @match        https://x.com/*
@@ -29,7 +29,9 @@
   overlayStyle.textContent = `
     body.cpft-native-search-overlay:is(.HomeTimeline,.List,.Community)
       div[data-testid="sidebarColumn"] {
-      display: block !important;
+      display: flex !important;
+      flex-direction: column !important;
+      align-items: stretch !important;
       position: fixed !important;
       top: 0 !important;
       right: 14px !important;
