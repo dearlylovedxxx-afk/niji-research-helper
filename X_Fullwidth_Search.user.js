@@ -2,7 +2,7 @@
 // @name         X Full-width Timeline Search Box
 // @name:ja      X 全幅タイムライン用 検索ボックス
 // @namespace    local.x-ui-tweaks
-// @version      1.0.1
+// @version      1.0.2
 // @description  Overlay a keyword search box without taking any layout space from the timeline.
 // @description:ja X本体のレイアウトを変更せずに検索欄を固定表示します。Control Panel for Twitterの全幅表示と併用できます。
 // @match        https://x.com/*
@@ -130,7 +130,7 @@
   function updateVisibility() {
     if (location.pathname === prevPath) return;
     prevPath = location.pathname;
-    form.hidden = /^\\/(search|explore)(?:\\/|$)/.test(prevPath);
+    form.hidden = prevPath === '/search' || prevPath.startsWith('/search/') || prevPath === '/explore' || prevPath.startsWith('/explore/');
   }
   updateVisibility();
   const timer = setInterval(updateVisibility, 1200);
