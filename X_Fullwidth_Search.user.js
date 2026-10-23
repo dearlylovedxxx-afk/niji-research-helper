@@ -2,9 +2,9 @@
 // @name         X Full-width Timeline Search Box
 // @name:ja      X 全幅タイムライン用 検索ボックス
 // @namespace    local.x-ui-tweaks
-// @version      1.0.2
-// @description  Overlay a keyword search box without taking any layout space from the timeline.
-// @description:ja X本体のレイアウトを変更せずに検索欄を固定表示します。Control Panel for Twitterの全幅表示と併用できます。
+// @version      1.1.0
+// @description  Restores X's native search box (history and suggestions) as an overlay when Control Panel for Twitter uses full-width timelines.
+// @description:ja Control Panel for Twitterの全幅表示を保ちながら、履歴・候補付きのX純正検索欄を右上に表示。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @run-at       document-idle
@@ -17,122 +17,189 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  if (document.getElementById('cpft-independent-search-host')) return;
+  if (window.__cpftNativeSearchBooted) return;
+  window.__cpftNativeSearchBooted = true;
 
-  // Avoid inserting UI into the site's <body> or changing any of X's layout CSS.
-  // In particular, Control Panel for Twitter controls primaryColumn widths and
-  // sidebar visibility itself; this script deliberately does not override them.
-  const host = document.createElement('div');
-  host.id = 'cpft-independent-search-host';
-  host.style.setProperty('position', 'fixed', 'important');
-  host.style.setProperty('top', '0', 'important');
-  host.style.setProperty('left', '0', 'important');
-  host.style.setProperty('width', '0', 'important');
-  host.style.setProperty('height', '0', 'important');
-  host.style.setProperty('pointer-events', 'none', 'important');
-  host.style.setProperty('z-index', '2147483000', 'important');
-
-  const root = host.attachShadow({mode: 'open'});
-  const style = document.createElement('style');
-  style.textContent = `
-    :host { all: initial; }
-    *, *::before, *::after { box-sizing: border-box; }
-    .search {
-      position: fixed;
-      top: 10px;
-      right: 18px;
-      z-index: 1;
-      width: min(290px, calc(100vw - 36px));
-      height: 44px;
-      padding: 0 9px 0 15px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      pointer-events: auto;
-      border: 1px solid #cfd9de;
-      border-radius: 23px;
-      background: #eff3f4;
-      color: #536471;
-      box-shadow: 0 2px 9px #0000001a;
-      font: 14px/1.4 system-ui, -apple-system, sans-serif;
+  // The extension sets display:none!important on the entire sidebar and
+  // max-width:990px on the main timeline. Move *the native sidebar* out of
+  // normal flex layout with position:fixed, while revealing only its search UI.
+  // This keeps the actual React search component (history/suggestions) alive.
+  const overlayStyle = document.createElement('style');
+  overlayStyle.id = 'cpft-native-search-styles';
+  overlayStyle.textContent = `
+    body.cpft-native-search-overlay:is(.HomeTimeline,.List,.Community)
+      div[data-testid="sidebarColumn"] {
+      display: block !important;
+      position: fixed !important;
+      top: 0 !important;
+      right: 14px !important;
+      bottom: auto !important;
+      left: auto !important;
+      width: 350px !important;
+      max-width: min(350px, calc(100vw - 28px)) !important;
+      height: 65px !important;
+      min-height: 0 !important;
+      max-height: 65px !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: visible !important;
+      flex: none !important;
+      z-index: 2147483000 !important;
+      pointer-events: none !important;
     }
-    .search[hidden] { display: none !important; }
-    .search:focus-within { border-color: #1d9bf0; background: #fff; }
-    input {
-      flex: 1;
-      width: 0;
-      min-width: 0;
-      padding: 8px 0;
-      border: none;
-      outline: none;
-      background: none;
-      color: #0f1419;
-      font: inherit;
+    body.cpft-native-search-overlay:is(.HomeTimeline,.List,.Community)
+      div[data-testid="sidebarColumn"] * {
+      visibility: hidden !important;
+      pointer-events: none !important;
     }
-    input::placeholder { color: #536471; opacity: 1; }
-    button {
-      display: grid;
-      place-items: center;
-      flex: none;
-      width: 30px;
-      height: 30px;
-      padding: 0;
-      cursor: pointer;
-      border: 0;
-      border-radius: 50%;
-      color: #536471;
-      background: transparent;
+    body.cpft-native-search-overlay:is(.HomeTimeline,.List,.Community)
+      div[data-testid="sidebarColumn"] .cpft-search-path {
+      visibility: visible !important;
     }
-    button:hover { background: #00000010; }
-    button:focus-visible, input:focus-visible { outline: 2px solid #1d9bf0; outline-offset: 2px; }
-    @media (prefers-color-scheme: dark) {
-      .search { background: #202327; border-color: #555a5e; color: #aaa; }
-      .search:focus-within { background: #16181c; }
-      input { color: #e7e9ea; }
-      input::placeholder, button { color: #9aa0a6; }
-      button:hover { background: #ffffff18; }
+    body.cpft-native-search-overlay:is(.HomeTimeline,.List,.Community)
+      div[data-testid="sidebarColumn"] .cpft-search-scope,
+    body.cpft-native-search-overlay:is(.HomeTimeline,.List,.Community)
+      div[data-testid="sidebarColumn"] .cpft-search-scope * {
+      visibility: visible !important;
+      pointer-events: auto !important;
     }
-    @media (max-width: 750px) {
-      .search { right: 8px; top: 8px; width: min(220px, calc(100vw - 16px)); }
+    @media (max-width: 1200px) {
+      body.cpft-native-search-overlay:is(.HomeTimeline,.List,.Community)
+        div[data-testid="sidebarColumn"] {
+        width: 295px !important;
+        right: 6px !important;
+      }
     }
   `;
+  document.head.appendChild(overlayStyle);
 
-  const form = document.createElement('form');
-  form.className = 'search';
-  form.setAttribute('role', 'search');
-  form.setAttribute('aria-label', 'Xの投稿を検索');
+  // Previous versions created a separate fake form. Remove it if a tab has
+  // retained the old DOM after an in-place userscript reload.
+  document.getElementById('cpft-independent-search-host')?.remove();
+  document.getElementById('cpft-floating-search')?.remove();
 
+  const fallbackHost = document.createElement('div');
+  fallbackHost.id = 'cpft-native-search-fallback';
+  fallbackHost.style.cssText = 'position:fixed!important;top:8px!important;right:14px!important;z-index:2147482999!important;pointer-events:none!important;width:0!important;height:0!important';
+  const shadow = fallbackHost.attachShadow({mode:'open'});
+  const fallbackCss = document.createElement('style');
+  fallbackCss.textContent = `
+    * { box-sizing: border-box; }
+    form { position:fixed; top:9px; right:14px; display:flex; align-items:center; gap:8px;
+           height:44px; width:280px; padding:0 12px; border:1px solid #8899a6;
+           border-radius:25px; background:#eff3f4; color:#536471;
+           font:13px system-ui; pointer-events:auto; }
+    form[hidden] { display:none!important; }
+    input { width:100%; flex:1; min-width:0; outline:none; border:none;
+            background:transparent; font:inherit; color:#0f1419; }
+    button { border:0; background:transparent; color:inherit; cursor:pointer; font:inherit; }
+    @media(prefers-color-scheme:dark) {
+      form { background:#202327; color:#b7bec3; }
+      input { color:#fff; }
+    }
+  `;
+  const fallback = document.createElement('form');
+  fallback.hidden = true;
+  fallback.setAttribute('role','search');
+  fallback.setAttribute('aria-label','簡易検索（Xの純正検索欄が見つかりません）');
   const input = document.createElement('input');
   input.type = 'search';
-  input.placeholder = 'キーワード検索';
-  input.autocomplete = 'off';
-  input.setAttribute('aria-label', 'キーワード検索');
-
+  input.placeholder = '簡易検索';
+  input.setAttribute('aria-label','キーワード');
   const button = document.createElement('button');
-  button.type = 'submit';
-  button.setAttribute('aria-label', '検索');
-  button.innerHTML = '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>';
-  form.append(input, button);
-  form.addEventListener('submit', event => {
-    event.preventDefault();
-    const q = input.value.trim();
-    if (!q) { input.focus(); return; }
-    const url = new URL('/search', location.origin);
-    url.searchParams.set('q', q);
-    url.searchParams.set('src', 'typed_query');
-    location.assign(url.toString());
+  button.type='submit';
+  button.textContent='検索';
+  fallback.append(input,button);
+  fallback.addEventListener('submit', e => {
+    e.preventDefault();
+    const q=input.value.trim();
+    if(!q)return;
+    const u=new URL('/search',location.origin);
+    u.searchParams.set('q',q);
+    u.searchParams.set('src','typed_query');
+    location.assign(u.href);
   });
-  root.append(style, form);
-  document.documentElement.appendChild(host);
+  shadow.append(fallbackCss,fallback);
+  document.documentElement.appendChild(fallbackHost);
 
-  // The native search UI already appears on the Search and Explore pages.
-  let prevPath = '';
-  function updateVisibility() {
-    if (location.pathname === prevPath) return;
-    prevPath = location.pathname;
-    form.hidden = prevPath === '/search' || prevPath.startsWith('/search/') || prevPath === '/explore' || prevPath.startsWith('/explore/');
+  let markedScope = null;
+  let marked = [];
+  let scanCount = 0;
+  const fullscreenPage = () => document.body?.matches('.HomeTimeline,.List,.Community');
+
+  function clearMarks() {
+    for (const element of marked) {
+      element.classList.remove('cpft-search-path', 'cpft-search-scope');
+    }
+    marked=[];
+    markedScope=null;
   }
-  updateVisibility();
-  const timer = setInterval(updateVisibility, 1200);
-  window.addEventListener('pagehide', () => clearInterval(timer), {once: true});
+
+  function markNativeSearch(inputElement, sidebar) {
+    const nativeForm =
+      inputElement.closest('[role="search"]') ||
+      inputElement.closest('form') ||
+      inputElement.parentElement;
+    if (!nativeForm) return false;
+    // Include the adjacent search dropdown, if it lives beside the form.
+    const scope = nativeForm.parentElement !== sidebar && nativeForm.parentElement
+      ? nativeForm.parentElement : nativeForm;
+    if (scope === markedScope && scope.isConnected) return true;
+    clearMarks();
+    markedScope=scope;
+    scope.classList.add('cpft-search-scope');
+    marked.push(scope);
+    for (let ancestor=scope.parentElement; ancestor && ancestor!==sidebar; ancestor=ancestor.parentElement) {
+      ancestor.classList.add('cpft-search-path');
+      marked.push(ancestor);
+    }
+    return true;
+  }
+
+  function refresh() {
+    const body=document.body;
+    if (!body || !fullscreenPage()) {
+      body?.classList.remove('cpft-native-search-overlay');
+      fallback.hidden=true;
+      clearMarks();
+      return;
+    }
+    const sidebar=document.querySelector('div[data-testid="sidebarColumn"]');
+    const primary=document.querySelector('div[data-testid="primaryColumn"]');
+    if (!sidebar || !primary || !body.classList.contains('Sidebar')) {
+      body.classList.remove('cpft-native-search-overlay');
+      fallback.hidden=true;
+      clearMarks();
+      return;
+    }
+
+    // The Control Panel for Twitter "full width content" option sets 990px.
+    // Detect it, so toggling that setting OFF returns to the native layout.
+    const maxWidth=parseFloat(getComputedStyle(primary).maxWidth);
+    const wideMode=Number.isFinite(maxWidth) && maxWidth>=900;
+    if (!wideMode) {
+      body.classList.remove('cpft-native-search-overlay');
+      fallback.hidden=true;
+      clearMarks();
+      return;
+    }
+    const searchInput =
+      sidebar.querySelector('input[data-testid="SearchBox_Search_Input"]') ||
+      sidebar.querySelector('[role="search"] input') ||
+      sidebar.querySelector('form[role="search"] input');
+
+    if (searchInput && markNativeSearch(searchInput,sidebar)) {
+      body.classList.add('cpft-native-search-overlay');
+      fallback.hidden=true;
+    } else {
+      body.classList.remove('cpft-native-search-overlay');
+      clearMarks();
+      // No fake history: fallback is explicitly labeled as simple search.
+      // A click on X's Explore section still exposes its original search UI.
+      fallback.hidden=++scanCount < 4;
+    }
+  }
+  refresh();
+  const interval=setInterval(refresh, 1100);
+  window.addEventListener('pagehide', () => clearInterval(interval), {once:true});
 })();
