@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.114
+// @version      1.0.115
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.114';
+  const VERSION = '1.0.115';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -7753,36 +7753,96 @@
   }
 
   let youtubeSeekHandoffRun = 0;
+  let youtubeExplicitSeekLast = {key:'',startedAt:0};
+
+  // An incoming YouTube timestamp is an intentional seek, not a watch-history
+  // resume. This also covers external Wiki links that do not create a GM handoff.
+  function youtubeIncomingTimestampSeconds(rawValue) {
+    const raw = String(rawValue ?? '').trim().toLowerCase();
+    if (!raw || raw.length > 50) return null;
+    let seconds = null;
+    if (/^\d+s?$/.test(raw)) seconds = Number(raw.replace(/s$/, ''));
+    else if (/^\d{1,3}:\d{2}(?::\d{2})?$/.test(raw)) {
+      const parts = raw.split(':').map(Number);
+      if (parts.slice(1).some(p => p >= 60)) return null;
+      seconds = parts.reduce((total, part) => total * 60 + part, 0);
+    } else {
+      // 1h20m30s, 4m5s, 1h, etc. are emitted by older Wiki links.
+      const match = raw.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/);
+      if (match && (match[1] || match[2] || match[3])) {
+        seconds = Number(match[1] || 0) * 3600 +
+          Number(match[2] || 0) * 60 + Number(match[3] || 0);
+      }
+    }
+    return Number.isSafeInteger(seconds) && seconds >= 0 && seconds <= 7 * 24 * 3600
+      ? seconds : null;
+  }
+
+  function youtubeIncomingTimestampFromUrl() {
+    if (!isYoutubeHost()) return null;
+    try {
+      const url = new URL(location.href);
+      const videoId = currentYoutubeVideoId();
+      if (!videoId) return null;
+      const params = [url.searchParams];
+      if (url.hash && url.hash.length > 1) {
+        params.push(new URLSearchParams(url.hash.slice(1)));
+      }
+      for (const query of params) {
+        for (const key of ['t', 'start', 'time_continue']) {
+          if (!query.has(key)) continue;
+          const seconds = youtubeIncomingTimestampSeconds(query.get(key));
+          if (seconds !== null) return {videoId,seconds};
+        }
+      }
+    } catch (error) {
+      console.debug('[NRH][YouTube timestamp URL]', String(error?.message || error));
+    }
+    return null;
+  }
 
   async function applyYoutubeSeekHandoff() {
     if (!isYoutubeHost()) return false;
 
+    // The URL takes precedence over GM handoff: a timestamped link from
+    // wikiwiki.jp does not (and should not need to) run our userscript.
+    const incoming = youtubeIncomingTimestampFromUrl();
     let handoff = null;
     try { handoff = await gmGet(KEY_YT_SEEK_HANDOFF, null); }
-    catch { return false; }
+    catch { if (!incoming) return false; }
 
-    const videoId = String(handoff?.videoId || '');
-    const seconds = Number(handoff?.seconds);
+    const handoffVideoId = String(handoff?.videoId || '');
+    const handoffSeconds = Number(handoff?.seconds);
     const createdAt = Number(handoff?.createdAt || 0);
-    if (
-      !videoId ||
-      !Number.isFinite(seconds) ||
-      seconds < 0 ||
-      !createdAt ||
-      Date.now() - createdAt > 2 * 60 * 1000
-    ) {
+    const handoffValid = !!(
+      handoffVideoId &&
+      Number.isFinite(handoffSeconds) &&
+      handoffSeconds >= 0 &&
+      createdAt &&
+      Date.now() - createdAt <= 2 * 60 * 1000
+    );
+    if (!incoming && !handoffValid) {
       if (handoff) void gmSet(KEY_YT_SEEK_HANDOFF, null).catch(() => {});
       return false;
     }
-
+    const videoId = incoming?.videoId || handoffVideoId;
+    const seconds = incoming ? incoming.seconds : handoffSeconds;
     if (currentYoutubeVideoId() !== videoId) return false;
 
-    // Only invalidate a previous seek guard AFTER finding a new valid handoff.
-    // A second yt-navigate-finish / popstate callback often runs after the
-    // handoff has been consumed; it must not cancel the scheduled corrections.
+    // Ignore duplicate SPA navigation events for the same explicit timestamp
+    // while its corrective seeks are already scheduled.
+    if (incoming) {
+      const key = videoId + ':' + seconds;
+      if (youtubeExplicitSeekLast.key === key &&
+          Date.now() - youtubeExplicitSeekLast.startedAt < 6400) return true;
+      youtubeExplicitSeekLast = {key,startedAt:Date.now()};
+    }
+
     const run = ++youtubeSeekHandoffRun;
-    // 一度この動画で受け取ったら再利用しない。以降はこのページ内のガードだけで処理する。
-    void gmSet(KEY_YT_SEEK_HANDOFF, null).catch(() => {});
+    // A handoff should be one-shot; never discard another video's valid seek.
+    if (handoff && (!handoffValid || handoffVideoId === videoId)) {
+      void gmSet(KEY_YT_SEEK_HANDOFF, null).catch(() => {});
+    }
 
     const startedAt = Date.now();
     const delays = [0, 350, 900, 1700, 2800, 4300, 5600];
@@ -7795,8 +7855,8 @@
       const current = Number(video.currentTime);
       if (!Number.isFinite(current)) return;
 
-      // 正常に指定位置から再生が進んでいる場合は触らない。
-      // 「前回の続き」へ大きく飛ばされた時だけ戻す。
+      // Do not interrupt playback already progressing from the requested time.
+      // Correct only a substantial jump to YouTube's remembered resume point.
       const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
       const expected = seconds + (video.paused ? 0 : elapsed);
       const nearRequested = Math.abs(current - seconds) <= 7;
@@ -7804,11 +7864,11 @@
       if (!nearRequested && !nearExpected) {
         try {
           video.currentTime = seconds;
-          console.info('[NRH] YouTube resume position overridden by requested timestamp', {
+          console.info('[NRH] YouTube resume overridden by requested timestamp', {
             videoId, seconds, previous: current,
           });
         } catch (err) {
-          console.debug('[NRH][timestamp handoff seek]', err?.message || err);
+          console.debug('[NRH][timestamp seek]', err?.message || err);
         }
       }
     };
