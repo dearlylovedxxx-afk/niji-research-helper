@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.1.8
-// @description  X高度検索・保存検索・履歴・いいね順・純正検索欄を全幅タイムラインに表示。Niji Cloud対応。
+// @version      1.2.0
+// @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @run-at       document-idle
@@ -14,7 +14,7 @@
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.1.8', KEY='xsf_userscript_v1';
+const VERSION='1.2.0', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
 const hidden=new Map();
@@ -100,8 +100,33 @@ const panel=E('section');panel.id='panel';panel.hidden=true;const sorted=E('sect
 function closeAll(){panel.hidden=true;sorted.hidden=true;}
 launch.onclick=()=>{const open=panel.hidden;closeAll();if(open){panel.hidden=false;renderPanel();}};
 const status=()=>sh.querySelector('#xsf-status');function message(t){if(status())status().textContent=t;}
-function renderPanel(){panel.replaceChildren();panel.append(E('h2','',`🔎 X Search Favorites v${VERSION}`));const tabs=E('div','tabs');const views=E('div');panel.append(tabs,views);for(const [id,label] of [['builder','検索'],['saved','⭐ 保存'],['history','履歴']]){const b=E('button','',label);b.onclick=()=>{[...views.children].forEach(v=>v.hidden=v.dataset.tab!==id);};tabs.append(b);}
+function renderPanel(){panel.replaceChildren();panel.append(E('h2','',`🔎 X Search Favorites v${VERSION}`));const tabs=E('div','tabs');const views=E('div');panel.append(tabs,views);for(const [id,label] of [['builder','検索'],['saved','⭐ 保存'],['history','履歴'],['layout','🖥️ 表示']]){const b=E('button','',label);b.onclick=()=>{[...views.children].forEach(v=>v.hidden=v.dataset.tab!==id);};tabs.append(b);}
 const builder=E('div','tab');builder.dataset.tab='builder';const saved=E('div','tab');saved.dataset.tab='saved';saved.hidden=true;const history=E('div','tab');history.dataset.tab='history';history.hidden=true;views.append(builder,saved,history);
+const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views.append(layout);
+(function renderDisplaySettings(){
+  const api=window.__xsfLayoutAPI;
+  if(!api){layout.append(E('div','muted','表示設定の初期化を確認できません。Xを再読み込みしてください。'));return;}
+  const msg=E('div','muted','Control Panel for Twitterを無効にしてから、代替機能をオンにしてください。元の拡張機能を削除する前に各画面で確認を。設定はこのブラウザ内に保存されます。');
+  layout.append(msg);
+  const sections=[
+    ['切り替え',[['enabled','表示変更機能を有効にする']]],
+    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
+    ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制']]],
+    ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
+  ];
+  for(const [heading,items] of sections){
+    layout.append(E('h3','',heading));
+    for(const [key,label] of items){
+      const row=E('label','check');
+      row.style.cssText='display:flex;gap:9px;align-items:flex-start;margin:7px 0;font-size:12px';
+      const control=E('input');control.type='checkbox';control.checked=!!api.get()[key];
+      control.style.cssText='margin-top:3px;flex:none';
+      control.onchange=()=>api.set(key,control.checked);
+      row.append(control,E('span','',label));layout.append(row);
+    }
+  }
+  layout.append(E('div','muted','補足：時系列への強制切り替え、引用・リポストの独自処理、旧認証バッジやツイート元の復元、テーマの強制変更などは移植していません。'));
+})();
 function inp(parent,id,label,kind){const l=E('label','',label),v=E(kind==='textarea'?'textarea':kind==='select'?'select':'input');v.id='xsf-'+id;if(kind==='checkbox'){v.type='checkbox';l.className='check';l.prepend(v);parent.append(l);}else{if(kind==='select'){const opts=id==='language'?[['','指定なし'],['ja','日本語'],['en','英語'],['ko','韓国語'],['zh','中国語']]:[['','指定なし'],['images','画像'],['videos','動画'],['media','画像または動画']];for(const [val,text] of opts){const o=E('option','',text);o.value=val;v.append(o);}}else if(kind!=='textarea')v.type=kind;parent.append(l,v);}v.value=currentFields[id]||'';if(kind==='checkbox')v.checked=!!currentFields[id];v.oninput=()=>{currentFields[id]=kind==='checkbox'?v.checked:v.value;queryArea.value=buildQuery(currentFields);previewEdited=false;};return v;}
 const tools=E('div','actions');tools.dataset.ncbSlot='x';const importCurrent=E('button','', '現在のX検索を取り込む');tools.append(importCurrent,filterBtn,sortBtn);builder.append(tools);builder.append(E('div','muted','本文一致といいね順はXの検索結果で使えます。☁️バックアップもこの欄から開けます。'));
 const queryArea=E('textarea');queryArea.placeholder='検索式（直接編集可）';for(const [id,label,kind] of fields)inp(builder,id,label,kind);builder.append(E('label','','検索式（直接編集可能）'),queryArea);queryArea.value=buildQuery(currentFields);queryArea.oninput=()=>{previewEdited=true;};
@@ -342,165 +367,211 @@ load();currentFields=blank();
 })();
 
 
-// X native search display v1.3.1 (formerly standalone X_Fullwidth_Search.user.js).
+/**
+ * UI appearance migration from Control Panel for Twitter.
+ * This is NOT an identical replacement: network rewriting, premium checkmark
+ * conversion, tweet source restoration, and tweet feed algorithms are NOT copied.
+ * All UI behavior is opt-in, preserving the existing X Search Favorites data.
+ */
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  if (window.__cpftNativeOnlySearchActive) return;
-  window.__cpftNativeOnlySearchActive = true;
-
-  // Remove DOM left by earlier versions if a script is reloaded in-place.
-  // These IDs belonged exclusively to our self-made search boxes.
+  window.__xsfLayoutCleanup?.();
+  // Remove DOM nodes from the old standalone fake-search implementations.
   for (const id of [
-    'cpft-fullwidth-search-fallback',
-    'cpft-native-search-fallback',
-    'cpft-independent-search-host',
-    'cpft-floating-search',
+    'cpft-floating-search','cpft-independent-search-host',
+    'cpft-native-search-fallback','cpft-fullwidth-search-fallback',
   ]) document.getElementById(id)?.remove();
-
-  // Eliminate all previous layout overrides before applying the native-only ones.
-  document.getElementById('cpft-native-search-styles')?.remove();
-  document.getElementById('cpft-fullwidth-native-search-css')?.remove();
-  document.getElementById('cpft-native-only-search-css')?.remove();
-
-  // Never create an input, button, form, or fake history list.
-  // Keep X's React search form in its original DOM, preserving native history
-  // and suggestions. Only lift the existing UI above the hidden sidebar.
-  const css = document.createElement('style');
-  css.id = 'cpft-native-only-search-css';
-  css.textContent = `
-    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
-      div[data-testid="sidebarColumn"] {
-      display: block !important;
-      position: fixed !important;
-      inset: 0 0 auto auto !important;
-      width: 0 !important;
-      min-width: 0 !important;
-      max-width: 0 !important;
-      height: 0 !important;
-      min-height: 0 !important;
-      max-height: 0 !important;
-      flex: none !important;
-      margin: 0 !important;
-      padding: 0 !important;
-      overflow: visible !important;
-      pointer-events: none !important;
-      z-index: 2147483000 !important;
-    }
-    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
-      div[data-testid="sidebarColumn"] * {
-      visibility: hidden !important;
-      pointer-events: none !important;
-    }
-    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
-      div[data-testid="sidebarColumn"] .cpft-native-search-ancestor {
-      visibility: visible !important;
-      overflow: visible !important;
-    }
-    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
-      div[data-testid="sidebarColumn"] .cpft-native-search-hidden-ancestor {
-      display: block !important;
-    }
-    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
-      div[data-testid="sidebarColumn"] form.cpft-native-search-form {
-      position: fixed !important;
-      top: 8px !important;
-      right: 14px !important;
-      bottom: auto !important;
-      left: auto !important;
-      width: min(340px, calc(100vw - 28px)) !important;
-      max-width: min(340px, calc(100vw - 28px)) !important;
-      min-width: 0 !important;
-      margin: 0 !important;
-      transform: none !important;
-      overflow: visible !important;
-      visibility: visible !important;
-      pointer-events: auto !important;
-      z-index: 2147483001 !important;
-    }
-    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
-      div[data-testid="sidebarColumn"] form.cpft-native-search-form,
-    body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
-      div[data-testid="sidebarColumn"] form.cpft-native-search-form * {
-      visibility: visible !important;
-      pointer-events: auto !important;
-    }
-    @media (max-width: 1050px) {
-      body.cpft-native-search-on.cpft-native-search-on:is(.HomeTimeline,.List,.Community)
-        div[data-testid="sidebarColumn"] form.cpft-native-search-form {
-        right: 6px !important;
-        width: min(265px, calc(100vw - 12px)) !important;
-        max-width: min(265px, calc(100vw - 12px)) !important;
-      }
-    }
-  `;
-  document.head.appendChild(css);
-
-  let marked = [];
-  let activeForm = null;
-
-  const onEligiblePage = () =>
-    Boolean(document.body?.matches('.HomeTimeline,.List,.Community')) &&
-    !/^\/(?:search|explore)(?:\/|$)/.test(location.pathname);
-
-  function reset() {
-    document.body?.classList.remove('cpft-native-search-on');
-    for (const el of marked) {
-      el.classList.remove('cpft-native-search-form',
-        'cpft-native-search-ancestor', 'cpft-native-search-hidden-ancestor');
-    }
-    marked = [];
-    activeForm = null;
+  for (const id of ['cpft-native-search-styles','cpft-fullwidth-native-search-css','cpft-native-only-search-css']) {
+    document.getElementById(id)?.remove();
   }
+  document.body?.classList.remove('cpft-native-search-on');
 
-  function findNativeForm(sidebar) {
-    const node = sidebar.querySelector('input[data-testid="SearchBox_Search_Input"]') ||
-      sidebar.querySelector('form[role="search"] input') ||
+  const KEY='xsf_display_settings_v1';
+  const defaults={
+    enabled:false,
+    wideTimeline:true,wideTweet:true,nativeSearch:true,
+    hideSidebarContent:true,hideForYou:false,hidePromoted:false,
+    hideGrok:true,hidePremium:true,hideSubscriptions:true,
+    hideMoney:true,hideJobs:true,hideAnalytics:true,
+    hideMessageDrawer:true,hideWhoToFollow:true,
+    monochromeButtons:false,
+  };
+  let options={...defaults};
+  try{
+    const saved=JSON.parse(localStorage.getItem(KEY)||'null');
+    if(saved && typeof saved==='object') for(const k of Object.keys(defaults)) {
+      if(typeof saved[k]==='boolean') options[k]=saved[k];
+    }
+  }catch(e){console.warn('[XSF display] settings could not be loaded',e);}
+
+  let style=document.getElementById('xsf-layout-style');
+  if(!style){style=document.createElement('style');style.id='xsf-layout-style';document.head.append(style);}
+  const hiddenSelectors={
+    hideGrok:[
+      'header nav a[href="/i/grok"]','[role="menuitem"] a[href="/i/grok"]',
+      'a[href="/i/grok"]','button[data-testid="grokImgGen"]',
+      '[data-testid="grokButton"]','[data-testid^="followups_"]'
+    ],
+    hidePremium:[
+      'header nav a[href^="/i/premium"]','header nav a[href^="/i/verified"]',
+      '[role="menuitem"] a[href^="/i/premium_sign_up"]',
+      '[role="menuitem"] a[href="/i/account_analytics"]',
+      '[data-testid="editWithPremium"]','[data-testid="highlightUpsell"]',
+      '[data-testid="super-upsell-UpsellCardRenderProperties"]'
+    ],
+    hideSubscriptions:[
+      'header nav a[href*="creator-subscriptions"]',
+      'a[href$="/creator-subscriptions/subscriptions"]',
+      '[data-testid$="-subscribe"]'
+    ],
+    hideMoney:[
+      'header nav a[href="/i/money"]','a[href="/i/money"]',
+      '[data-testid="ownProfilePaymentsButton"]',
+      '[data-testid="ownProfilePaymentsButtonWithBalance"]'
+    ],
+    hideJobs:[
+      'header nav a[href="/jobs"]','[role="menuitem"] a[href="/jobs"]',
+      '[data-testid="jobs"]'
+    ],
+    hideAnalytics:[
+      '[data-testid="tweet"] [role="group"] > div:has(> a[href$="/analytics"])',
+      'header nav a[href="/i/account_analytics"]'
+    ],
+    hideMessageDrawer:['[data-testid="chat-drawer-root"]'],
+    hidePromoted:['[data-testid="placementTracking"]'],
+    hideWhoToFollow:[
+      'aside[role="complementary"]:has(a[href^="/i/connect_people"])',
+      '[data-testid="UserCell"]:has(a[href^="/i/connect_people"])'
+    ]
+  };
+  const bodyClasses=[
+    'xsf-layout-full','xsf-hide-side-items','xsf-native-search-on','xsf-hide-for-you',
+    'xsf-monochrome-buttons'
+  ];
+  let marked=[],activeSearchForm=null;
+  function resetSearch(){
+    document.body?.classList.remove('xsf-native-search-on');
+    for(const node of marked){
+      node.classList.remove('xsf-native-search-form','xsf-native-search-ancestor','xsf-native-search-hidden-ancestor');
+    }
+    marked=[];activeSearchForm=null;
+  }
+  function applyCSS(){
+    const rules=[];
+    rules.push(`
+      body.xsf-layout-full header[role="banner"] {flex-grow:0!important}
+      body.xsf-layout-full main[role="main"] > div {width:100%!important;max-width:none!important}
+      body.xsf-layout-full [data-testid="primaryColumn"] {
+        flex:1 1 auto!important;min-width:0!important;width:100%!important;max-width:990px!important
+      }
+      body.xsf-layout-full [data-testid="primaryColumn"] > div:first-child > div:last-child {
+        max-width:990px!important
+      }
+      body.xsf-layout-full [data-testid="sidebarColumn"] {display:none!important}
+      body.xsf-hide-side-items [data-testid="sidebarColumn"] aside[role="complementary"] {
+        display:none!important
+      }
+      body.xsf-hide-for-you [data-testid="primaryColumn"] nav[role="navigation"] [role="tablist"] > div:first-child {display:none!important}
+      body.xsf-monochrome-buttons article[data-testid="tweet"] [role="group"] button:not(:hover) {
+        filter:grayscale(1)
+      }
+      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] {
+        display:block!important;position:fixed!important;inset:0 0 auto auto!important;
+        width:0!important;min-width:0!important;max-width:0!important;
+        height:0!important;min-height:0!important;max-height:0!important;
+        padding:0!important;margin:0!important;flex:none!important;
+        overflow:visible!important;pointer-events:none!important;z-index:2147483000!important
+      }
+      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] * {
+        visibility:hidden!important;pointer-events:none!important
+      }
+      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] .xsf-native-search-ancestor {
+        visibility:visible!important;overflow:visible!important
+      }
+      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] .xsf-native-search-hidden-ancestor {
+        display:block!important
+      }
+      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] form.xsf-native-search-form {
+        position:fixed!important;top:8px!important;right:14px!important;bottom:auto!important;left:auto!important;
+        width:min(340px,calc(100vw - 28px))!important;max-width:min(340px,calc(100vw - 28px))!important;
+        margin:0!important;transform:none!important;overflow:visible!important;
+        visibility:visible!important;pointer-events:auto!important;z-index:2147483001!important
+      }
+      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] form.xsf-native-search-form,
+      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] form.xsf-native-search-form * {
+        visibility:visible!important;pointer-events:auto!important
+      }
+      @media(max-width:1080px){
+        body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] form.xsf-native-search-form {
+          right:6px!important;width:min(240px,calc(100vw - 12px))!important;
+        }
+      }
+    `);
+    if(options.enabled) for (const [key, selectors] of Object.entries(hiddenSelectors)) {
+      if(!options[key])continue;
+      rules.push(selectors.map(s=>'body '+s).join(',\n')+' {display:none!important}');
+    }
+    style.textContent=options.enabled?rules.join('\n'):'';
+  }
+  function markSearch(form,sidebar){
+    if(form===activeSearchForm && form.isConnected)return;
+    resetSearch();activeSearchForm=form;
+    form.classList.add('xsf-native-search-form');marked.push(form);
+    for(let parent=form.parentElement; parent && parent!==sidebar;parent=parent.parentElement){
+      parent.classList.add('xsf-native-search-ancestor');
+      if(getComputedStyle(parent).display==='none')parent.classList.add('xsf-native-search-hidden-ancestor');
+      marked.push(parent);
+    }
+  }
+  function syncSearch(){
+    const body=document.body;
+    if(!body?.classList.contains('xsf-layout-full') || !options.enabled || !options.nativeSearch){
+      resetSearch();return;
+    }
+    const sidebar=document.querySelector('[data-testid="sidebarColumn"]');
+    if(!sidebar){resetSearch();return;}
+    const input=sidebar.querySelector('input[data-testid="SearchBox_Search_Input"]')||
+      sidebar.querySelector('form[role="search"] input')||
       sidebar.querySelector('[role="search"] input');
-    return node?.closest('form[role="search"]') || node?.closest('form') || null;
+    const form=input?.closest('form[role="search"]')||input?.closest('form');
+    if(!form){resetSearch();return;}
+    if(form!==activeSearchForm || !form.isConnected)markSearch(form,sidebar);
+    body.classList.add('xsf-native-search-on');
   }
-
-  function markForm(form, sidebar) {
-    if (form === activeForm && form.isConnected) return;
-    reset();
-    activeForm = form;
-    form.classList.add('cpft-native-search-form');
-    marked.push(form);
-    for (let el = form.parentElement; el && el !== sidebar; el = el.parentElement) {
-      el.classList.add('cpft-native-search-ancestor');
-      if (getComputedStyle(el).display === 'none') {
-        el.classList.add('cpft-native-search-hidden-ancestor');
-      }
-      marked.push(el);
-    }
+  function syncLayout(){
+    const body=document.body;
+    if(!body)return;
+    const path=location.pathname;
+    const isTimeline=path==='/home'||path==='/explore/tabs/for_you'||path.startsWith('/i/lists/')||path.startsWith('/i/communities/')||body.matches('.HomeTimeline,.List,.Community');
+    const isTweet=/(^|\/)status\/\d+(?:\/|$)/.test(path);
+    const full=options.enabled&&((options.wideTimeline&&isTimeline)||(options.wideTweet&&isTweet));
+    body.classList.toggle('xsf-layout-full',full);
+    body.classList.toggle('xsf-hide-side-items',options.enabled&&options.hideSidebarContent&&!full);
+    body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou);
+    body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons);
+    if(!full)resetSearch();else syncSearch();
   }
-
-  function refresh() {
-    if (!onEligiblePage()) { reset(); return; }
-    const sidebar = document.querySelector('div[data-testid="sidebarColumn"]');
-    const body = document.body;
-    if (!sidebar || !body.classList.contains('Sidebar')) {
-      reset();
-      return;
-    }
-    // Only restore native search when Control Panel for Twitter hides its sidebar.
-    // Do not disturb the ordinary, visible right sidebar.
-    const alreadyActive = body.classList.contains('cpft-native-search-on');
-    const hidden = getComputedStyle(sidebar).display === 'none';
-    if (!hidden && !alreadyActive) { reset(); return; }
-
-    const nativeForm = findNativeForm(sidebar);
-    if (!nativeForm) { reset(); return; }
-    if (nativeForm !== activeForm || !nativeForm.isConnected) {
-      markForm(nativeForm, sidebar);
-    }
-    body.classList.add('cpft-native-search-on');
-  }
-
-  refresh();
-  const timer = setInterval(refresh, 1200);
-  window.addEventListener('pagehide', () => {
-    clearInterval(timer);
-    reset();
-  }, {once: true});
+  let interval=setInterval(syncLayout,1200);
+  const api={
+    get(){return {...options}},
+    set(key,val){
+      if(!Object.hasOwn(defaults,key)||typeof val!=='boolean')return;
+      options[key]=val;
+      try{localStorage.setItem(KEY,JSON.stringify(options));}catch(e){console.warn('[XSF display] cannot save',e);}
+      applyCSS();syncLayout();
+    },
+  };
+  window.__xsfLayoutAPI=api;
+  applyCSS();syncLayout();
+  const cleanup=()=>{
+    clearInterval(interval);
+    resetSearch();
+    for(const name of bodyClasses)document.body?.classList.remove(name);
+    style.remove();
+    if(window.__xsfLayoutAPI===api)delete window.__xsfLayoutAPI;
+    if(window.__xsfLayoutCleanup===cleanup)delete window.__xsfLayoutCleanup;
+  };
+  window.__xsfLayoutCleanup=cleanup;
+  window.addEventListener('pagehide',cleanup,{once:true});
 })();
