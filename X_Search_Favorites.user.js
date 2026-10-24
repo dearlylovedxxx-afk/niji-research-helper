@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.2.0
+// @version      1.2.1
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,7 +14,7 @@
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.2.0', KEY='xsf_userscript_v1';
+const VERSION='1.2.1', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
 const hidden=new Map();
@@ -476,34 +476,34 @@ load();currentFields=blank();
       body.xsf-monochrome-buttons article[data-testid="tweet"] [role="group"] button:not(:hover) {
         filter:grayscale(1)
       }
-      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] {
+      body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] {
         display:block!important;position:fixed!important;inset:0 0 auto auto!important;
         width:0!important;min-width:0!important;max-width:0!important;
         height:0!important;min-height:0!important;max-height:0!important;
         padding:0!important;margin:0!important;flex:none!important;
         overflow:visible!important;pointer-events:none!important;z-index:2147483000!important
       }
-      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] * {
+      body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] * {
         visibility:hidden!important;pointer-events:none!important
       }
-      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] .xsf-native-search-ancestor {
+      body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] .xsf-native-search-ancestor {
         visibility:visible!important;overflow:visible!important
       }
-      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] .xsf-native-search-hidden-ancestor {
+      body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] .xsf-native-search-hidden-ancestor {
         display:block!important
       }
-      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] form.xsf-native-search-form {
+      body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] form.xsf-native-search-form {
         position:fixed!important;top:8px!important;right:14px!important;bottom:auto!important;left:auto!important;
         width:min(340px,calc(100vw - 28px))!important;max-width:min(340px,calc(100vw - 28px))!important;
         margin:0!important;transform:none!important;overflow:visible!important;
         visibility:visible!important;pointer-events:auto!important;z-index:2147483001!important
       }
-      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] form.xsf-native-search-form,
-      body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] form.xsf-native-search-form * {
+      body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] form.xsf-native-search-form,
+      body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] form.xsf-native-search-form * {
         visibility:visible!important;pointer-events:auto!important
       }
       @media(max-width:1080px){
-        body.xsf-native-search-on.xsf-layout-full [data-testid="sidebarColumn"] form.xsf-native-search-form {
+        body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] form.xsf-native-search-form {
           right:6px!important;width:min(240px,calc(100vw - 12px))!important;
         }
       }
@@ -512,7 +512,7 @@ load();currentFields=blank();
       if(!options[key])continue;
       rules.push(selectors.map(s=>'body '+s).join(',\n')+' {display:none!important}');
     }
-    style.textContent=options.enabled?rules.join('\n'):'';
+    style.textContent=rules.join('\n');
   }
   function markSearch(form,sidebar){
     if(form===activeSearchForm && form.isConnected)return;
@@ -526,11 +526,18 @@ load();currentFields=blank();
   }
   function syncSearch(){
     const body=document.body;
-    if(!body?.classList.contains('xsf-layout-full') || !options.enabled || !options.nativeSearch){
-      resetSearch();return;
-    }
     const sidebar=document.querySelector('[data-testid="sidebarColumn"]');
-    if(!sidebar){resetSearch();return;}
+    if(!body || !sidebar){resetSearch();return;}
+    const newMode=options.enabled && options.nativeSearch && body.classList.contains('xsf-layout-full');
+    // When Control Panel for Twitter is still enabled, maintain the previous
+    // native-search restoration until the user deliberately opts into migration.
+    const primary=document.querySelector('[data-testid="primaryColumn"]');
+    const maxWidth=primary ? parseFloat(getComputedStyle(primary).maxWidth) : 0;
+    const hiddenByExtension=getComputedStyle(sidebar).display==='none';
+    const legacyMode=!options.enabled && body.matches('.HomeTimeline,.List,.Community') &&
+      body.classList.contains('Sidebar') && maxWidth>=900 &&
+      (hiddenByExtension || body.classList.contains('xsf-native-search-on'));
+    if(!newMode && !legacyMode){resetSearch();return;}
     const input=sidebar.querySelector('input[data-testid="SearchBox_Search_Input"]')||
       sidebar.querySelector('form[role="search"] input')||
       sidebar.querySelector('[role="search"] input');
@@ -550,7 +557,7 @@ load();currentFields=blank();
     body.classList.toggle('xsf-hide-side-items',options.enabled&&options.hideSidebarContent&&!full);
     body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou);
     body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons);
-    if(!full)resetSearch();else syncSearch();
+    syncSearch();
   }
   let interval=setInterval(syncLayout,1200);
   const api={
