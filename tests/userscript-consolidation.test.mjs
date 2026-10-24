@@ -41,8 +41,8 @@ test('N3 retains F13-F14 video dial and limits NicoLive comments module to its w
 test('LiveClock is one-shot, tab-scoped and available from Niji Research Helper', () => {
   const script = file('Niji_Research_Helper.user.js');
   const meta = file('Niji_Research_Helper.meta.js');
-  assert.match(script, /@version\s+1\.0\.116/);
-  assert.match(meta, /@version\s+1\.0\.116/);
+  assert.match(script, /@version\s+1\.0\.122/);
+  assert.match(meta, /@version\s+1\.0\.122/);
   assert.match(script, /new BroadcastChannel\('niji-research-helper-liveclock-v1'\)/);
   assert.match(script, /youtubeLiveClockReceiveSync\(message\)/);
   assert.match(script, /youtubeLiveClockMarkToggle\(\)/);
@@ -56,4 +56,16 @@ test('manual LiveClock seeks cancel the older member-chat URL timestamp guard', 
   assert.match(chat, /@version\s+0\.5\.8/);
   assert.match(chat, /nrh-liveclock-manual-seek/);
   assert.match(chat, /state\.timestampGuardSerial\+\+/);
+});
+
+test('LiveClock controls are accessible from their own NIJI Sync tab rather than buried in POV', () => {
+  const script = file('Niji_Research_Helper.user.js');
+  assert.match(script, /\['sync', '🕒 同期'\]/);
+  assert.match(script, /id:'npf-yt-liveclock-body'/);
+  assert.match(script, /mobileYoutubeTab === 'sync' \? 'block' : 'none'/);
+  assert.match(script, /mobileYoutubeTab = \['pov','sync','research','settings'\]/);
+  assert.match(script, /id: 'npf-liveclock-mark'/);
+  assert.match(script, /id: 'npf-liveclock-sync'/);
+  assert.equal((script.match(/id: 'npf-liveclock-mark'/g) || []).length, 1);
+  assert.equal((script.match(/id: 'npf-liveclock-sync'/g) || []).length, 1);
 });
