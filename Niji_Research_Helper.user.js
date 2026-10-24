@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.121
+// @version      1.0.122
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.121';
+  const VERSION = '1.0.122';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -2503,8 +2503,8 @@
       padding:10px 12px; border-bottom:1px solid #34343a; background:#202024;
     }
     .npf-yt-head-title { font-size:13px; font-weight:800; flex:1; min-width:0; }
-    /* PC and iPad now expose the same four top-level NIJI destinations. */
-    .npf-yt-tabs { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:7px;
+    /* The archive clock has a dedicated, visible top-level NIJI tab. */
+    .npf-yt-tabs { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:7px;
       position:sticky; top:0; z-index:4; padding:10px 12px; background:#171c2a;
       border-bottom:1px solid #45516e; }
     .npf-yt-tab { appearance:none; display:block; min-width:0; min-height:39px;
@@ -5760,7 +5760,7 @@
     onPointerDown: null,
     onPointerLeave: null,
   };
-  const YT_QUICK_SEEK_HIDE_DELAY = 3000;
+  const YT_QUICK_SEEK_HIDE_DELAY = 1000;
 
   function setYoutubeQuickSeekVisible(visible) {
     const controls = youtubeQuickSeekUi.controls;
@@ -9204,7 +9204,7 @@
 
     {
       const tabs = make('div', { id: 'npf-yt-tabs', cls: 'npf-yt-tabs' });
-      for (const [tab, label] of [['pov', '👥 他視点'], ['research', '🔎 アーカイブ'], ['chat', '💬 チャット'], ['settings', '⚙ 設定']]) {
+      for (const [tab, label] of [['pov', '👥 他視点'], ['sync', '🕒 同期'], ['research', '🔎 アーカイブ'], ['chat', '💬 チャット'], ['settings', '⚙ 設定']]) {
         const button = make('button', { cls: 'npf-yt-tab', text: label, type: 'button' });
         button.dataset.npfTab = tab;
         button.setAttribute('aria-pressed', String(tab === mobileYoutubeTab));
@@ -9264,24 +9264,6 @@
     }
     body.appendChild(actions);
 
-    // LiveClock-style archive synchronization stays separate from saved POV offsets.
-    body.appendChild(make('div', { cls: 'npf-yt-note',
-      text: '🕒 複数タブのアーカイブ同期（実際の配信時刻）' }));
-    const liveClockActions = make('div', { cls: 'npf-yt-actions' });
-    liveClockActions.appendChild(make('button', {
-      id: 'npf-liveclock-mark', cls: 'npf-yt-btn', type: 'button',
-      text: '🔗 このタブを同期対象にする'
-    }));
-    liveClockActions.appendChild(make('button', {
-      id: 'npf-liveclock-sync', cls: 'npf-yt-btn primary', type: 'button',
-      text: '🕒 このタブを基準に同期を実行'
-    }));
-    body.appendChild(liveClockActions);
-    body.appendChild(make('div', {
-      id: 'npf-liveclock-status', cls: 'npf-yt-note',
-      text: '同期対象の各タブでマークしてから、基準タブで同期を実行します。'
-    }));
-
     const copyPref = make('div', { cls: 'npf-yt-copy-pref' });
     const copyLabel = make('label', { text: 'コピー形式' });
     copyLabel.htmlFor = 'npf-yt-copy-mode';
@@ -9310,6 +9292,46 @@
     body.appendChild(results);
 
     panel.appendChild(body);
+
+    // Separate, first-class LiveClock tab: the controls used to be buried
+    // after several buttons in the POV pane and users could not find them.
+    const liveClockPane = make('section', {id:'npf-yt-liveclock-body', cls:'npf-yt-body'});
+    liveClockPane.style.cssText = [
+      'display:none','padding:14px 16px 26px',
+      'box-sizing:border-box','color:inherit','font-family:inherit'
+    ].join(';');
+    const liveClockTitle = make('div', {text:'🕒 アーカイブ同士の時刻同期'});
+    liveClockTitle.style.cssText = 'font-size:16px;font-weight:850;margin-bottom:10px;';
+    liveClockPane.appendChild(liveClockTitle);
+    const liveClockHelp = make('div', {cls:'npf-yt-note',
+      text:'① 同期したいアーカイブを同じブラウザで別タブに開く\n② 各タブの「🕒 同期」で「このタブを同期対象にする」を押す\n③ 基準タブで「このタブを基準に同期を実行」を押す'});
+    liveClockHelp.style.cssText = 'white-space:pre-line;line-height:1.75;margin:0 0 12px;';
+    liveClockPane.appendChild(liveClockHelp);
+    const liveClockActions = make('div', {cls:'npf-yt-actions'});
+    liveClockActions.style.cssText = 'display:grid;grid-template-columns:1fr;gap:10px;margin:10px 0;';
+    liveClockActions.appendChild(make('button', {
+      id: 'npf-liveclock-mark', cls:'npf-yt-btn', type:'button',
+      text:'🔗 このタブを同期対象にする'
+    }));
+    liveClockActions.appendChild(make('button', {
+      id: 'npf-liveclock-sync', cls:'npf-yt-btn primary', type:'button',
+      text:'🕒 このタブを基準に同期を実行'
+    }));
+    liveClockPane.appendChild(liveClockActions);
+    const liveClockStatus = make('div', {
+      id:'npf-liveclock-status', cls:'npf-yt-note',
+      text:'配信開始時刻と他タブの状態を確認中…'
+    });
+    liveClockStatus.style.cssText = 'padding:10px;border-radius:9px;line-height:1.65;background:rgba(127,127,127,.10);';
+    liveClockStatus.setAttribute('role', 'status');
+    liveClockStatus.setAttribute('aria-live', 'polite');
+    liveClockPane.appendChild(liveClockStatus);
+    const liveClockFooter = make('div', {cls:'npf-yt-note',
+      text:'※同期は一度だけ時刻を合わせます。以後の再生・一時停止・シークは連動しません。同じYouTubeのドメインのタブ間で使用してください。'});
+    liveClockFooter.style.cssText = 'margin-top:12px;font-size:11px;line-height:1.65;opacity:.8;';
+    liveClockPane.appendChild(liveClockFooter);
+    panel.appendChild(liveClockPane);
+
     panel.appendChild(createYoutubeSettingsUi(copyPref));
     if (isMobileYoutubeUi()) {
       // Keep the overlay outside YouTube's frequently replaced mobile body.
@@ -9498,7 +9520,7 @@
 
   function setMobileYoutubeTab(tab) {
     if (!isYoutubeHost()) return;
-    mobileYoutubeTab = ['pov','research','settings'].includes(tab) ? tab : 'pov';
+    mobileYoutubeTab = ['pov','sync','research','settings'].includes(tab) ? tab : 'pov';
     if (mobileYoutubeTab === 'research') {
       try {
         ensureMobileYoutubeResearchTab();
@@ -9512,12 +9534,19 @@
     if (!parent) return;
     const pov = $('#npf-yt-pov-body');
     if (pov) pov.style.setProperty('display', mobileYoutubeTab === 'pov' ? 'block' : 'none', 'important');
+    const liveClockPane = $('#npf-yt-liveclock-body', parent);
+    if (liveClockPane) liveClockPane.style.setProperty('display', mobileYoutubeTab === 'sync' ? 'block' : 'none', 'important');
+    if (mobileYoutubeTab === 'sync') {
+      syncYoutubeBroadcastClockFeature();
+      youtubeLiveClockRefresh();
+    }
     const settings=$('#npf-yt-settings-body',parent);
     if(settings) settings.style.setProperty('display',mobileYoutubeTab==='settings'?'block':'none','important');
     if(mobileYoutubeTab==='settings')void updateYoutubeSettingsStatus();
     const title = parent.querySelector('.npf-yt-head-title');
     if (title) title.textContent = mobileYoutubeTab === 'research' ? '🔎 アーカイブ調査'
-      : mobileYoutubeTab === 'settings' ? '⚙ 総合設定' : '👥 他視点・同期';
+      : mobileYoutubeTab === 'sync' ? '🕒 アーカイブ同期'
+      : mobileYoutubeTab === 'settings' ? '⚙ 総合設定' : '👥 他視点';
     parent.querySelectorAll('[data-npf-tab]').forEach(btn => {
       const selected = btn.dataset.npfTab === mobileYoutubeTab;
       btn.setAttribute('aria-pressed', String(selected));
