@@ -7,8 +7,8 @@ const meta=readFileSync(new URL('../Niji_Research_Helper.meta.js',import.meta.ur
 
 test('Quick Seek script parses and both metadata versions match',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script, /@version\s+1\.0\.121/);
-  assert.match(meta, /@version\s+1\.0\.121/);
+  assert.match(script, /@version\s+1\.0\.122/);
+  assert.match(meta, /@version\s+1\.0\.122/);
 });
 
 test('two seek buttons are created once and attached to the player',()=>{
@@ -33,7 +33,7 @@ test('buttons are positioned safely on real YouTube players and SPA navigation',
 });
 
 test('seek buttons start hidden and appear only near the lower player',()=>{
-  assert.match(script,/YT_QUICK_SEEK_HIDE_DELAY = 3000/);
+  assert.match(script,/YT_QUICK_SEEK_HIDE_DELAY = 1000/);
   assert.match(script,/Math\.min\(145, rect\.height \* 0\.30\)/);
   assert.match(script,/document\.addEventListener\('pointermove', ui\.onPointerMove, true\)/);
   assert.match(script,/setYoutubeQuickSeekVisible\(false\)/);
