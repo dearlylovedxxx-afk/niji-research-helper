@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.0
+// @version      1.3.1
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -34,18 +34,13 @@
       path.startsWith('/i/lists/')||path.startsWith('/i/communities/');
     let opts={};
     try{opts=JSON.parse(localStorage.getItem(settingsKey)||'{}')||{}}catch{}
-    const timeline=path==='/home' || path.startsWith('/i/lists/') ||
-      path.startsWith('/i/communities/');
-    const guardedPost=tweet && opts.videoGuard!==false;
-    const guardedTL=timeline && opts.enabled===true && opts.videoGuardTimeline!==false;
-    const guarded=guardedPost || guardedTL;
+    const guarded=tweet && opts.videoGuard!==false;
     const wide=opts.enabled===true && supported && !guarded &&
       (tweet?(opts.wideTweet!==false && opts.videoSafeTweet===false):opts.wideTimeline!==false);
     // This class deliberately does NOT activate the main XSF UI, native
     // search relocation, hide rules or DOM watchers on a video post.
-    const guardedWide=opts.enabled===true &&
-      ((guardedPost && opts.guardWidePost!==false && opts.wideTweet!==false) ||
-       (guardedTL && opts.wideTimeline!==false));
+    const guardedWide=opts.enabled===true && guarded &&
+      opts.guardWidePost!==false && opts.wideTweet!==false;
     root.classList.toggle('xsf-guard-wide',guardedWide);
     if(guarded)document.body?.classList.remove(
       'xsf-layout-full','xsf-layout-profile','xsf-sidebar-hidden','xsf-hide-side-items',
@@ -72,9 +67,10 @@
     }
     html.xsf-pre-full [data-testid="sidebarColumn"] {display:none!important}
     /*
-      Guarded post / home TL: only the native navigation and feed columns are
-      widened. No player or tweet internals are edited. The Core UI and page
-      subtree observer remain disconnected on these protected routes.
+      Guarded post experiment: only native layout's flex columns are changed.
+      Nothing inside the post, player, media elements, or React tree is touched.
+      If the player still goes white, disabling this option restores the
+      confirmed-working guarded default without uninstalling XSF.
     */
     html.xsf-guard-wide header[role="banner"] {
       flex-grow:0!important;
@@ -145,18 +141,11 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.0', KEY='xsf_userscript_v1';
-const isGuardedVideoPage=()=>{
-  const path=location.pathname;
-  const post=/\/status\/\d+(?:\/|$)/.test(path);
-  const timeline=path==='/home' || path.startsWith('/i/lists/') ||
-    path.startsWith('/i/communities/');
-  if(!post&&!timeline)return false;
-  try{
-    const saved=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}')||{};
-    return post ? saved.videoGuard!==false :
-      (saved.enabled===true && saved.videoGuardTimeline!==false);
-  }catch{return post}
+const VERSION='1.3.1', KEY='xsf_userscript_v1';
+const isGuardedPost=()=>{
+  if(!/\/status\/\d+(?:\/|$)/.test(location.pathname))return false;
+  try{const saved=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}');return saved?.videoGuard!==false}
+  catch{return true}
 };
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
@@ -221,7 +210,7 @@ all.push(t);}
 f.allWords=all.join(' ');f.exactPhrase=exact.join('\n');f.anyWords=any.join(' ');f.anyPhrases=phrases.join('\n');f.excludeWords=excluded.join('\n');return f;}
 function navigate(q,mode='live'){if(!q.trim())return;data.history=data.history.filter(x=>!(x.query===q&&x.mode===mode));data.history.unshift({id:uid(),query:q,mode,usedAt:Date.now()});data.history=data.history.slice(0,100);save();location.assign(searchUrl(q,mode));}
 const host=E('div');host.id='xsf-userscript-root';host.style.cssText='all:initial!important;position:fixed!important;inset:0!important;width:0!important;height:0!important;z-index:2147483647!important;pointer-events:none!important';
-if(!isGuardedVideoPage())(document.body||document.documentElement).append(host);const sh=host.attachShadow({mode:'open'});
+if(!isGuardedPost())(document.body||document.documentElement).append(host);const sh=host.attachShadow({mode:'open'});
 const css=E('style');css.textContent=`:host{all:initial}*{box-sizing:border-box}button,input,select,textarea{font:inherit}button{cursor:pointer}#bar{position:fixed;right:12px;bottom:14px;z-index:3;display:flex;gap:5px;pointer-events:auto;font:700 12px system-ui}#bar button{border:1px solid #b3d9f2;background:#1d9bf0;color:white;border-radius:22px;padding:10px 11px;box-shadow:0 4px 15px #0004;min-height:43px}#panel,#sorted{position:fixed;right:8px;bottom:68px;z-index:2;width:min(460px,calc(100vw - 16px));height:min(760px,calc(100dvh - 82px));overflow:auto;pointer-events:auto;border:1px solid #73818b;border-radius:14px;box-shadow:0 12px 40px #0007;background:var(--bg);color:var(--fg);padding:12px;font:13px/1.5 system-ui;--bg:#fff;--fg:#0f1419;--muted:#536471;--edge:#cfd9de}#panel[hidden],#sorted[hidden]{display:none!important}h2{font-size:17px;margin:0 0 9px}h3{font-size:13px;margin:12px 0 5px}.tabs,.actions,.flex{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.tabs button,.actions button,.flex button,.small{background:#eef5fb;border:1px solid #cfd9de;border-radius:9px;color:#163d58;padding:7px 9px}.primary{background:#1d9bf0!important;color:white!important}input:not([type=checkbox]),select,textarea{width:100%;padding:8px;border:1px solid var(--edge);border-radius:8px;background:var(--bg);color:var(--fg)}label{display:block;margin:8px 0 3px;font-size:11px;font-weight:bold;color:var(--muted)}textarea{min-height:56px;resize:vertical}.tab[hidden]{display:none!important}.grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}.check{display:flex;align-items:center;gap:5px}.check input{width:auto}.saved{border:1px solid var(--edge);border-radius:9px;padding:9px;margin:8px 0}.muted{font-size:11px;color:var(--muted)}.post{padding:11px 0;border-bottom:1px solid var(--edge)}.post a{color:#1d9bf0;overflow-wrap:anywhere}.post .body{white-space:pre-wrap;overflow-wrap:anywhere;margin:5px 0}.status{margin:6px 0;font-size:12px;color:var(--muted)}@media(prefers-color-scheme:dark){#panel,#sorted{--bg:#111;--fg:#e7e9ea;--muted:#9da7ae;--edge:#42494e}.tabs button,.actions button,.flex button,.small{background:#222;color:#e7e9ea}}@media(max-width:600px){#bar{right:7px;bottom:calc(155px + env(safe-area-inset-bottom, 0px));max-width:calc(100vw - 14px);flex-wrap:wrap;justify-content:flex-end}#bar button{padding:9px}#panel,#sorted{bottom:61px;height:calc(100dvh - 68px)}}`;
 // The like results are a proper full-screen workspace, not a 460px sidebar.
 css.textContent+=`#sorted{inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-height:none!important;bottom:auto!important;right:auto!important;border:0!important;border-radius:0!important;box-shadow:none!important;padding:20px max(18px,calc((100vw - 1060px)/2)) 60px!important;font:15px/1.6 system-ui!important;z-index:5!important;overscroll-behavior:contain!important}#sorted h2{font-size:23px!important;margin:4px 0 12px!important}#sorted .result-head{position:sticky;top:-20px;z-index:2;background:var(--bg);border-bottom:1px solid var(--edge);padding:12px 0;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}#sorted .result-head button{font-size:14px;min-height:42px}#sorted .result-count{font-size:13px;color:var(--muted);margin:12px 0}#sorted .result-card{display:flex;gap:16px;align-items:flex-start;padding:20px 10px;border-bottom:1px solid var(--edge)}#sorted .result-rank{font:750 18px system-ui;min-width:46px;color:var(--muted)}#sorted .result-content{flex:1;min-width:0}#sorted .result-byline{font-weight:700;font-size:14px;overflow-wrap:anywhere}#sorted .result-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:16px;line-height:1.7;margin:8px 0}#sorted .result-link{display:inline-block;padding:8px 0;color:#1d9bf0;font-size:13px}#sorted .result-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}#sorted select{width:auto;max-width:100px}#sorted .scan-state{font-size:13px;color:var(--muted);margin:9px 0}#sorted .result-empty{padding:40px 12px;font-size:15px;color:var(--muted)}@media(max-width:600px){#sorted{padding:12px 13px 80px!important}#sorted h2{font-size:19px!important}#sorted .result-card{gap:8px;padding:14px 0}#sorted .result-rank{min-width:35px;font-size:15px}#sorted .result-text{font-size:15px}}`;
@@ -253,7 +242,7 @@ const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views
   layout.append(msg);
   const sections=[
     ['切り替え',[['enabled','表示変更機能を有効にする']]],
-    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['videoGuardTimeline','TL動画保護（TL全幅を維持・動画を優先）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
+    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
     ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
     ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
   ];
@@ -503,7 +492,7 @@ sorted.append(highRow);
 sortBtn.onclick=()=>{if(!activeSearch()){alert('Xの検索結果ページで使ってください。');return;}const open=sorted.hidden;closeAll();if(open){captureLikes();sorted.hidden=false;scanNotice=`現在読み込み済み ${sortRows.size}件。先頭から追加収集するか、X画面を手動スクロールしてね。`;drawSorted();}};
 let scheduled=0,observerActive=false;
 const observer=new MutationObserver(()=>{
-  if(isGuardedVideoPage()){
+  if(isGuardedPost()){
     observer.disconnect();observerActive=false;
     clearTimeout(scheduled);scheduled=0;
     host.remove();return;
@@ -511,14 +500,14 @@ const observer=new MutationObserver(()=>{
   if(scheduled)return;
   scheduled=setTimeout(()=>{
     scheduled=0;
-    if(isGuardedVideoPage())return;
+    if(isGuardedPost())return;
     if(!host.isConnected)(document.body||document.documentElement).append(host);
     if(filterOn)applyFilter();
     if(scanRunning||manualCapture||!sorted.hidden)captureLikes();
   },350);
 });
 function syncCoreObserver(){
-  if(isGuardedVideoPage()){
+  if(isGuardedPost()){
     if(observerActive){observer.disconnect();observerActive=false;}
     if(host.isConnected)host.remove();
     scanStop=true;manualCapture=false;
@@ -527,7 +516,17 @@ function syncCoreObserver(){
     if(filterOn){filterOn=false;restore();}
     return false;
   }
-  if(!observerActive){observer.observe(document.documentElement,{childList:true,subtree:true});observerActive=true;}
+  // Only search filtering/collecting needs a DOM-wide observer. Observing every
+  // video update on a regular timeline is unnecessary and can disturb X's player.
+  const needsObserver=activeSearch() &&
+    (filterOn || scanRunning || manualCapture || !sorted.hidden);
+  if(needsObserver && !observerActive){
+    observer.observe(document.documentElement,{childList:true,subtree:true});
+    observerActive=true;
+  } else if(!needsObserver && observerActive){
+    observer.disconnect();observerActive=false;
+    clearTimeout(scheduled);scheduled=0;
+  }
   if(!host.isConnected)(document.body||document.documentElement).append(host);
   return true;
 }
@@ -579,7 +578,7 @@ load();currentFields=blank();
   const KEY='xsf_display_settings_v1';
   const defaults={
     enabled:false,
-    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,videoGuardTimeline:true,nativeSearch:true,
+    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,nativeSearch:true,
     hideSidebarContent:true,hideForYou:false,hidePromoted:false,
     hideGrok:true,hidePremium:true,hideSubscriptions:true,
     hideMoney:true,hideJobs:true,hideAnalytics:true,
@@ -775,20 +774,16 @@ load();currentFields=blank();
       body.matches('.HomeTimeline,.List,.Community,.History,.Profile,.Search,.Bookmarks') ||
       /^\/[a-zA-Z0-9_]{1,15}(?:\/|$)/.test(path);
     const guardedPost=isTweet && options.videoGuard;
-    const isTLGuardRoute=path==='/home'||path.startsWith('/i/lists/')||
-      path.startsWith('/i/communities/');
-    const guardedTL=options.enabled && options.videoGuardTimeline && isTLGuardRoute;
-    const guardedPage=guardedPost || guardedTL;
     const videoSafePage=options.enabled && options.videoSafeTweet && isTweet;
-    const full=options.enabled && !guardedPage && !videoSafePage && (isTweet ? options.wideTweet : (options.wideTimeline && isTimeline));
+    const full=options.enabled && !guardedPost && !videoSafePage && (isTweet ? options.wideTweet : (options.wideTimeline && isTimeline));
     body.classList.toggle('xsf-layout-full',full);
     body.classList.toggle('xsf-layout-profile',full&&isProfile);
-    body.classList.toggle('xsf-sidebar-hidden',options.enabled&&options.hideSidebarContent&&!guardedPage&&!videoSafePage);
-    body.classList.toggle('xsf-display-active',options.enabled&&!guardedPage);
+    body.classList.toggle('xsf-sidebar-hidden',options.enabled&&options.hideSidebarContent&&!guardedPost&&!videoSafePage);
+    body.classList.toggle('xsf-display-active',options.enabled&&!guardedPost);
     body.classList.toggle('xsf-hide-side-items',false);
-    body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou&&!guardedPage);
-    body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons&&!guardedPage);
-    if(guardedPage)resetSearch();else syncSearch();
+    body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou&&!guardedPost);
+    body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons&&!guardedPost);
+    if(guardedPost)resetSearch();else syncSearch();
     window.__xsfUpdateEarly?.();
   }
   let interval=setInterval(syncLayout,1200);
