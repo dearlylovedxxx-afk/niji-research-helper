@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.117
+// @version      1.0.118
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.117';
+  const VERSION = '1.0.118';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5699,6 +5699,130 @@
     return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
   }
 
+
+
+  // ---------- YouTube player +10s/-10s on-screen controls ----------
+  // These controls deliberately live inside YouTube's video player so theater
+  // mode, resizing and fullscreen retain the same relative placement.
+  const YT_QUICK_SEEK_ID = 'npf-yt-quick-seek';
+  const YT_QUICK_SEEK_STYLE_ID = 'npf-yt-quick-seek-style';
+
+  function createYoutubeQuickSeekIcon(delta) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '31');
+    svg.setAttribute('height', '31');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.style.cssText = 'display:block;pointer-events:none;flex:none;';
+    const ring = document.createElementNS(ns, 'path');
+    ring.setAttribute('d', delta < 0
+      ? 'M7 4 A9 9 0 1 1 3 16 M7 4 H2 M7 4 V9'
+      : 'M17 4 A9 9 0 1 0 21 16 M17 4 H22 M17 4 V9');
+    ring.setAttribute('fill', 'none');
+    ring.setAttribute('stroke', 'currentColor');
+    ring.setAttribute('stroke-width', '1.85');
+    ring.setAttribute('stroke-linecap', 'round');
+    ring.setAttribute('stroke-linejoin', 'round');
+    const num = document.createElementNS(ns, 'text');
+    num.setAttribute('x', '12');
+    num.setAttribute('y', '15');
+    num.setAttribute('text-anchor', 'middle');
+    num.setAttribute('font-size', '8');
+    num.setAttribute('font-family', 'Arial, sans-serif');
+    num.setAttribute('font-weight', '800');
+    num.setAttribute('fill', 'currentColor');
+    num.textContent = '10';
+    svg.append(ring, num);
+    return svg;
+  }
+
+  function ensureYoutubeQuickSeekStyle() {
+    if (document.getElementById(YT_QUICK_SEEK_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = YT_QUICK_SEEK_STYLE_ID;
+    style.textContent = [
+      '#npf-yt-quick-seek .npf-yt-quick-seek-btn:hover{background:rgba(27,31,40,.78)!important;opacity:1!important;transform:scale(1.06)!important}',
+      '#npf-yt-quick-seek .npf-yt-quick-seek-btn:active{transform:scale(.95)!important;background:rgba(27,31,40,.88)!important}',
+      '#npf-yt-quick-seek .npf-yt-quick-seek-btn:focus-visible{outline:2px solid #fff!important;outline-offset:3px!important}',
+      '@media (max-width:550px){#npf-yt-quick-seek{bottom:48px!important;gap:8px!important}#npf-yt-quick-seek .npf-yt-quick-seek-btn{width:39px!important;height:39px!important}}'
+    ].join('\n');
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function syncYoutubeQuickSeekButtons() {
+    // Not on Shorts, home-page previews or the floating mini player.
+    const onWatch = location.pathname === '/watch' ||
+      /^\/live\/[A-Za-z0-9_-]{11}(?:\/|$)/.test(location.pathname);
+    const video = onWatch ? youtubeVideoElement() : null;
+    const host = video ? youtubeTimestampPlayerHost() : null;
+    const validHost = host && host.isConnected &&
+      (host.id === 'movie_player' || host.classList.contains('html5-video-player'));
+    const existing = document.getElementById(YT_QUICK_SEEK_ID);
+    if (!onWatch || !currentYoutubeVideoId() || !validHost) {
+      existing?.remove();
+      return;
+    }
+    if (existing?.parentElement === host) return;
+    existing?.remove();
+    ensureYoutubeQuickSeekStyle();
+
+    const controls = document.createElement('div');
+    controls.id = YT_QUICK_SEEK_ID;
+    controls.setAttribute('role', 'group');
+    controls.setAttribute('aria-label', '動画を10秒戻す・進める');
+    controls.style.cssText = [
+      'position:absolute!important',
+      'left:50%!important', 'bottom:62px!important',
+      'transform:translateX(-50%)!important',
+      'z-index:95!important', 'display:flex!important',
+      'align-items:center!important','justify-content:center!important',
+      'gap:12px!important','height:auto!important','width:auto!important',
+      'pointer-events:none!important','box-sizing:border-box!important'
+    ].join(';');
+
+    for (const delta of [-10, 10]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'npf-yt-quick-seek-btn';
+      button.dataset.delta = String(delta);
+      button.setAttribute('aria-label', delta < 0 ? '10秒戻す' : '10秒進む');
+      button.title = delta < 0 ? '10秒戻す' : '10秒進む';
+      button.style.cssText = [
+        'display:flex!important','align-items:center!important','justify-content:center!important',
+        'width:45px!important','height:45px!important','min-width:45px!important',
+        'min-height:45px!important','padding:0!important','margin:0!important',
+        'border-radius:50%!important','border:1px solid rgba(255,255,255,.40)!important',
+        'background:rgba(27,31,40,.46)!important','color:#fff!important',
+        'box-shadow:0 2px 9px rgba(0,0,0,.24)!important',
+        'backdrop-filter:blur(4px)','-webkit-backdrop-filter:blur(4px)',
+        'opacity:.78!important','transform:scale(1)!important',
+        'pointer-events:auto!important','cursor:pointer!important',
+        'touch-action:manipulation!important','user-select:none!important',
+        '-webkit-user-select:none!important','line-height:1!important',
+        'transition:background .12s ease,opacity .12s ease,transform .12s ease!important'
+      ].join(';');
+      button.appendChild(createYoutubeQuickSeekIcon(delta));
+      // YouTube's parent player listens for clicks to toggle play/pause or
+      // double clicks to fullscreen; only our control receives those events.
+      for (const type of ['pointerdown','pointerup','mousedown','mouseup','dblclick']) {
+        button.addEventListener(type, event => {
+          event.stopPropagation();
+          if (type === 'dblclick') event.preventDefault();
+        });
+      }
+      button.addEventListener('keydown', event => event.stopPropagation());
+      button.addEventListener('keyup', event => event.stopPropagation());
+      button.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        // Reuse the exact seek routine already used by the helper's +/- buttons.
+        seekYoutube(delta);
+      });
+      controls.appendChild(button);
+    }
+    host.appendChild(controls);
+  }
 
   // ---------- Archived livestream wall clock beside YouTube playback time ----------
   // The player-provided real start timestamp is preferred to Holodex metadata.
@@ -12981,6 +13105,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       updateYoutubePanel();
       syncYoutubeTimestampFeature();
       syncYoutubeBroadcastClockFeature();
+      syncYoutubeQuickSeekButtons();
     }, 180);
   }
 
@@ -12991,6 +13116,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       ensureYoutubePanel();
       handleYoutubeNavigation();
       syncYoutubeBroadcastClockFeature();
+      syncYoutubeQuickSeekButtons();
       void applyYoutubeSeekHandoff();
       // Only one NIJI entry point on mobile. Research mounts as a tab inside it;
       // failures in archive initialization must not take down the proven mobile FAB.
@@ -13032,6 +13158,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
         updateYoutubePanel();
         syncYoutubeTimestampFeature();
         syncYoutubeBroadcastClockFeature();
+        syncYoutubeQuickSeekButtons();
         if (research.holodexPaused || wikiRequestsPaused) updateResearchCooldownDisplay();
       }, 1000);
       ytBootBadge?.remove();
