@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.2.1
+// @version      1.2.2
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,7 +14,7 @@
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.2.1', KEY='xsf_userscript_v1';
+const VERSION='1.2.2', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
 const hidden=new Map();
@@ -411,7 +411,11 @@ load();currentFields=blank();
     hideGrok:[
       'header nav a[href="/i/grok"]','[role="menuitem"] a[href="/i/grok"]',
       'a[href="/i/grok"]','button[data-testid="grokImgGen"]',
-      '[data-testid="grokButton"]','[data-testid^="followups_"]'
+      '[data-testid="grokButton"]','[data-testid^="followups_"]',
+      // X's bottom-right floating Grok launcher; independent of the XSF search button.
+      '[data-testid="GrokDrawer"]','[data-testid="GrokDrawerHeader"]',
+      'button[aria-label="Grok actions"]','button[aria-label="Grokに質問する"]',
+      'button[aria-label="Grokのアクション"]'
     ],
     hidePremium:[
       'header nav a[href^="/i/premium"]','header nav a[href^="/i/verified"]',
@@ -460,7 +464,16 @@ load();currentFields=blank();
   function applyCSS(){
     const rules=[];
     rules.push(`
-      body.xsf-layout-full header[role="banner"] {flex-grow:0!important}
+      /*
+       * X's header and main content participate in one horizontal flex row.
+       * Use a margin on the actual navigation column to center both columns,
+       * rather than translating the content or changing the full viewport width.
+       * At >= ~900px, the 218px nav + 637px timeline fit inside this width.
+       */
+      body.xsf-layout-full header[role="banner"] {
+        flex-grow:0!important;
+        margin-inline-start:max(0px, calc((100vw - 910px) / 2))!important;
+      }
       body.xsf-layout-full main[role="main"] > div {width:100%!important;max-width:none!important}
       body.xsf-layout-full [data-testid="primaryColumn"] {
         flex:1 1 auto!important;min-width:0!important;width:100%!important;max-width:990px!important
