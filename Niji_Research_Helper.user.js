@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.116
+// @version      1.0.117
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.116';
+  const VERSION = '1.0.117';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -6257,6 +6257,8 @@
     bestFallback: null,
     error: '',
     needsApiKey: false,
+    replyCache: new Map(),
+    replyRevision: 0,
   };
 
   function resetYoutubePriorityBackground(videoId = currentYoutubeVideoId() || '') {
@@ -6268,6 +6270,8 @@
     youtubePriorityBackground.scanned = 0;
     youtubePriorityBackground.found = [];
     youtubePriorityBackground.bestFallback = null;
+    youtubePriorityBackground.replyCache = new Map();
+    youtubePriorityBackground.replyRevision = 0;
     youtubePriorityBackground.error = '';
     youtubePriorityBackground.needsApiKey = false;
   }
@@ -6386,8 +6390,190 @@
       items: youtubePriorityTextItems(text),
       likeCount: Number(snippet.likeCount || 0),
       publishedAt: String(snippet.publishedAt || ''),
+      replyCount: Math.max(0, Number(item?.snippet?.totalReplyCount || 0)),
       source: 'api'
     };
+  }
+
+
+  // Fetch replies ONLY for top-level comments selected for preferred display.
+  // comments.list(parentId) retrieves more than the first five replies that
+  // commentThreads may embed. Ordinary replies are never added to the UI.
+  function youtubePriorityReplySnapshot(item) {
+    const snippet = item?.snippet || {};
+    const text = String(snippet.textOriginal || snippet.textDisplay || '').replace(/\r/g, '').trim();
+    const items = youtubePriorityTextItems(text, YT_TS_MAX_ITEMS);
+    if (!items.length) return null;
+    const authorId = String(snippet.authorChannelId?.value || '');
+    return {
+      id: String(item?.id || ''),
+      parentId: String(snippet.parentId || ''),
+      info: {
+        name: String(snippet.authorDisplayName || '返信者').replace(/\s+/g, ' ').trim().slice(0, 80),
+        href: authorId ? '/channel/' + authorId : '',
+      },
+      text, html: String(snippet.textDisplay || ''), items,
+      publishedAt: String(snippet.publishedAt || ''),
+      source: 'api-reply',
+    };
+  }
+
+  function queueYoutubePriorityReplyFetches(apiKey, token) {
+    if (!apiKey || token !== youtubePriorityBackground.token) return;
+    const videoId = youtubePriorityBackground.videoId;
+    if (!videoId || currentYoutubeVideoId() !== videoId) return;
+
+    for (const entry of youtubePriorityOverlayEntries()) {
+      if (entry.type !== 'api' || !entry.snapshot?.id) continue;
+      // A fallback candidate can change during the search; fetch once settled.
+      if (entry.fallback && !youtubePriorityBackground.done) continue;
+      const parent = entry.snapshot;
+      if (youtubePriorityBackground.replyCache.has(parent.id)) continue;
+      if (!(Number(parent.replyCount) > 0)) {
+        youtubePriorityBackground.replyCache.set(parent.id, {status:'done', replies:[], scanned:0});
+        continue;
+      }
+
+      youtubePriorityBackground.replyCache.set(parent.id, {status:'loading', replies:[], scanned:0});
+      void (async () => {
+        const replies = [];
+        const seen = new Set();
+        let pageToken = '';
+        let scanned = 0;
+        let truncated = false;
+        try {
+          // At most 500 replies per selected parent. Avoid exhausting API quota.
+          for (let page = 0; page < 5; page++) {
+            if (token !== youtubePriorityBackground.token || currentYoutubeVideoId() !== videoId) return;
+            const params = new URLSearchParams({
+              part:'snippet', parentId:parent.id, maxResults:'100', textFormat:'html'
+            });
+            if (pageToken) params.set('pageToken', pageToken);
+            const data = await youtubePriorityDataApi('comments?' + params, apiKey);
+            const rows = Array.isArray(data.items) ? data.items : [];
+            scanned += rows.length;
+            for (const row of rows) {
+              const snap = youtubePriorityReplySnapshot(row);
+              if (!snap || !snap.id || seen.has(snap.id) || snap.parentId !== parent.id) continue;
+              seen.add(snap.id);
+              replies.push(snap);
+            }
+            pageToken = String(data.nextPageToken || '');
+            if (!pageToken || !rows.length) break;
+            if (page === 4) truncated = true;
+          }
+          if (token !== youtubePriorityBackground.token || currentYoutubeVideoId() !== videoId) return;
+          youtubePriorityBackground.replyCache.set(parent.id, {
+            status:truncated ? 'partial' : 'done', replies, scanned
+          });
+        } catch (error) {
+          if (token !== youtubePriorityBackground.token || currentYoutubeVideoId() !== videoId) return;
+          youtubePriorityBackground.replyCache.set(parent.id, {
+            status:'error', replies, scanned,
+            error:String(error?.message || error).slice(0, 110)
+          });
+        }
+        if (token !== youtubePriorityBackground.token) return;
+        youtubePriorityBackground.replyRevision++;
+        renderYoutubePriorityComments();
+        ensureYoutubePriorityOverlay();
+      })();
+    }
+  }
+
+  // When the user loads YouTube's native reply section, show the visible
+  // timestamp replies even without an API key. Only search within the parent
+  // thread's replies renderer, never in adjacent/top-level comments.
+  function youtubePriorityDomReplies(root) {
+    if (!(root instanceof Element)) return [];
+    const replyRoots = root.querySelectorAll(
+      'ytd-comment-replies-renderer ytd-comment-view-model, ' +
+      'ytd-comment-replies-renderer ytd-comment-renderer, ' +
+      'ytm-comment-replies-renderer ytm-comment-renderer, ' +
+      '#replies ytd-comment-view-model, #replies ytd-comment-renderer'
+    );
+    const out = [], seen = new Set();
+    for (const replyRoot of replyRoots) {
+      // Some renderers wrap another comment renderer; don't count both.
+      if (replyRoot.parentElement?.closest(
+        'ytd-comment-view-model, ytd-comment-renderer, ytm-comment-renderer'
+      )) continue;
+      const body = youtubeCommentBody(replyRoot);
+      if (!body) continue;
+      const text = String(body.textContent || '').replace(/\r/g, '').trim();
+      const items = youtubePriorityTextItems(text, YT_TS_MAX_ITEMS);
+      if (!items.length) continue;
+      const info = youtubeCommentAuthorInfo(replyRoot) || {name:'返信者',href:''};
+      const signature = (info.key || info.name || '') + '\u0000' + text.normalize('NFKC');
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      out.push({id:'dom-reply:' + out.length, info, body, text, items, source:'dom-reply'});
+    }
+    return out;
+  }
+
+  function youtubePriorityEntryReplies(entry) {
+    if (!entry) return [];
+    const api = entry.type === 'api'
+      ? youtubePriorityBackground.replyCache.get(entry.snapshot?.id)
+      : null;
+    if (api) return Array.isArray(api.replies) ? api.replies : [];
+    if (entry.root) return youtubePriorityDomReplies(entry.root);
+    return [];
+  }
+
+  function appendYoutubePriorityReplies(container, entry, overlay = false) {
+    if (!container || !entry) return;
+    const replies = youtubePriorityEntryReplies(entry);
+    const cached = entry.type === 'api'
+      ? youtubePriorityBackground.replyCache.get(entry.snapshot?.id)
+      : null;
+    if (!replies.length && cached?.status !== 'error' && cached?.status !== 'loading') return;
+
+    const outer = document.createElement('div');
+    outer.className = 'npf-yt-priority-replies';
+    outer.style.cssText = [
+      'margin:9px 0 0 10px','padding:5px 0 0 10px',
+      'border-left:2px solid ' + (overlay ? 'rgba(120,186,255,.55)' : 'rgba(80,130,220,.38)'),
+      'min-width:0','overflow-wrap:anywhere'
+    ].join(';');
+
+    const header = document.createElement('div');
+    header.textContent = '↳ タイムスタンプ付き返信' +
+      (replies.length ? '（' + replies.length + '件）' : '') +
+      (cached?.status === 'loading' ? '　取得中…' : '') +
+      (cached?.status === 'partial' ? '　※一部のみ取得' : '');
+    header.style.cssText = 'font-size:11px;font-weight:800;opacity:.85;margin:0 0 5px;';
+    outer.appendChild(header);
+
+    if (cached?.status === 'error') {
+      const warning = document.createElement('div');
+      warning.textContent = '返信取得エラー：' + cached.error;
+      warning.style.cssText = 'font-size:11px;opacity:.75;margin-bottom:5px;';
+      outer.appendChild(warning);
+    }
+
+    for (const reply of replies.slice(0, 80)) {
+      const row = document.createElement('div');
+      row.className = 'npf-yt-priority-reply';
+      row.style.cssText = [
+        'padding:5px 0','min-width:0','width:100%',
+        'box-sizing:border-box','border-bottom:1px solid rgba(128,128,128,.14)'
+      ].join(';');
+      const author = document.createElement('span');
+      author.textContent = '↳ ' + (reply.info?.name || '返信者');
+      author.style.cssText = 'display:block;font-size:11px;opacity:.8;font-weight:750;margin-bottom:3px;';
+      row.appendChild(author);
+      const text = document.createElement('div');
+      text.className = 'npf-yt-priority-reply-text';
+      text.style.cssText = 'white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;' +
+        'font-size:' + (overlay ? '12px' : '13px') + ';line-height:1.5;min-width:0;';
+      if (reply.source === 'api-reply') renderYoutubePriorityApiRichText(text, reply);
+      else renderYoutubePriorityDomRichText(text, reply.body);
+      row.appendChild(text);
+      outer.appendChild(row);
+    }
+    container.appendChild(outer);
   }
 
   function youtubePriorityTargetSatisfied(target, found) {
@@ -6499,6 +6685,7 @@
 
         renderYoutubePriorityComments();
         ensureYoutubePriorityOverlay();
+        queueYoutubePriorityReplyFetches(apiKey, token);
 
         const allSatisfied = targets.length > 0 &&
           targets.every(t => youtubePriorityTargetSatisfied(t, youtubePriorityBackground.found));
@@ -6516,6 +6703,7 @@
         youtubePriorityBackground.running = false;
         renderYoutubePriorityComments();
         ensureYoutubePriorityOverlay();
+        queueYoutubePriorityReplyFetches(apiKey, token);
       }
     }
   }
@@ -6912,6 +7100,7 @@
       }
       card.appendChild(times);
     }
+    appendYoutubePriorityReplies(card, {type:'api',snapshot});
     return card;
   }
 
@@ -7002,6 +7191,7 @@
       }
       card.appendChild(times);
     }
+    appendYoutubePriorityReplies(card, {type:'dom',root});
     return card;
   }
 
@@ -7141,7 +7331,9 @@
   function youtubePriorityOverlayStamp(entries) {
     return [
       currentYoutubeVideoId() || '',
-      entries.map(e => e.signature).join('\u0001'),
+      entries.map(e => e.signature + ':replies:' + youtubePriorityEntryReplies(e).map(r =>
+        r.id + ':' + r.items.map(item => item.seconds).join(',')).join(';')).join('\u0001'),
+      youtubePriorityBackground.replyRevision,
       youtubePriorityBackground.running ? 'running' : youtubePriorityBackground.done ? 'done' : 'idle'
     ].join('\u0002');
   }
@@ -7456,6 +7648,7 @@
           if (entry.type === 'api') renderYoutubePriorityApiRichText(text, entry.snapshot);
           else renderYoutubePriorityDomRichText(text, entry.body);
           block.appendChild(text);
+          appendYoutubePriorityReplies(block, entry, true);
           body.appendChild(block);
         }
 
@@ -7538,7 +7731,14 @@
     return first.parentElement || first;
   }
 
+  let youtubePriorityCommentsCollapsed = false;
+  let youtubePriorityCommentsVideoId = '';
+
   function renderYoutubePriorityComments() {
+    if (youtubePriorityCommentsVideoId !== currentYoutubeVideoId()) {
+      youtubePriorityCommentsVideoId = currentYoutubeVideoId();
+      youtubePriorityCommentsCollapsed = false;
+    }
     if (!currentYoutubeVideoId()) {
       $('#npf-yt-priority-comments')?.remove();
       return;
@@ -7565,14 +7765,33 @@
       'font-family:-apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif'
     ].join(';');
 
+    const heading = document.createElement('div');
+    heading.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;';
     const title = document.createElement('div');
     title.textContent = '⭐ 優先コメント';
     title.style.cssText = 'font-size:14px;font-weight:850;margin-bottom:8px;';
-    box.appendChild(title);
+    const collapse = document.createElement('button');
+    collapse.type = 'button';
+    collapse.className = 'npf-yt-priority-collapse';
+    collapse.textContent = youtubePriorityCommentsCollapsed ? '▶ 開く' : '▼ 折りたたむ';
+    collapse.setAttribute('aria-expanded', String(!youtubePriorityCommentsCollapsed));
+    collapse.title = youtubePriorityCommentsCollapsed ? '優先コメントを展開' : '優先コメントを折りたたむ';
+    collapse.style.cssText = [
+      'appearance:none','background:rgba(127,127,127,.12)','color:inherit',
+      'border:1px solid rgba(128,128,128,.30)','border-radius:8px',
+      'font:750 11px/1.2 sans-serif','padding:6px 9px','cursor:pointer','flex-shrink:0'
+    ].join(';');
+    collapse.addEventListener('click', () => {
+      youtubePriorityCommentsCollapsed = !youtubePriorityCommentsCollapsed;
+      renderYoutubePriorityComments();
+    });
+    heading.append(title, collapse);
+    box.appendChild(heading);
 
     // Render the same de-duplicated entries used by the player overlay.
     const fallback = entries.length === 1 && entries[0].fallback;
     if (fallback) title.textContent = '⏱ タイムスタンプ最多コメント';
+    if (youtubePriorityCommentsCollapsed) return;
 
     const status = document.createElement('div');
     status.style.cssText = 'font-size:11px;line-height:1.5;opacity:.68;margin:-2px 0 8px;';
