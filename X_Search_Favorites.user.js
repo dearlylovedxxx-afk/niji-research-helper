@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.4
+// @version      1.3.5
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -53,10 +53,18 @@
     root.classList.toggle('xsf-guard-tl-premium',guardedTL && opts.hidePremium!==false);
     root.classList.toggle('xsf-guard-tl-calls',guardedTL && opts.hideCalls!==false);
     root.classList.toggle('xsf-guard-tl-creator',guardedTL && opts.hideCreatorStudio!==false);
-    if(guarded)document.body?.classList.remove(
-      'xsf-layout-full','xsf-layout-profile','xsf-sidebar-hidden','xsf-hide-side-items',
-      'xsf-native-search-on','xsf-display-active','xsf-monochrome-buttons','xsf-hide-for-you'
-    );
+    if(guarded){
+      // TL needs its native Search form while the rest of XSF remains isolated.
+      // Do not clear the search overlay class from the guarded TL on each
+      // syncLayout/early-CSS refresh: that made the top-right bar disappear.
+      const classes=[
+        'xsf-layout-full','xsf-layout-profile','xsf-sidebar-hidden',
+        'xsf-hide-side-items','xsf-display-active',
+        'xsf-monochrome-buttons','xsf-hide-for-you'
+      ];
+      if(!guardedTL || opts.nativeSearch===false)classes.push('xsf-native-search-on');
+      document.body?.classList.remove(...classes);
+    }
     root.classList.toggle('xsf-pre-full',wide);
     root.classList.toggle('xsf-pre-history',wide&&history);
     root.classList.toggle('xsf-pre-profile',wide&&profile);
@@ -180,7 +188,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.4', KEY='xsf_userscript_v1';
+const VERSION='1.3.5', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -801,6 +809,15 @@ load();currentFields=blank();
       body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] form.xsf-native-search-form * {
         visibility:visible!important;pointer-events:auto!important
       }
+      /*
+       * The suggestions/history dropdown is rendered by X. It may be a
+       * sibling of the original form. Unhide only native search suggestions,
+       * never the trending, suggested-users or ad modules.
+       */
+      body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] :is([data-testid="typeaheadDropdownWrapped"],[data-testid="typeaheadDropdown"],[role="listbox"]),
+      body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] :is([data-testid="typeaheadDropdownWrapped"],[data-testid="typeaheadDropdown"],[role="listbox"]) * {
+        visibility:visible!important;pointer-events:auto!important
+      }
       @media(max-width:1080px){
         body.xsf-native-search-on.xsf-native-search-on [data-testid="sidebarColumn"] form.xsf-native-search-form {
           right:6px!important;width:min(240px,calc(100vw - 12px))!important;
@@ -827,8 +844,14 @@ load();currentFields=blank();
     const body=document.body;
     const sidebar=document.querySelector('[data-testid="sidebarColumn"]');
     if(!body || !sidebar){resetSearch();return;}
+    // The full-width TL stays protected from XSF's global DOM observer/UI
+    // host, but it can still use X's own React search form inside the sidebar.
+    const protectedTL=options.enabled && options.tlVideoIsolation &&
+      (location.pathname==='/home'||location.pathname.startsWith('/i/lists/')||
+       location.pathname.startsWith('/i/communities/'));
     const newMode=options.enabled && options.nativeSearch &&
-      (body.classList.contains('xsf-layout-full') || body.classList.contains('xsf-sidebar-hidden'));
+      (body.classList.contains('xsf-layout-full') ||
+       body.classList.contains('xsf-sidebar-hidden') || protectedTL);
     // A search field already exists in the main column on Search/Explore.
     if ((location.pathname.startsWith('/search') || location.pathname.startsWith('/explore')) &&
         document.querySelector('[data-testid="primaryColumn"] form[role="search"]')) {
@@ -885,7 +908,10 @@ load();currentFields=blank();
     body.classList.toggle('xsf-hide-side-items',false);
     body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou&&!guardedPage);
     body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons&&!guardedPage);
-    if(guardedPage)resetSearch();else syncSearch();
+    // Only restore the existing X search DOM, never add a fake input or
+    // re-enable the XSF panel/DOM-wide observer on the protected timeline.
+    if(guardedPost || (guardedTL && !options.nativeSearch))resetSearch();
+    else syncSearch();
     window.__xsfUpdateEarly?.();
   }
   let interval=setInterval(syncLayout,1200);
