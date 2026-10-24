@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         N3 YouTube Speed Dial (active tab only)
 // @namespace    local.n3.m60
-// @version      1.1.0
+// @version      1.1.1
 // @description  Adjust only the foreground YouTube video's speed with N3 F13/F14 knob signals. Steps: 1.0 / 1.25 / 1.5 / 2.0 / 4.0.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -17,7 +17,7 @@
   let toast = null;
   let timer = 0;
   const playable = () => [...document.querySelectorAll('video')]
-    .filter(v => v.isConnected && v.readyState > 0 && v.getBoundingClientRect().width > 60);
+    .filter(v => v.isConnected && v.getBoundingClientRect().width > 60);
   function video() {
     const list = playable();
     return list.find(v => !v.paused && !v.ended) || list[0] || null;
@@ -37,11 +37,10 @@
   }
   window.addEventListener('keydown', event => {
     if (!['F13','F14'].includes(event.key) || event.repeat) return;
-    if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return;
-    const active = document.activeElement;
-    if (active && (active.isContentEditable || ['INPUT','TEXTAREA','SELECT'].includes(active.tagName))) return;
+    // The N3 bridge may still hold Ctrl/Alt/Shift when it injects F13/F14.
+    // F13/F14 are dedicated speed keys, even when a search field has focus.
     const v = video();
-    if (!v) return;
+    if (!v) { notify('動画が見つかりません'); return; }
     event.preventDefault();
     event.stopImmediatePropagation();
     const current = v.playbackRate;
