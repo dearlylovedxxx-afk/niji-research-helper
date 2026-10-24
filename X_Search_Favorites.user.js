@@ -1,20 +1,108 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.2.4
+// @version      1.2.5
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        none
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/X_Search_Favorites.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/X_Search_Favorites.user.js
 // ==/UserScript==
+
+// The early stylesheet runs before X's first paint. It uses only structural
+// ancestors of the real feed, never image/video elements or player components.
+(function xsfEarlyLayout() {
+  'use strict';
+  if (window.top !== window.self) return;
+  const root=document.documentElement;
+  if(!root)return;
+  const settingsKey='xsf_display_settings_v1';
+  const profilePattern=/^\/[a-zA-Z0-9_]{1,15}(?:\/(?:with_replies|media|likes|highlights|articles))?\/?$/;
+  const excluded=new Set(['home','explore','search','notifications','i',
+    'settings','messages','bookmarks','compose','jobs','lists','communities','login','logout']);
+  function update(){
+    const path=location.pathname;
+    const first=path.split('/')[1];
+    const profile=profilePattern.test(path)&&!excluded.has(first);
+    const history=/^\/(?:i\/history|bookmarks|i\/bookmarks)(?:\/|$)/.test(path);
+    const tweet=/\/status\/\d+(?:\/|$)/.test(path);
+    const supported=profile||history||tweet||path==='/home'||
+      /^\/(?:search|explore|notifications)(?:\/|$)/.test(path)||
+      path.startsWith('/i/lists/')||path.startsWith('/i/communities/');
+    let opts={};
+    try{opts=JSON.parse(localStorage.getItem(settingsKey)||'{}')||{}}catch{}
+    const wide=opts.enabled===true && supported &&
+      (tweet?opts.wideTweet!==false:opts.wideTimeline!==false);
+    root.classList.toggle('xsf-pre-full',wide);
+    root.classList.toggle('xsf-pre-history',wide&&history);
+    root.classList.toggle('xsf-pre-profile',wide&&profile);
+  }
+  window.__xsfUpdateEarly=update;
+  const style=document.createElement('style');
+  style.id='xsf-layout-early-css';
+  style.textContent=`
+    html.xsf-pre-full header[role="banner"] {
+      flex-grow:0!important;
+      margin-inline-start:max(0px,calc((100vw - 910px)/2 - 30px))!important;
+    }
+    html.xsf-pre-full main[role="main"] > div {
+      width:100%!important;max-width:none!important;
+    }
+    html.xsf-pre-full [data-testid="primaryColumn"] {
+      flex:1 1 auto!important;width:100%!important;min-width:0!important;
+      max-width:990px!important;translate:none!important;
+    }
+    html.xsf-pre-full [data-testid="sidebarColumn"] {display:none!important}
+    /*
+       Only direct ancestors of timeline cells and profile header participate;
+       :has(> ...) cannot match descendants inside an image or video player.
+    */
+    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):has(> [data-testid="cellInnerDiv"]),
+    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):has(> div > [data-testid="cellInnerDiv"]),
+    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):has(> div > div > [data-testid="cellInnerDiv"]),
+    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):has(> div > div > div > [data-testid="cellInnerDiv"]),
+    html.xsf-pre-history [data-testid="primaryColumn"] [data-testid="cellInnerDiv"],
+    html.xsf-pre-history [data-testid="primaryColumn"] [role="tablist"],
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> [data-testid="UserProfileHeader_Items"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> [data-testid="UserProfileHeader"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> [role="tablist"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> [data-testid="cellInnerDiv"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> div > [data-testid="cellInnerDiv"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> div > div > [data-testid="cellInnerDiv"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] [data-testid="cellInnerDiv"] {
+      width:100%!important;max-width:100%!important;min-width:0!important;
+      box-sizing:border-box!important;align-self:stretch!important;
+    }
+  `;
+  function mount(){
+    if(!document.head)return false;
+    document.head.prepend(style);
+    return true;
+  }
+  if(!mount()){
+    const mo=new MutationObserver(()=>{if(mount())mo.disconnect()});
+    mo.observe(document,{childList:true,subtree:true});
+  }
+  update();
+  let lastPath=location.pathname;
+  const routeWatcher=new MutationObserver(()=>{
+    if(location.pathname!==lastPath){lastPath=location.pathname;update()}
+  });
+  routeWatcher.observe(root,{childList:true,subtree:true});
+  addEventListener('popstate',update);
+  addEventListener('pageshow',update);
+})();
+
+// Start the search panel after the document exists. The early CSS above
+// already prevents the previous narrow initial layout.
+function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.2.4', KEY='xsf_userscript_v1';
+const VERSION='1.2.5', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
 const hidden=new Map();
@@ -466,18 +554,15 @@ load();currentFields=blank();
   function applyCSS(){
     const rules=[];
     rules.push(`
-      /*
-       * Center the actual header + primary feed together by measured position.
-       * Shift them as independent elements, leaving the native sidebar search
-       * anchored to the right edge of the browser.
-       */
+      /* Keep the feed in normal flex layout instead of translating
+         its GPU/video subtree. Move nav and feed together via margin. */
       body.xsf-layout-full header[role="banner"] {
         flex-grow:0!important;
-        margin-inline-start:max(0px, calc((100vw - 910px) / 2))!important;
-        translate:var(--xsf-center-shift,0px) 0!important;
+        margin-inline-start:max(0px, calc((100vw - 910px) / 2 - 30px))!important;
+        translate:none!important;
       }
       body.xsf-layout-full [data-testid="primaryColumn"] {
-        translate:var(--xsf-center-shift,0px) 0!important;
+        translate:none!important;
       }
       body.xsf-layout-full main[role="main"] > div {width:100%!important;max-width:none!important}
       body.xsf-layout-full [data-testid="primaryColumn"] {
@@ -485,19 +570,6 @@ load();currentFields=blank();
       }
       body.xsf-layout-full [data-testid="primaryColumn"] > div:first-child > div:last-child {
         max-width:990px!important
-      }
-      /*
-       * X profile pages sometimes retain a fixed-width inner profile feed
-       * even after the primary column is widened. Only measured wrappers
-       * around profile info, tabs and the first tweets receive this class.
-       */
-      body.xsf-layout-profile [data-testid="primaryColumn"] .xsf-profile-expand {
-        width:100%!important;
-        max-width:100%!important;
-        min-width:0!important;
-        align-self:stretch!important;
-        box-sizing:border-box!important;
-        margin-inline:0!important;
       }
       body.xsf-layout-full [data-testid="sidebarColumn"],
       body.xsf-sidebar-hidden [data-testid="sidebarColumn"] {display:none!important}
@@ -582,60 +654,6 @@ load();currentFields=blank();
     body.classList.add('xsf-native-search-on');
   }
 
-  const expandedProfileNodes=new Set();
-  function resetProfileWidth(){
-    for(const node of expandedProfileNodes)node.classList.remove('xsf-profile-expand');
-    expandedProfileNodes.clear();
-  }
-  function expandProfileWidth(){
-    const primary=document.querySelector('[data-testid="primaryColumn"]');
-    if(!document.body?.classList.contains('xsf-layout-profile')||!primary){
-      resetProfileWidth();return;
-    }
-    const columnWidth=primary.getBoundingClientRect().width;
-    if(columnWidth<510){resetProfileWidth();return;}
-    // Target only the profile header/details, profile tab strip and first
-    // timeline entries. Do not touch post media, quoted posts or X dialogs.
-    const nodes=[...primary.querySelectorAll(
-      '[data-testid="UserProfileHeader_Items"],[data-testid="UserProfileHeader"],[role="tablist"],article[data-testid="tweet"]'
-    )].slice(0,10);
-    for(const node of nodes){
-      let ancestor=node;
-      let depth=0;
-      while(ancestor&&ancestor!==primary&&depth++<18){
-        const bounds=ancestor.getBoundingClientRect();
-        if(bounds.width>=260&&bounds.width<columnWidth-75){
-          ancestor.classList.add('xsf-profile-expand');
-          expandedProfileNodes.add(ancestor);
-        }
-        ancestor=ancestor.parentElement;
-      }
-    }
-    for(const node of expandedProfileNodes){
-      if(!node.isConnected){expandedProfileNodes.delete(node);continue;}
-      if(!primary.contains(node)){
-        node.classList.remove('xsf-profile-expand');
-        expandedProfileNodes.delete(node);
-      }
-    }
-  }
-  function centerFeed(){
-    const body=document.body;
-    if(!body?.classList.contains('xsf-layout-full')){
-      body?.style.removeProperty('--xsf-center-shift');return;
-    }
-    const header=document.querySelector('header[role="banner"]');
-    const primary=document.querySelector('[data-testid="primaryColumn"]');
-    if(!header || !primary)return;
-    const nav=header.getBoundingClientRect(), feed=primary.getBoundingClientRect();
-    if(nav.width<50 || feed.width<200)return;
-    const left=Math.min(nav.left,feed.left), right=Math.max(nav.right,feed.right);
-    const delta=(innerWidth-left-right)/2 - 30;
-    if(Math.abs(delta)<=1.5)return;
-    const current=parseFloat(body.style.getPropertyValue('--xsf-center-shift'))||0;
-    const next=Math.max(-1200,Math.min(1200,current+delta));
-    if(Math.abs(next-current)>1)body.style.setProperty('--xsf-center-shift',next.toFixed(2)+'px');
-  }
   function syncLayout(){
     const body=document.body;
     if(!body)return;
@@ -663,8 +681,7 @@ load();currentFields=blank();
     body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou);
     body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons);
     syncSearch();
-    expandProfileWidth();
-    centerFeed();
+    window.__xsfUpdateEarly?.();
   }
   let interval=setInterval(syncLayout,1200);
   const api={
@@ -673,7 +690,7 @@ load();currentFields=blank();
       if(!Object.hasOwn(defaults,key)||typeof val!=='boolean')return;
       options[key]=val;
       try{localStorage.setItem(KEY,JSON.stringify(options));}catch(e){console.warn('[XSF display] cannot save',e);}
-      applyCSS();syncLayout();
+      window.__xsfUpdateEarly?.();applyCSS();syncLayout();
     },
   };
   window.__xsfLayoutAPI=api;
@@ -681,9 +698,7 @@ load();currentFields=blank();
   const cleanup=()=>{
     clearInterval(interval);
     resetSearch();
-    resetProfileWidth();
     for(const name of bodyClasses)document.body?.classList.remove(name);
-    document.body?.style.removeProperty('--xsf-center-shift');
     style.remove();
     if(window.__xsfLayoutAPI===api)delete window.__xsfLayoutAPI;
     if(window.__xsfLayoutCleanup===cleanup)delete window.__xsfLayoutCleanup;
@@ -691,3 +706,8 @@ load();currentFields=blank();
   window.__xsfLayoutCleanup=cleanup;
   window.addEventListener('pagehide',cleanup,{once:true});
 })();
+
+}
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',xsfStartWhenDomReady,{once:true});
+}else{xsfStartWhenDomReady()}
