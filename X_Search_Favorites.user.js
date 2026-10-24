@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.3
+// @version      1.3.4
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -49,6 +49,7 @@
     root.classList.toggle('xsf-guard-wide',guardedWide);
     root.classList.toggle('xsf-guard-tl',guardedTL && opts.wideTimeline!==false);
     root.classList.toggle('xsf-guard-tl-grok',guardedTL && opts.hideGrok!==false);
+    root.classList.toggle('xsf-guard-tl-chat',guardedTL && opts.hideMessageDrawer!==false);
     root.classList.toggle('xsf-guard-tl-premium',guardedTL && opts.hidePremium!==false);
     root.classList.toggle('xsf-guard-tl-calls',guardedTL && opts.hideCalls!==false);
     root.classList.toggle('xsf-guard-tl-creator',guardedTL && opts.hideCreatorStudio!==false);
@@ -118,6 +119,16 @@
       display:none!important;
     }
     /*
+       The lower-right chat drawer is separate from the Grok drawer.
+       Keep it hidden without touching X's timeline, posts or media players.
+       This covers the white chat button seen beneath the blue XSF launcher.
+    */
+    html.xsf-guard-tl-chat div[data-testid="chat-drawer-root"] {
+      display:none!important;
+      visibility:hidden!important;
+      pointer-events:none!important;
+    }
+    /*
       Resize only the CONTAINERS of bookmark/profile items.
       :has() targets ancestors; descendants such as quoted cards,
       photos, video and player canvases never match these selectors.
@@ -169,7 +180,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.3', KEY='xsf_userscript_v1';
+const VERSION='1.3.4', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
