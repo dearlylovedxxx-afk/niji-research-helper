@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.5.7
+// @version      0.5.8
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.5.7';
+  const VERSION = '0.5.8';
 
   const state = {
     videoId: null,
@@ -4238,6 +4238,12 @@
     state.videoId = getVideoId();
     applyUrlTimestampOnce();
     void applyTimestampHandoff();
+
+    // Niji Research Helper's explicit multi-tab LiveClock seek overrides startup URL seeks.
+    document.addEventListener('nrh-liveclock-manual-seek', () => {
+      state.timestampGuardSerial++;
+      state.lastAppliedTimestampUrl = location.href;
+    }, true);
 
     document.addEventListener('yt-navigate-finish', resetForNavigation, true);
     window.addEventListener('popstate', resetForNavigation);

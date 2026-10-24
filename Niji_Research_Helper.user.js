@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.115
+// @version      1.0.116
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.115';
+  const VERSION = '1.0.116';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5882,6 +5882,240 @@
     updateYoutubeBroadcastClock();
   }
 
+
+  // ---------- YouTube LiveClock-style one-shot synchronization across archive tabs ----------
+  // No extension permissions, cloud backup, persistent marking, or continuous playback control.
+  // BroadcastChannel messages are scoped to the youtube.com origin and only marked tabs seek.
+  const youtubeLiveClockTabs = {
+    tabId: 'nrh-lc-' + Math.random().toString(36).slice(2) + '-' + Date.now(),
+    markedVideoId: '',
+    channel: null,
+    peers: new Map(),
+    status: '',
+    lastSyncToken: '',
+    tick: null,
+    lifecycleAttached: false,
+  };
+
+  function youtubeLiveClockEmit(kind, fields = {}) {
+    const channel = youtubeLiveClockTabs.channel;
+    if (!channel) return;
+    try {
+      channel.postMessage({
+        app: 'nrh-liveclock-v1', kind, sender: youtubeLiveClockTabs.tabId,
+        videoId: currentYoutubeVideoId() || '', at: Date.now(), ...fields,
+      });
+    } catch (error) {
+      console.debug('[NRH][LiveClock broadcast]', String(error?.message || error));
+    }
+  }
+
+  function youtubeLiveClockIsMarked() {
+    return !!youtubeLiveClockTabs.markedVideoId &&
+      youtubeLiveClockTabs.markedVideoId === currentYoutubeVideoId();
+  }
+
+  function youtubeLiveClockAnnounce() {
+    if (!youtubeLiveClockTabs.channel) return;
+    youtubeLiveClockEmit('presence', {
+      marked: youtubeLiveClockIsMarked(),
+      startMs: youtubeBroadcastClock.videoId === currentYoutubeVideoId()
+        ? youtubeBroadcastClock.startMs : null,
+    });
+  }
+
+  function youtubeLiveClockResetForVideo() {
+    const stateLc = youtubeLiveClockTabs;
+    if (!stateLc.markedVideoId || stateLc.markedVideoId === currentYoutubeVideoId()) return;
+    stateLc.markedVideoId = '';
+    stateLc.status = '動画が切り替わったため同期対象を解除しました';
+    youtubeLiveClockAnnounce();
+  }
+
+  function youtubeLiveClockStatus(message) {
+    youtubeLiveClockTabs.status = message;
+    youtubeLiveClockRefresh();
+  }
+
+  function youtubeLiveClockRefresh() {
+    const stateLc = youtubeLiveClockTabs;
+    youtubeLiveClockResetForVideo();
+    const mark = $('#npf-liveclock-mark');
+    const sync = $('#npf-liveclock-sync');
+    const note = $('#npf-liveclock-status');
+    const marked = youtubeLiveClockIsMarked();
+    const video = youtubeVideoElement();
+    const streamReady = !!(
+      currentYoutubeVideoId() && video && Number.isFinite(video.duration) &&
+      video.duration > 0
+    );
+    const clockReady = !!(
+      youtubeBroadcastClock.videoId === currentYoutubeVideoId() &&
+      Number.isFinite(youtubeBroadcastClock.startMs)
+    );
+    let peerCount = 0;
+    const now = Date.now();
+    for (const [id, peer] of stateLc.peers) {
+      if (now - peer.at > 12000) { stateLc.peers.delete(id); continue; }
+      if (peer.marked) peerCount++;
+    }
+    if (mark) {
+      mark.textContent = marked ? '✅ このタブの同期対象を解除' : '🔗 このタブを同期対象にする';
+      mark.disabled = !stateLc.channel || !streamReady;
+    }
+    if (sync) {
+      sync.disabled = !stateLc.channel || !marked || !streamReady || !clockReady;
+      sync.textContent = '🕒 このタブを基準に同期を実行';
+    }
+    if (note) {
+      note.textContent = !stateLc.channel ? 'タブ間通信に非対応のブラウザです'
+        : (marked ? 'このタブは同期対象' : 'このタブは未選択') +
+          ' ／ 他の同期対象 ' + peerCount + 'タブ' +
+          (!clockReady ? ' ／ 配信開始時刻の取得待ち' : '') +
+          (stateLc.status ? ' ／ ' + stateLc.status : '');
+    }
+  }
+
+  function youtubeLiveClockMarkToggle() {
+    const stateLc = youtubeLiveClockTabs;
+    if (!stateLc.channel) return toast('このブラウザではタブ間通信が利用できません');
+    if (youtubeLiveClockIsMarked()) {
+      stateLc.markedVideoId = '';
+      youtubeLiveClockStatus('同期対象を解除しました');
+    } else {
+      syncYoutubeBroadcastClockFeature();
+      const video = youtubeVideoElement();
+      const id = currentYoutubeVideoId();
+      if (!id || !video || !Number.isFinite(video.duration) || video.duration <= 0) {
+        return toast('再生できるアーカイブを開いてから操作してください');
+      }
+      stateLc.markedVideoId = id;
+      youtubeLiveClockStatus('同期対象としてマークしました');
+    }
+    youtubeLiveClockAnnounce();
+    youtubeLiveClockEmit('hello');
+    youtubeLiveClockRefresh();
+  }
+
+  function youtubeLiveClockSyncFromThisTab() {
+    if (!youtubeLiveClockIsMarked()) return toast('先にこのタブを同期対象にしてください');
+    syncYoutubeBroadcastClockFeature();
+    const video = youtubeVideoElement();
+    const clock = youtubeBroadcastClock;
+    if (!video || !Number.isFinite(video.currentTime) ||
+        clock.videoId !== currentYoutubeVideoId() || !Number.isFinite(clock.startMs)) {
+      return toast('配信開始時刻を取得できていません。動画を再読み込みして確認してください');
+    }
+    const wallMs = clock.startMs + video.currentTime * 1000;
+    const peers = [...youtubeLiveClockTabs.peers.values()].filter(
+      p => p.marked && Date.now() - p.at < 12000
+    ).length;
+    if (!peers) {
+      // Broadcast anyway: background tabs can have throttled timers.
+      youtubeLiveClockStatus('他タブの反応を確認中です。各タブで同期対象をマークしてください');
+    } else {
+      youtubeLiveClockStatus('他の同期対象 ' + peers + 'タブに時刻を送信しました');
+    }
+    youtubeLiveClockEmit('sync', {
+      token: youtubeLiveClockTabs.tabId + '-' + Date.now(),
+      wallMs, sourcePlaying: !video.paused,
+      sourceRate: Number.isFinite(video.playbackRate) ? video.playbackRate : 1,
+    });
+  }
+
+  function youtubeLiveClockReceiveSync(message) {
+    const stateLc = youtubeLiveClockTabs;
+    if (!youtubeLiveClockIsMarked() || stateLc.lastSyncToken === message.token) return;
+    if (typeof message.token !== 'string' || message.token.length > 150) return;
+    const now = Date.now();
+    const wallMs = Number(message.wallMs);
+    if (!Number.isFinite(wallMs) || wallMs < Date.UTC(2010, 0, 1) ||
+        wallMs > now + 86400000 || Math.abs(now - Number(message.at)) > 30000) return;
+    stateLc.lastSyncToken = message.token;
+    syncYoutubeBroadcastClockFeature();
+    const video = youtubeVideoElement();
+    const clock = youtubeBroadcastClock;
+    if (!video || !Number.isFinite(video.duration) || video.duration <= 0 ||
+        clock.videoId !== currentYoutubeVideoId() || !Number.isFinite(clock.startMs)) {
+      youtubeLiveClockStatus('同期不可：この動画の開始時刻を取得できません');
+      return;
+    }
+    const elapsedMs = message.sourcePlaying
+      ? Math.max(0, Math.min(2000, now - Number(message.at))) *
+        (Number.isFinite(message.sourceRate) ? Math.max(0.25, Math.min(4, message.sourceRate)) : 1)
+      : 0;
+    const target = (wallMs + elapsedMs - clock.startMs) / 1000;
+    if (!Number.isFinite(target) || target < 0 || target > video.duration) {
+      youtubeLiveClockStatus('同期範囲外：基準の時刻がこのアーカイブにありません');
+      return;
+    }
+    // Prevent the helper's earlier URL/watch-history seek guard from reverting a manual sync.
+    ++youtubeSeekHandoffRun;
+    document.dispatchEvent(new CustomEvent('nrh-liveclock-manual-seek'));
+    try {
+      video.currentTime = target;
+      youtubeLiveClockStatus('同期しました：' + formatClock(target));
+    } catch (error) {
+      youtubeLiveClockStatus('再生位置の変更に失敗しました');
+      console.debug('[NRH][LiveClock seek]', String(error?.message || error));
+    }
+  }
+
+  function youtubeLiveClockInitialize() {
+    const stateLc = youtubeLiveClockTabs;
+    if (stateLc.channel || stateLc.tick) return;
+    if (typeof BroadcastChannel !== 'function') {
+      youtubeLiveClockStatus('BroadcastChannelに非対応');
+      return;
+    }
+    try {
+      stateLc.channel = new BroadcastChannel('niji-research-helper-liveclock-v1');
+      stateLc.channel.addEventListener('message', event => {
+        const msg = event.data;
+        if (!msg || msg.app !== 'nrh-liveclock-v1' ||
+            msg.sender === stateLc.tabId || typeof msg.sender !== 'string') return;
+        if (msg.kind === 'hello') {
+          youtubeLiveClockAnnounce();
+        } else if (msg.kind === 'presence') {
+          stateLc.peers.set(msg.sender, {
+            at: Date.now(), marked: msg.marked === true,
+            videoId: String(msg.videoId || '').slice(0, 30),
+          });
+          youtubeLiveClockRefresh();
+        } else if (msg.kind === 'sync') {
+          youtubeLiveClockReceiveSync(msg);
+        }
+      });
+      stateLc.tick = setInterval(() => {
+        youtubeLiveClockRefresh();
+        if (youtubeLiveClockIsMarked()) youtubeLiveClockAnnounce();
+      }, 2500);
+      if (!stateLc.lifecycleAttached) {
+        stateLc.lifecycleAttached = true;
+        document.addEventListener('visibilitychange', () => {
+          if (!document.hidden) { youtubeLiveClockAnnounce(); youtubeLiveClockRefresh(); }
+        });
+        window.addEventListener('pagehide', () => {
+          stateLc.markedVideoId = '';
+          youtubeLiveClockAnnounce();
+          stateLc.channel?.close();
+          stateLc.channel = null;
+          clearInterval(stateLc.tick);
+          stateLc.tick = null;
+        });
+        window.addEventListener('pageshow', event => {
+          if (event.persisted && !stateLc.channel) youtubeLiveClockInitialize();
+        });
+      }
+      youtubeLiveClockEmit('hello');
+    } catch (error) {
+      stateLc.channel = null;
+      youtubeLiveClockStatus('タブ間通信を開始できません');
+      console.debug('[NRH][LiveClock setup]', String(error?.message || error));
+    }
+    youtubeLiveClockRefresh();
+  }
+
   const YT_TS_MAX_SAVED_VIDEOS = 80;
   const YT_TS_MAX_ITEMS = 180;
   const youtubeTimestampUi = {
@@ -8561,6 +8795,24 @@
     }
     body.appendChild(actions);
 
+    // LiveClock-style archive synchronization stays separate from saved POV offsets.
+    body.appendChild(make('div', { cls: 'npf-yt-note',
+      text: '🕒 複数タブのアーカイブ同期（実際の配信時刻）' }));
+    const liveClockActions = make('div', { cls: 'npf-yt-actions' });
+    liveClockActions.appendChild(make('button', {
+      id: 'npf-liveclock-mark', cls: 'npf-yt-btn', type: 'button',
+      text: '🔗 このタブを同期対象にする'
+    }));
+    liveClockActions.appendChild(make('button', {
+      id: 'npf-liveclock-sync', cls: 'npf-yt-btn primary', type: 'button',
+      text: '🕒 このタブを基準に同期を実行'
+    }));
+    body.appendChild(liveClockActions);
+    body.appendChild(make('div', {
+      id: 'npf-liveclock-status', cls: 'npf-yt-note',
+      text: '同期対象の各タブでマークしてから、基準タブで同期を実行します。'
+    }));
+
     const copyPref = make('div', { cls: 'npf-yt-copy-pref' });
     const copyLabel = make('label', { text: 'コピー形式' });
     copyLabel.htmlFor = 'npf-yt-copy-mode';
@@ -8616,6 +8868,9 @@
       document.dispatchEvent(new CustomEvent('niji-member-chat-open'));
       if (isMobileYoutubeUi()) closeYoutubePanel();
     });
+    $('#npf-liveclock-mark', panel)?.addEventListener('click', youtubeLiveClockMarkToggle);
+    $('#npf-liveclock-sync', panel)?.addEventListener('click', youtubeLiveClockSyncFromThisTab);
+    youtubeLiveClockRefresh();
     $('#npf-yt-copy', panel)?.addEventListener('click', () => void copyYoutubeTimestamp());
     $('#npf-yt-copy-mode', panel)?.addEventListener('change', async (e) => {
       state.settings.youtubeCopyMode = e.target.value === 'url-only' ? 'url-only' : 'title-url';
@@ -12484,6 +12739,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
     const id = currentYoutubeVideoId() || '';
     if (id !== youtubeLastVideoId) {
       youtubeLastVideoId = id;
+      youtubeLiveClockResetForVideo();
       youtubeTimestampUi.manualOpen = false;
       youtubeTimestampUi.manualClosed = false;
       youtubeTimestampUi.videoId = id;
@@ -12512,6 +12768,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
   function startYoutubeHelper() {
     try {
       createShell();
+      youtubeLiveClockInitialize();
       ensureYoutubePanel();
       handleYoutubeNavigation();
       syncYoutubeBroadcastClockFeature();
