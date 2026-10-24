@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.2.3
+// @version      1.2.4
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,7 +14,7 @@
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.2.3', KEY='xsf_userscript_v1';
+const VERSION='1.2.4', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
 const hidden=new Map();
@@ -452,7 +452,7 @@ load();currentFields=blank();
     ]
   };
   const bodyClasses=[
-    'xsf-layout-full','xsf-hide-side-items','xsf-sidebar-hidden','xsf-native-search-on','xsf-hide-for-you',
+    'xsf-layout-full','xsf-layout-profile','xsf-hide-side-items','xsf-sidebar-hidden','xsf-native-search-on','xsf-hide-for-you',
     'xsf-monochrome-buttons'
   ];
   let marked=[],activeSearchForm=null;
@@ -485,6 +485,19 @@ load();currentFields=blank();
       }
       body.xsf-layout-full [data-testid="primaryColumn"] > div:first-child > div:last-child {
         max-width:990px!important
+      }
+      /*
+       * X profile pages sometimes retain a fixed-width inner profile feed
+       * even after the primary column is widened. Only measured wrappers
+       * around profile info, tabs and the first tweets receive this class.
+       */
+      body.xsf-layout-profile [data-testid="primaryColumn"] .xsf-profile-expand {
+        width:100%!important;
+        max-width:100%!important;
+        min-width:0!important;
+        align-self:stretch!important;
+        box-sizing:border-box!important;
+        margin-inline:0!important;
       }
       body.xsf-layout-full [data-testid="sidebarColumn"],
       body.xsf-sidebar-hidden [data-testid="sidebarColumn"] {display:none!important}
@@ -568,6 +581,44 @@ load();currentFields=blank();
     if(form!==activeSearchForm || !form.isConnected)markSearch(form,sidebar);
     body.classList.add('xsf-native-search-on');
   }
+
+  const expandedProfileNodes=new Set();
+  function resetProfileWidth(){
+    for(const node of expandedProfileNodes)node.classList.remove('xsf-profile-expand');
+    expandedProfileNodes.clear();
+  }
+  function expandProfileWidth(){
+    const primary=document.querySelector('[data-testid="primaryColumn"]');
+    if(!document.body?.classList.contains('xsf-layout-profile')||!primary){
+      resetProfileWidth();return;
+    }
+    const columnWidth=primary.getBoundingClientRect().width;
+    if(columnWidth<510){resetProfileWidth();return;}
+    // Target only the profile header/details, profile tab strip and first
+    // timeline entries. Do not touch post media, quoted posts or X dialogs.
+    const nodes=[...primary.querySelectorAll(
+      '[data-testid="UserProfileHeader_Items"],[data-testid="UserProfileHeader"],[role="tablist"],article[data-testid="tweet"]'
+    )].slice(0,10);
+    for(const node of nodes){
+      let ancestor=node;
+      let depth=0;
+      while(ancestor&&ancestor!==primary&&depth++<18){
+        const bounds=ancestor.getBoundingClientRect();
+        if(bounds.width>=260&&bounds.width<columnWidth-75){
+          ancestor.classList.add('xsf-profile-expand');
+          expandedProfileNodes.add(ancestor);
+        }
+        ancestor=ancestor.parentElement;
+      }
+    }
+    for(const node of expandedProfileNodes){
+      if(!node.isConnected){expandedProfileNodes.delete(node);continue;}
+      if(!primary.contains(node)){
+        node.classList.remove('xsf-profile-expand');
+        expandedProfileNodes.delete(node);
+      }
+    }
+  }
   function centerFeed(){
     const body=document.body;
     if(!body?.classList.contains('xsf-layout-full')){
@@ -579,7 +630,7 @@ load();currentFields=blank();
     const nav=header.getBoundingClientRect(), feed=primary.getBoundingClientRect();
     if(nav.width<50 || feed.width<200)return;
     const left=Math.min(nav.left,feed.left), right=Math.max(nav.right,feed.right);
-    const delta=(innerWidth-left-right)/2;
+    const delta=(innerWidth-left-right)/2 - 30;
     if(Math.abs(delta)<=1.5)return;
     const current=parseFloat(body.style.getPropertyValue('--xsf-center-shift'))||0;
     const next=Math.max(-1200,Math.min(1200,current+delta));
@@ -590,6 +641,13 @@ load();currentFields=blank();
     if(!body)return;
     const path=location.pathname;
     const isTweet=path.includes('/status/') && /\/status\/\d+(?:\/|$)/.test(path);
+    const firstSegment=path.split('/')[1];
+    const excludedPaths=new Set([
+      'home','explore','search','notifications','i','settings','messages',
+      'bookmarks','compose','jobs','lists','communities','login','logout'
+    ]);
+    const isProfile=!isTweet && !excludedPaths.has(firstSegment) &&
+      /^\/[a-zA-Z0-9_]{1,15}(?:\/(?:with_replies|media|likes|highlights|articles))?\/?$/.test(path);
     const isTimeline=path==='/home' || path.startsWith('/search') ||
       path.startsWith('/explore') || path.startsWith('/notifications') ||
       path.startsWith('/i/history') || path.startsWith('/i/bookmarks') ||
@@ -599,11 +657,13 @@ load();currentFields=blank();
       /^\/[a-zA-Z0-9_]{1,15}(?:\/|$)/.test(path);
     const full=options.enabled && (isTweet ? options.wideTweet : (options.wideTimeline && isTimeline));
     body.classList.toggle('xsf-layout-full',full);
+    body.classList.toggle('xsf-layout-profile',full&&isProfile);
     body.classList.toggle('xsf-sidebar-hidden',options.enabled&&options.hideSidebarContent);
     body.classList.toggle('xsf-hide-side-items',false);
     body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou);
     body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons);
     syncSearch();
+    expandProfileWidth();
     centerFeed();
   }
   let interval=setInterval(syncLayout,1200);
@@ -621,6 +681,7 @@ load();currentFields=blank();
   const cleanup=()=>{
     clearInterval(interval);
     resetSearch();
+    resetProfileWidth();
     for(const name of bodyClasses)document.body?.classList.remove(name);
     document.body?.style.removeProperty('--xsf-center-shift');
     style.remove();
