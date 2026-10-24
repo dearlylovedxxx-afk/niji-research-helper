@@ -7,8 +7,8 @@ const meta=readFileSync(new URL('../Niji_Research_Helper.meta.js',import.meta.ur
 
 test('Quick Seek script parses and both metadata versions match',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script, /@version\s+1\.0\.120/);
-  assert.match(meta, /@version\s+1\.0\.120/);
+  assert.match(script, /@version\s+1\.0\.121/);
+  assert.match(meta, /@version\s+1\.0\.121/);
 });
 
 test('two seek buttons are created once and attached to the player',()=>{
@@ -41,7 +41,7 @@ test('seek buttons start hidden and appear only near the lower player',()=>{
 });
 
 test('hover protection and navigation cleanup are present',()=>{
-  assert.match(script,/youtubeQuickSeekUi\.pointerOverButton = true/);
+  assert.match(script,/showYoutubeQuickSeekTemporarily\(\)/);
   assert.match(script,/clearTimeout\(youtubeQuickSeekUi\.hideTimer\)/);
   assert.match(script,/document\.removeEventListener\('pointermove', ui\.onPointerMove, true\)/);
   assert.match(script,/detachYoutubeQuickSeek\(\)/);
@@ -53,4 +53,13 @@ test('capture mouse movement above YouTube native controls instead of player hos
   assert.match(script,/document\.removeEventListener\('pointermove', ui\.onPointerMove, true\)/);
   assert.match(script,/document\.removeEventListener\('mousemove', ui\.onPointerMove, true\)/);
   assert.match(script,/youtubeQuickSeekNearBar\(host, event\)/);
+});
+
+test('a stationary cursor cannot keep the controls pinned on screen forever',()=>{
+  assert.doesNotMatch(script,/if \(youtubeQuickSeekUi\.pointerOverButton\) return/);
+  assert.match(script,/setYoutubeQuickSeekVisible\(false\);\s*\}, YT_QUICK_SEEK_HIDE_DELAY\)/);
+  assert.match(script,/Math\.abs\(x - ui\.lastPointerX\) < 2/);
+  assert.match(script,/Math\.abs\(y - ui\.lastPointerY\) < 2/);
+  assert.match(script,/lastPointerX: null/);
+  assert.match(script,/lastPointerY: null/);
 });

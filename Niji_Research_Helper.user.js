@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.120
+// @version      1.0.121
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.120';
+  const VERSION = '1.0.121';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5754,7 +5754,8 @@
     host: null,
     controls: null,
     hideTimer: 0,
-    pointerOverButton: false,
+    lastPointerX: null,
+    lastPointerY: null,
     onPointerMove: null,
     onPointerDown: null,
     onPointerLeave: null,
@@ -5772,7 +5773,9 @@
   function scheduleYoutubeQuickSeekHide() {
     clearTimeout(youtubeQuickSeekUi.hideTimer);
     youtubeQuickSeekUi.hideTimer = setTimeout(() => {
-      if (youtubeQuickSeekUi.pointerOverButton) return;
+      // Always expire after inactivity, including when the cursor is resting
+      // directly over a button. A stale pointerenter must never pin it open.
+      youtubeQuickSeekUi.hideTimer = 0;
       setYoutubeQuickSeekVisible(false);
     }, YT_QUICK_SEEK_HIDE_DELAY);
   }
@@ -5813,7 +5816,8 @@
     ui.onPointerMove = null;
     ui.onPointerDown = null;
     ui.onPointerLeave = null;
-    ui.pointerOverButton = false;
+    ui.lastPointerX = null;
+    ui.lastPointerY = null;
   }
 
   function attachYoutubeQuickSeek(host, controls) {
@@ -5825,6 +5829,15 @@
 
     ui.onPointerMove = event => {
       if (event.pointerType === 'touch') return;
+      const x = Number(event.clientX), y = Number(event.clientY);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      // YouTube/browser repainting a control can dispatch multiple mousemove
+      // events without the physical cursor moving. Both mousemove and pointermove
+      // may also report the same position; neither should restart the timer.
+      if (ui.lastPointerX !== null && ui.lastPointerY !== null &&
+          Math.abs(x - ui.lastPointerX) < 2 && Math.abs(y - ui.lastPointerY) < 2) return;
+      ui.lastPointerX = x;
+      ui.lastPointerY = y;
       if (youtubeQuickSeekNearBar(host, event)) showYoutubeQuickSeekTemporarily();
     };
     ui.onPointerDown = event => {
@@ -5835,8 +5848,8 @@
       }
     };
     ui.onPointerLeave = () => {
-      ui.pointerOverButton = false;
-      scheduleYoutubeQuickSeekHide();
+      // Leaving the player must not cancel the existing inactivity deadline.
+      // Merely exiting the hover region is not renewed activity.
     };
     // Capture pointer movements globally: on many YouTube layouts the
     // rendered seekbar controls are not descendants of #movie_player's
@@ -5910,13 +5923,9 @@
       ].join(';');
       button.appendChild(createYoutubeQuickSeekIcon(delta));
       button.addEventListener('pointerenter', () => {
-        youtubeQuickSeekUi.pointerOverButton = true;
-        clearTimeout(youtubeQuickSeekUi.hideTimer);
-        setYoutubeQuickSeekVisible(true);
-      });
-      button.addEventListener('pointerleave', () => {
-        youtubeQuickSeekUi.pointerOverButton = false;
-        scheduleYoutubeQuickSeekHide();
+        // Briefly refresh visibility on entry, but do not keep it displayed
+        // forever if the pointer then stays completely still over the button.
+        showYoutubeQuickSeekTemporarily();
       });
       // YouTube's parent player listens for clicks to toggle play/pause or
       // double clicks to fullscreen; only our control receives those events.
