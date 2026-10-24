@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.119
+// @version      1.0.120
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.119';
+  const VERSION = '1.0.120';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5797,11 +5797,16 @@
     const ui = youtubeQuickSeekUi;
     clearTimeout(ui.hideTimer);
     ui.hideTimer = 0;
-    if (ui.host) {
-      if (ui.onPointerMove) ui.host.removeEventListener('pointermove', ui.onPointerMove, true);
-      if (ui.onPointerDown) ui.host.removeEventListener('pointerdown', ui.onPointerDown, true);
-      if (ui.onPointerLeave) ui.host.removeEventListener('pointerleave', ui.onPointerLeave);
+    // YouTube renders the progress bar inside its own controls layer, and
+    // events there may not travel through our selected player host.
+    // Listen at the DOCUMENT CAPTURE phase instead; pointer position still
+    // must be inside this exact player's lower rectangle to show the buttons.
+    if (ui.onPointerMove) {
+      document.removeEventListener('pointermove', ui.onPointerMove, true);
+      document.removeEventListener('mousemove', ui.onPointerMove, true);
     }
+    if (ui.onPointerDown) document.removeEventListener('pointerdown', ui.onPointerDown, true);
+    if (ui.host && ui.onPointerLeave) ui.host.removeEventListener('pointerleave', ui.onPointerLeave);
     ui.controls?.remove();
     ui.host = null;
     ui.controls = null;
@@ -5833,8 +5838,13 @@
       ui.pointerOverButton = false;
       scheduleYoutubeQuickSeekHide();
     };
-    host.addEventListener('pointermove', ui.onPointerMove, true);
-    host.addEventListener('pointerdown', ui.onPointerDown, true);
+    // Capture pointer movements globally: on many YouTube layouts the
+    // rendered seekbar controls are not descendants of #movie_player's
+    // dispatch target, so a host-only listener never receives movement.
+    document.addEventListener('pointermove', ui.onPointerMove, true);
+    // MouseEvent fallback for browser/player layouts that suppress pointermove.
+    document.addEventListener('mousemove', ui.onPointerMove, true);
+    document.addEventListener('pointerdown', ui.onPointerDown, true);
     host.addEventListener('pointerleave', ui.onPointerLeave);
     // Hidden on first load: the first pointer movement in the bottom region
     // reveals both buttons, even while YouTube's standard controls are visible.
