@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.2.5
+// @version      1.2.6
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -46,7 +46,7 @@
   style.textContent=`
     html.xsf-pre-full header[role="banner"] {
       flex-grow:0!important;
-      margin-inline-start:max(0px,calc((100vw - 910px)/2 - 30px))!important;
+      margin-inline-start:max(0px,calc((100vw - 1230px)/2))!important;
     }
     html.xsf-pre-full main[role="main"] > div {
       width:100%!important;max-width:none!important;
@@ -57,24 +57,27 @@
     }
     html.xsf-pre-full [data-testid="sidebarColumn"] {display:none!important}
     /*
-       Only direct ancestors of timeline cells and profile header participate;
-       :has(> ...) cannot match descendants inside an image or video player.
+      Resize only the CONTAINERS of bookmark/profile items.
+      :has() targets ancestors; descendants such as quoted cards,
+      photos, video and player canvases never match these selectors.
+      Avoid altering elements within an article entirely.
     */
-    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):has(> [data-testid="cellInnerDiv"]),
-    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):has(> div > [data-testid="cellInnerDiv"]),
-    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):has(> div > div > [data-testid="cellInnerDiv"]),
-    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):has(> div > div > div > [data-testid="cellInnerDiv"]),
+    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):not(article):not([data-testid="tweet"]):has([data-testid="cellInnerDiv"]),
+    html.xsf-pre-history [data-testid="primaryColumn"] :is(div,section):not(article):not([data-testid="tweet"]):has(> article[data-testid="tweet"]),
     html.xsf-pre-history [data-testid="primaryColumn"] [data-testid="cellInnerDiv"],
     html.xsf-pre-history [data-testid="primaryColumn"] [role="tablist"],
-    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> [data-testid="UserProfileHeader_Items"]),
-    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> [data-testid="UserProfileHeader"]),
-    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> [role="tablist"]),
-    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> [data-testid="cellInnerDiv"]),
-    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> div > [data-testid="cellInnerDiv"]),
-    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):has(> div > div > [data-testid="cellInnerDiv"]),
-    html.xsf-pre-profile [data-testid="primaryColumn"] [data-testid="cellInnerDiv"] {
-      width:100%!important;max-width:100%!important;min-width:0!important;
-      box-sizing:border-box!important;align-self:stretch!important;
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):not(article):not([data-testid="tweet"]):has([data-testid="UserProfileHeader_Items"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):not(article):not([data-testid="tweet"]):has([data-testid="UserProfileHeader"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):not(article):not([data-testid="tweet"]):has([role="tablist"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):not(article):not([data-testid="tweet"]):has([data-testid="cellInnerDiv"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] :is(div,section):not(article):not([data-testid="tweet"]):has(> article[data-testid="tweet"]),
+    html.xsf-pre-profile [data-testid="primaryColumn"] [data-testid="cellInnerDiv"],
+    html.xsf-pre-profile [data-testid="primaryColumn"] [role="tablist"] {
+      width:100%!important;
+      max-width:100%!important;
+      min-width:0!important;
+      box-sizing:border-box!important;
+      align-self:stretch!important;
     }
   `;
   function mount(){
@@ -102,7 +105,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.2.5', KEY='xsf_userscript_v1';
+const VERSION='1.2.6', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
 const hidden=new Map();
@@ -558,7 +561,7 @@ load();currentFields=blank();
          its GPU/video subtree. Move nav and feed together via margin. */
       body.xsf-layout-full header[role="banner"] {
         flex-grow:0!important;
-        margin-inline-start:max(0px, calc((100vw - 910px) / 2 - 30px))!important;
+        margin-inline-start:max(0px, calc((100vw - 1230px) / 2))!important;
         translate:none!important;
       }
       body.xsf-layout-full [data-testid="primaryColumn"] {
