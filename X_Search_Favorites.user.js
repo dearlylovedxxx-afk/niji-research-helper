@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.2.6
+// @version      1.2.7
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -35,7 +35,7 @@
     let opts={};
     try{opts=JSON.parse(localStorage.getItem(settingsKey)||'{}')||{}}catch{}
     const wide=opts.enabled===true && supported &&
-      (tweet?opts.wideTweet!==false:opts.wideTimeline!==false);
+      (tweet?(opts.wideTweet!==false && opts.videoSafeTweet===false):opts.wideTimeline!==false);
     root.classList.toggle('xsf-pre-full',wide);
     root.classList.toggle('xsf-pre-history',wide&&history);
     root.classList.toggle('xsf-pre-profile',wide&&profile);
@@ -105,7 +105,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.2.6', KEY='xsf_userscript_v1';
+const VERSION='1.2.7', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
 const hidden=new Map();
@@ -201,7 +201,7 @@ const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views
   layout.append(msg);
   const sections=[
     ['切り替え',[['enabled','表示変更機能を有効にする']]],
-    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
+    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','動画再生優先モード（ポスト詳細のみ通常幅・原因切り分け用）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
     ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
     ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
   ];
@@ -481,7 +481,7 @@ load();currentFields=blank();
   const KEY='xsf_display_settings_v1';
   const defaults={
     enabled:false,
-    wideTimeline:true,wideTweet:true,nativeSearch:true,
+    wideTimeline:true,wideTweet:true,videoSafeTweet:true,nativeSearch:true,
     hideSidebarContent:true,hideForYou:false,hidePromoted:false,
     hideGrok:true,hidePremium:true,hideSubscriptions:true,
     hideMoney:true,hideJobs:true,hideAnalytics:true,
@@ -676,10 +676,11 @@ load();currentFields=blank();
       path.startsWith('/i/communities/') ||
       body.matches('.HomeTimeline,.List,.Community,.History,.Profile,.Search,.Bookmarks') ||
       /^\/[a-zA-Z0-9_]{1,15}(?:\/|$)/.test(path);
-    const full=options.enabled && (isTweet ? options.wideTweet : (options.wideTimeline && isTimeline));
+    const videoSafePage=options.enabled && options.videoSafeTweet && isTweet;
+    const full=options.enabled && !videoSafePage && (isTweet ? options.wideTweet : (options.wideTimeline && isTimeline));
     body.classList.toggle('xsf-layout-full',full);
     body.classList.toggle('xsf-layout-profile',full&&isProfile);
-    body.classList.toggle('xsf-sidebar-hidden',options.enabled&&options.hideSidebarContent);
+    body.classList.toggle('xsf-sidebar-hidden',options.enabled&&options.hideSidebarContent&&!videoSafePage);
     body.classList.toggle('xsf-hide-side-items',false);
     body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou);
     body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons);
