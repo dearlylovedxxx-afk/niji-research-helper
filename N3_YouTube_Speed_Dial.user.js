@@ -1,16 +1,92 @@
 // ==UserScript==
 // @name         N3 YouTube Speed Dial (active tab only)
 // @namespace    local.n3.m60
-// @version      1.2.0
-// @description  N3 rotary dial: YouTube, Nicovideo, NicoLive timeshift and other HTML5 videos. F13/F14: 1 / 1.25 / 1.5 / 2 / 4x.
+// @version      1.3.0
+// @description  N3 speed dial: YouTube, NicoVideo (sync playback state), NicoLive timeshift, and HTML5 videos. 1/1.25/1.5/2/4x.
 // @match        *://*/*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/N3_YouTube_Speed_Dial.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/N3_YouTube_Speed_Dial.user.js
 // ==/UserScript==
 (() => {
   'use strict';
+
+  // ---------------------------------------------------------------------
+  // NicoVideo player-state synchronization (only www.nicovideo.jp/watch/)
+  //
+  // Adapted from "Nicovideo speed limit unlocker" v1.1 by Eluentyw
+  // https://greasyfork.org/scripts/572657-nicovideo-speed-limit-unlocker
+  // Original author declares MIT License. Copyright remains with Eluentyw.
+  //
+  // MIT License permission notice:
+  // Permission is hereby granted, free of charge, to any person obtaining
+  // a copy of this software and associated documentation files (the
+  // "Software"), to deal in the Software without restriction, including
+  // without limitation the rights to use, copy, modify, merge, publish,
+  // distribute, sublicense, and/or sell copies of the Software, and to
+  // permit persons to whom the Software is furnished to do so, subject to
+  // the following conditions:
+  // The above copyright notice and this permission notice shall be included
+  // in all copies or substantial portions of the Software.
+  // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+  // OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  // MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+  // IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  // CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  // TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+  // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+  // ---------------------------------------------------------------------
+  if (location.hostname === 'www.nicovideo.jp' &&
+      location.pathname.startsWith('/watch/')) {
+    const capturedControllers = new WeakSet();
+    const originalDefineProperty = Object.defineProperty;
+
+    function captureController(controller, method, periodic) {
+      if (!controller || typeof controller !== 'object' ||
+          typeof method !== 'function' || capturedControllers.has(controller)) return;
+      capturedControllers.add(controller);
+      let syncing = false;
+      const sync = () => {
+        if (syncing) return;
+        const video = document.querySelector('video');
+        if (!video || !Number.isFinite(video.playbackRate)) return;
+        if (Math.abs(controller.playbackRate - video.playbackRate) <= 0.001) return;
+        syncing = true;
+        try { method.call(controller, video.playbackRate); }
+        catch (_) { /* Player may not yet be initialized. */ }
+        finally { syncing = false; }
+      };
+      window.addEventListener('ratechange', sync, true);
+      if (periodic) setInterval(sync, 1000);
+    }
+
+    // Capture the playback-rate state method when NicoVideo defines it.
+    Object.defineProperty = function(obj, prop, descriptor) {
+      if (prop === 'setPlaybackRate' && descriptor &&
+          typeof descriptor.value === 'function') {
+        captureController(obj, descriptor.value, true);
+      }
+      return Reflect.apply(originalDefineProperty, this, arguments);
+    };
+
+    // Also cover direct assignments, used by some versions of the player.
+    const priorDescriptor =
+      Object.getOwnPropertyDescriptor(Object.prototype, 'setPlaybackRate');
+    if (!priorDescriptor || priorDescriptor.configurable) {
+      originalDefineProperty(Object.prototype, 'setPlaybackRate', {
+        configurable: true,
+        set: function(fn) {
+          if (typeof fn === 'function' && this.contents) {
+            captureController(this, fn, false);
+          }
+          this.__setPlaybackRate = fn;
+        },
+        get: function() { return this.__setPlaybackRate; }
+      });
+    }
+  }
+
 
   // Only a focused browser tab (or focused embedded player frame) receives N3 keys.
   // Runs on all HTTP(S) pages to support ordinary HTML5 video sites. It does not
