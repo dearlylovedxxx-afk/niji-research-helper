@@ -5745,7 +5745,7 @@
       '#npf-yt-quick-seek .npf-yt-quick-seek-btn:hover{background:rgba(27,31,40,.78)!important;opacity:1!important;transform:scale(1.06)!important}',
       '#npf-yt-quick-seek .npf-yt-quick-seek-btn:active{transform:scale(.95)!important;background:rgba(27,31,40,.88)!important}',
       '#npf-yt-quick-seek .npf-yt-quick-seek-btn:focus-visible{outline:2px solid #fff!important;outline-offset:3px!important}',
-      '@media (max-width:550px){#npf-yt-quick-seek{bottom:48px!important;gap:8px!important}#npf-yt-quick-seek .npf-yt-quick-seek-btn{width:39px!important;height:39px!important}}'
+      '@media (prefers-reduced-motion:reduce){#npf-yt-quick-seek .npf-yt-quick-seek-btn{transition:none!important}}'
     ].join('\n');
     (document.head || document.documentElement).appendChild(style);
   }
@@ -5767,17 +5767,18 @@
     existing?.remove();
     ensureYoutubeQuickSeekStyle();
 
+    const mobile = isMobileYoutubeUi();
     const controls = document.createElement('div');
     controls.id = YT_QUICK_SEEK_ID;
     controls.setAttribute('role', 'group');
     controls.setAttribute('aria-label', '動画を10秒戻す・進める');
     controls.style.cssText = [
       'position:absolute!important',
-      'left:50%!important', 'bottom:62px!important',
+      'left:50%!important', 'bottom:' + (mobile ? '54px' : '62px') + '!important',
       'transform:translateX(-50%)!important',
       'z-index:95!important', 'display:flex!important',
       'align-items:center!important','justify-content:center!important',
-      'gap:12px!important','height:auto!important','width:auto!important',
+      'gap:' + (mobile ? '9px' : '12px') + '!important','height:auto!important','width:auto!important',
       'pointer-events:none!important','box-sizing:border-box!important'
     ].join(';');
 
@@ -5793,10 +5794,10 @@
         'width:45px!important','height:45px!important','min-width:45px!important',
         'min-height:45px!important','padding:0!important','margin:0!important',
         'border-radius:50%!important','border:1px solid rgba(255,255,255,.40)!important',
-        'background:rgba(27,31,40,.46)!important','color:#fff!important',
+        'background:rgba(27,31,40,.46)','color:#fff!important',
         'box-shadow:0 2px 9px rgba(0,0,0,.24)!important',
         'backdrop-filter:blur(4px)','-webkit-backdrop-filter:blur(4px)',
-        'opacity:.78!important','transform:scale(1)!important',
+        'opacity:.78','transform:scale(1)',
         'pointer-events:auto!important','cursor:pointer!important',
         'touch-action:manipulation!important','user-select:none!important',
         '-webkit-user-select:none!important','line-height:1!important',
