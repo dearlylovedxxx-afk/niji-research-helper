@@ -5894,6 +5894,7 @@
     status: '',
     lastSyncToken: '',
     tick: null,
+    lifecycleAttached: false,
   };
 
   function youtubeLiveClockEmit(kind, fields = {}) {
@@ -6089,17 +6090,23 @@
         youtubeLiveClockRefresh();
         if (youtubeLiveClockIsMarked()) youtubeLiveClockAnnounce();
       }, 2500);
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) { youtubeLiveClockAnnounce(); youtubeLiveClockRefresh(); }
-      });
-      window.addEventListener('pagehide', () => {
-        stateLc.markedVideoId = '';
-        youtubeLiveClockAnnounce();
-        stateLc.channel?.close();
-        stateLc.channel = null;
-        clearInterval(stateLc.tick);
-        stateLc.tick = null;
-      });
+      if (!stateLc.lifecycleAttached) {
+        stateLc.lifecycleAttached = true;
+        document.addEventListener('visibilitychange', () => {
+          if (!document.hidden) { youtubeLiveClockAnnounce(); youtubeLiveClockRefresh(); }
+        });
+        window.addEventListener('pagehide', () => {
+          stateLc.markedVideoId = '';
+          youtubeLiveClockAnnounce();
+          stateLc.channel?.close();
+          stateLc.channel = null;
+          clearInterval(stateLc.tick);
+          stateLc.tick = null;
+        });
+        window.addEventListener('pageshow', event => {
+          if (event.persisted && !stateLc.channel) youtubeLiveClockInitialize();
+        });
+      }
       youtubeLiveClockEmit('hello');
     } catch (error) {
       stateLc.channel = null;
