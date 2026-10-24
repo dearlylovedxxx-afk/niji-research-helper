@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.2
+// @version      1.3.3
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -169,7 +169,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.2', KEY='xsf_userscript_v1';
+const VERSION='1.3.3', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -181,6 +181,20 @@ const isGuardedVideoPage=()=>{
     return post ? opts.videoGuard!==false :
       (opts.enabled===true && opts.tlVideoIsolation!==false);
   }catch{return post}
+};
+const isProtectedTimeline=()=>{
+  const path=location.pathname;
+  if(!(path==='/home'||path.startsWith('/i/lists/')||path.startsWith('/i/communities/')))return false;
+  try{
+    const opts=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}')||{};
+    return opts.enabled===true&&opts.tlVideoIsolation!==false;
+  }catch{return false}
+};
+const tlLauncherEnabled=()=>{
+  try{
+    const opts=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}')||{};
+    return opts.tlLauncher!==false;
+  }catch{return true}
 };
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
@@ -265,7 +279,33 @@ scanBarDone.onclick=()=>{
 scanBar.append(scanBarText,scanBarDone);sh.append(scanBar);
 const panel=E('section');panel.id='panel';panel.hidden=true;const sorted=E('section');sorted.id='sorted';sorted.hidden=true;sh.append(panel,sorted);
 function closeAll(){panel.hidden=true;sorted.hidden=true;}
-launch.onclick=()=>{const open=panel.hidden;closeAll();if(open){panel.hidden=false;renderPanel();}};
+// Detached from X's player and from the XSF panel host until the user clicks.
+const protectedLauncherHost=E('div');
+protectedLauncherHost.id='xsf-video-safe-launcher';
+protectedLauncherHost.style.cssText='position:fixed!important;right:12px!important;bottom:14px!important;z-index:2147483640!important;pointer-events:auto!important;';
+const launchShadow=protectedLauncherHost.attachShadow({mode:'open'});
+const launchCSS=E('style');
+launchCSS.textContent=`:host{all:initial}button{appearance:none;cursor:pointer;border:1px solid #b3d9f2;background:#1d9bf0;color:#fff;border-radius:22px;padding:10px 11px;box-shadow:0 4px 15px #0004;min-height:43px;font:700 12px system-ui}`;
+const protectedButton=E('button','','🔎 検索');
+protectedButton.type='button';
+protectedButton.setAttribute('aria-label','X Search Favoritesを開く');
+launchShadow.append(launchCSS,protectedButton);
+protectedButton.onclick=()=>{
+  if(!isProtectedTimeline()||!tlLauncherEnabled())return;
+  protectedLauncherHost.remove();
+  (document.body||document.documentElement).append(host);
+  panel.hidden=true;
+  launch.click();
+};
+launch.onclick=()=>{
+  const open=panel.hidden;closeAll();
+  if(open){panel.hidden=false;renderPanel();}
+  else if(isProtectedTimeline()){
+    host.remove();
+    if(tlLauncherEnabled()&&!protectedLauncherHost.isConnected)
+      (document.body||document.documentElement).append(protectedLauncherHost);
+  }
+};
 const status=()=>sh.querySelector('#xsf-status');function message(t){if(status())status().textContent=t;}
 function renderPanel(){panel.replaceChildren();panel.append(E('h2','',`🔎 X Search Favorites v${VERSION}`));const tabs=E('div','tabs');const views=E('div');panel.append(tabs,views);for(const [id,label] of [['builder','検索'],['saved','⭐ 保存'],['history','履歴'],['layout','🖥️ 表示']]){const b=E('button','',label);b.onclick=()=>{[...views.children].forEach(v=>v.hidden=v.dataset.tab!==id);};tabs.append(b);}
 const builder=E('div','tab');builder.dataset.tab='builder';const saved=E('div','tab');saved.dataset.tab='saved';saved.hidden=true;const history=E('div','tab');history.dataset.tab='history';history.hidden=true;views.append(builder,saved,history);
@@ -277,7 +317,7 @@ const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views
   layout.append(msg);
   const sections=[
     ['切り替え',[['enabled','表示変更機能を有効にする']]],
-    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['tlVideoIsolation','TL動画の分離保護（全幅表示は維持／TL検索パネル一時停止）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
+    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['tlVideoIsolation','TL動画の分離保護（全幅表示は維持）'],['tlLauncher','TLに軽量「🔎 検索」起動ボタンを表示（試験的）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
     ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
     ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
   ];
@@ -544,15 +584,27 @@ const observer=new MutationObserver(()=>{
 function syncCoreObserver(){
   if(isGuardedVideoPage()){
     if(observerActive){observer.disconnect();observerActive=false;}
-    if(host.isConnected)host.remove();
     scanStop=true;manualCapture=false;
     if(!scanBar.hidden)scanBar.hidden=true;
     if(!sorted.hidden)sorted.hidden=true;
     if(filterOn){filterOn=false;restore();}
+    if(isProtectedTimeline() && tlLauncherEnabled()){
+      // Only a tiny launcher remains while playing video. The original
+      // complete search panel mounts solely while the user opens it.
+      if(!panel.hidden && host.isConnected){protectedLauncherHost.remove();}
+      else {
+        if(host.isConnected)host.remove();
+        if(!protectedLauncherHost.isConnected)
+          (document.body||document.documentElement).append(protectedLauncherHost);
+      }
+    }else{
+      if(host.isConnected)host.remove();
+      protectedLauncherHost.remove();
+    }
     return false;
   }
-  // Only search filtering/collecting needs a DOM-wide observer. Observing every
-  // video update on a regular timeline is unnecessary and can disturb X's player.
+  protectedLauncherHost.remove();
+  // Only search filtering/collecting needs a DOM-wide observer.
   const needsObserver=activeSearch() &&
     (filterOn || scanRunning || manualCapture || !sorted.hidden);
   if(needsObserver && !observerActive){
@@ -585,7 +637,7 @@ timer=setInterval(()=>{
 },1100);
 const onNijiCloudApplied=()=>refreshSharedData();
 window.addEventListener('niji-cloud-sync-applied',onNijiCloudApplied);
-window.__xsfUserscriptCleanup=()=>{scanStop=true;manualCapture=false;observer.disconnect();clearInterval(timer);clearTimeout(scheduled);window.removeEventListener('niji-cloud-sync-applied',onNijiCloudApplied);restore();host.remove();};
+window.__xsfUserscriptCleanup=()=>{scanStop=true;manualCapture=false;observer.disconnect();clearInterval(timer);clearTimeout(scheduled);window.removeEventListener('niji-cloud-sync-applied',onNijiCloudApplied);restore();host.remove();protectedLauncherHost.remove();};
 load();currentFields=blank();
 })();
 
@@ -613,7 +665,7 @@ load();currentFields=blank();
   const KEY='xsf_display_settings_v1';
   const defaults={
     enabled:false,
-    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,tlVideoIsolation:true,nativeSearch:true,
+    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,tlVideoIsolation:true,tlLauncher:true,nativeSearch:true,
     hideSidebarContent:true,hideForYou:false,hidePromoted:false,
     hideGrok:true,hidePremium:true,hideSubscriptions:true,
     hideMoney:true,hideJobs:true,hideAnalytics:true,
