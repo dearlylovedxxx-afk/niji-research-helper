@@ -7,8 +7,8 @@ const meta=readFileSync(new URL('../Niji_Research_Helper.meta.js',import.meta.ur
 
 test('Quick Seek script parses and both metadata versions match',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script, /@version\s+1\.0\.119/);
-  assert.match(meta, /@version\s+1\.0\.119/);
+  assert.match(script, /@version\s+1\.0\.120/);
+  assert.match(meta, /@version\s+1\.0\.120/);
 });
 
 test('two seek buttons are created once and attached to the player',()=>{
@@ -35,7 +35,7 @@ test('buttons are positioned safely on real YouTube players and SPA navigation',
 test('seek buttons start hidden and appear only near the lower player',()=>{
   assert.match(script,/YT_QUICK_SEEK_HIDE_DELAY = 3000/);
   assert.match(script,/Math\.min\(145, rect\.height \* 0\.30\)/);
-  assert.match(script,/host\.addEventListener\('pointermove', ui\.onPointerMove, true\)/);
+  assert.match(script,/document\.addEventListener\('pointermove', ui\.onPointerMove, true\)/);
   assert.match(script,/setYoutubeQuickSeekVisible\(false\)/);
   assert.match(script,/showYoutubeQuickSeekTemporarily\(\)/);
 });
@@ -43,6 +43,14 @@ test('seek buttons start hidden and appear only near the lower player',()=>{
 test('hover protection and navigation cleanup are present',()=>{
   assert.match(script,/youtubeQuickSeekUi\.pointerOverButton = true/);
   assert.match(script,/clearTimeout\(youtubeQuickSeekUi\.hideTimer\)/);
-  assert.match(script,/ui\.host\.removeEventListener\('pointermove', ui\.onPointerMove, true\)/);
+  assert.match(script,/document\.removeEventListener\('pointermove', ui\.onPointerMove, true\)/);
   assert.match(script,/detachYoutubeQuickSeek\(\)/);
+});
+
+test('capture mouse movement above YouTube native controls instead of player host only',()=>{
+  assert.match(script,/document\.addEventListener\('pointermove', ui\.onPointerMove, true\)/);
+  assert.match(script,/document\.addEventListener\('mousemove', ui\.onPointerMove, true\)/);
+  assert.match(script,/document\.removeEventListener\('pointermove', ui\.onPointerMove, true\)/);
+  assert.match(script,/document\.removeEventListener\('mousemove', ui\.onPointerMove, true\)/);
+  assert.match(script,/youtubeQuickSeekNearBar\(host, event\)/);
 });
