@@ -41,8 +41,8 @@ test('N3 retains F13-F14 video dial and limits NicoLive comments module to its w
 test('LiveClock is one-shot, tab-scoped and available from Niji Research Helper', () => {
   const script = file('Niji_Research_Helper.user.js');
   const meta = file('Niji_Research_Helper.meta.js');
-  assert.match(script, /@version\s+1\.0\.122/);
-  assert.match(meta, /@version\s+1\.0\.122/);
+  assert.match(script, /@version\s+1\.0\.123/);
+  assert.match(meta, /@version\s+1\.0\.123/);
   assert.match(script, /new BroadcastChannel\('niji-research-helper-liveclock-v1'\)/);
   assert.match(script, /youtubeLiveClockReceiveSync\(message\)/);
   assert.match(script, /youtubeLiveClockMarkToggle\(\)/);
