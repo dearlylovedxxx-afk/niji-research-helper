@@ -6401,7 +6401,11 @@
       document.removeEventListener('mousemove',m.onMove,true);
     }
     if(m.onDown)document.removeEventListener('pointerdown',m.onDown,true);
-    if(m.onBlur)window.removeEventListener('blur',m.onBlur);
+    if(m.onBlur){
+      window.removeEventListener('blur',m.onBlur);
+      document.removeEventListener('pointerleave',m.onBlur,true);
+      document.removeEventListener('mouseleave',m.onBlur,true);
+    }
     m.root?.remove();
     m.root=null;m.host=null;m.videoId='';m.visible=false;
     m.onMove=null;m.onDown=null;m.onBlur=null;
@@ -6565,6 +6569,8 @@
     document.addEventListener('mousemove',m.onMove,true);
     document.addEventListener('pointerdown',m.onDown,true);
     window.addEventListener('blur',m.onBlur);
+    document.addEventListener('pointerleave',m.onBlur,true);
+    document.addEventListener('mouseleave',m.onBlur,true);
     youtubeLiveClockMiniRefresh();
   }
 
