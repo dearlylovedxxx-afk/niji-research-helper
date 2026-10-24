@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.2.8
+// @version      1.2.9
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -37,6 +37,11 @@
     const guarded=tweet && opts.videoGuard!==false;
     const wide=opts.enabled===true && supported && !guarded &&
       (tweet?(opts.wideTweet!==false && opts.videoSafeTweet===false):opts.wideTimeline!==false);
+    // This class deliberately does NOT activate the main XSF UI, native
+    // search relocation, hide rules or DOM watchers on a video post.
+    const guardedWide=opts.enabled===true && guarded &&
+      opts.guardWidePost!==false && opts.wideTweet!==false;
+    root.classList.toggle('xsf-guard-wide',guardedWide);
     if(guarded)document.body?.classList.remove(
       'xsf-layout-full','xsf-layout-profile','xsf-sidebar-hidden','xsf-hide-side-items',
       'xsf-native-search-on','xsf-display-active','xsf-monochrome-buttons','xsf-hide-for-you'
@@ -61,6 +66,29 @@
       max-width:990px!important;translate:none!important;
     }
     html.xsf-pre-full [data-testid="sidebarColumn"] {display:none!important}
+    /*
+      Guarded post experiment: only native layout's flex columns are changed.
+      Nothing inside the post, player, media elements, or React tree is touched.
+      If the player still goes white, disabling this option restores the
+      confirmed-working guarded default without uninstalling XSF.
+    */
+    html.xsf-guard-wide header[role="banner"] {
+      flex-grow:0!important;
+      margin-inline-start:max(0px,calc((100vw - 1230px)/2))!important;
+    }
+    html.xsf-guard-wide main[role="main"] > div {
+      width:100%!important;
+      max-width:none!important;
+    }
+    html.xsf-guard-wide [data-testid="primaryColumn"] {
+      flex:1 1 auto!important;
+      width:100%!important;
+      max-width:990px!important;
+      min-width:0!important;
+    }
+    html.xsf-guard-wide [data-testid="sidebarColumn"] {
+      display:none!important;
+    }
     /*
       Resize only the CONTAINERS of bookmark/profile items.
       :has() targets ancestors; descendants such as quoted cards,
@@ -113,7 +141,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.2.8', KEY='xsf_userscript_v1';
+const VERSION='1.2.9', KEY='xsf_userscript_v1';
 const isGuardedPost=()=>{
   if(!/\/status\/\d+(?:\/|$)/.test(location.pathname))return false;
   try{const saved=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}');return saved?.videoGuard!==false}
@@ -214,7 +242,7 @@ const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views
   layout.append(msg);
   const sections=[
     ['切り替え',[['enabled','表示変更機能を有効にする']]],
-    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','ポスト詳細で通常幅を使う（従来の動画対策）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
+    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
     ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
     ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
   ];
@@ -540,7 +568,7 @@ load();currentFields=blank();
   const KEY='xsf_display_settings_v1';
   const defaults={
     enabled:false,
-    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,nativeSearch:true,
+    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,nativeSearch:true,
     hideSidebarContent:true,hideForYou:false,hidePromoted:false,
     hideGrok:true,hidePremium:true,hideSubscriptions:true,
     hideMoney:true,hideJobs:true,hideAnalytics:true,
