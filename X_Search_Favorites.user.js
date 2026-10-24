@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.2.2
+// @version      1.2.3
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -14,7 +14,7 @@
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.2.2', KEY='xsf_userscript_v1';
+const VERSION='1.2.3', KEY='xsf_userscript_v1';
 if(window.__xsfUserscriptCleanup) window.__xsfUserscriptCleanup();
 let data={folders:['未分類'],savedSearches:[],history:[]}, route=location.href, filterOn=false, filterQuery='', sortOn=false, sortRows=new Map(), timer=0, lastDataRaw='';
 const hidden=new Map();
@@ -111,7 +111,7 @@ const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views
   const sections=[
     ['切り替え',[['enabled','表示変更機能を有効にする']]],
     ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
-    ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制']]],
+    ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
     ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
   ];
   for(const [heading,items] of sections){
@@ -394,7 +394,7 @@ load();currentFields=blank();
     hideSidebarContent:true,hideForYou:false,hidePromoted:false,
     hideGrok:true,hidePremium:true,hideSubscriptions:true,
     hideMoney:true,hideJobs:true,hideAnalytics:true,
-    hideMessageDrawer:true,hideWhoToFollow:true,
+    hideMessageDrawer:true,hideWhoToFollow:true,hideCalls:true,hideCreatorStudio:true,
     monochromeButtons:false,
   };
   let options={...defaults};
@@ -434,6 +434,8 @@ load();currentFields=blank();
       '[data-testid="ownProfilePaymentsButton"]',
       '[data-testid="ownProfilePaymentsButtonWithBalance"]'
     ],
+    hideCalls:['header nav a[href="/i/calls"]','[role="menuitem"] a[href="/i/calls"]'],
+    hideCreatorStudio:['header nav a[href$="/creators/studio"]','[role="menuitem"] a[href$="/creators/studio"]'],
     hideJobs:[
       'header nav a[href="/jobs"]','[role="menuitem"] a[href="/jobs"]',
       '[data-testid="jobs"]'
@@ -450,7 +452,7 @@ load();currentFields=blank();
     ]
   };
   const bodyClasses=[
-    'xsf-layout-full','xsf-hide-side-items','xsf-native-search-on','xsf-hide-for-you',
+    'xsf-layout-full','xsf-hide-side-items','xsf-sidebar-hidden','xsf-native-search-on','xsf-hide-for-you',
     'xsf-monochrome-buttons'
   ];
   let marked=[],activeSearchForm=null;
@@ -465,14 +467,17 @@ load();currentFields=blank();
     const rules=[];
     rules.push(`
       /*
-       * X's header and main content participate in one horizontal flex row.
-       * Use a margin on the actual navigation column to center both columns,
-       * rather than translating the content or changing the full viewport width.
-       * At >= ~900px, the 218px nav + 637px timeline fit inside this width.
+       * Center the actual header + primary feed together by measured position.
+       * Shift them as independent elements, leaving the native sidebar search
+       * anchored to the right edge of the browser.
        */
       body.xsf-layout-full header[role="banner"] {
         flex-grow:0!important;
         margin-inline-start:max(0px, calc((100vw - 910px) / 2))!important;
+        translate:var(--xsf-center-shift,0px) 0!important;
+      }
+      body.xsf-layout-full [data-testid="primaryColumn"] {
+        translate:var(--xsf-center-shift,0px) 0!important;
       }
       body.xsf-layout-full main[role="main"] > div {width:100%!important;max-width:none!important}
       body.xsf-layout-full [data-testid="primaryColumn"] {
@@ -481,10 +486,8 @@ load();currentFields=blank();
       body.xsf-layout-full [data-testid="primaryColumn"] > div:first-child > div:last-child {
         max-width:990px!important
       }
-      body.xsf-layout-full [data-testid="sidebarColumn"] {display:none!important}
-      body.xsf-hide-side-items [data-testid="sidebarColumn"] aside[role="complementary"] {
-        display:none!important
-      }
+      body.xsf-layout-full [data-testid="sidebarColumn"],
+      body.xsf-sidebar-hidden [data-testid="sidebarColumn"] {display:none!important}
       body.xsf-hide-for-you [data-testid="primaryColumn"] nav[role="navigation"] [role="tablist"] > div:first-child {display:none!important}
       body.xsf-monochrome-buttons article[data-testid="tweet"] [role="group"] button:not(:hover) {
         filter:grayscale(1)
@@ -541,7 +544,13 @@ load();currentFields=blank();
     const body=document.body;
     const sidebar=document.querySelector('[data-testid="sidebarColumn"]');
     if(!body || !sidebar){resetSearch();return;}
-    const newMode=options.enabled && options.nativeSearch && body.classList.contains('xsf-layout-full');
+    const newMode=options.enabled && options.nativeSearch &&
+      (body.classList.contains('xsf-layout-full') || body.classList.contains('xsf-sidebar-hidden'));
+    // A search field already exists in the main column on Search/Explore.
+    if ((location.pathname.startsWith('/search') || location.pathname.startsWith('/explore')) &&
+        document.querySelector('[data-testid="primaryColumn"] form[role="search"]')) {
+      resetSearch();return;
+    }
     // When Control Panel for Twitter is still enabled, maintain the previous
     // native-search restoration until the user deliberately opts into migration.
     const primary=document.querySelector('[data-testid="primaryColumn"]');
@@ -559,18 +568,43 @@ load();currentFields=blank();
     if(form!==activeSearchForm || !form.isConnected)markSearch(form,sidebar);
     body.classList.add('xsf-native-search-on');
   }
+  function centerFeed(){
+    const body=document.body;
+    if(!body?.classList.contains('xsf-layout-full')){
+      body?.style.removeProperty('--xsf-center-shift');return;
+    }
+    const header=document.querySelector('header[role="banner"]');
+    const primary=document.querySelector('[data-testid="primaryColumn"]');
+    if(!header || !primary)return;
+    const nav=header.getBoundingClientRect(), feed=primary.getBoundingClientRect();
+    if(nav.width<50 || feed.width<200)return;
+    const left=Math.min(nav.left,feed.left), right=Math.max(nav.right,feed.right);
+    const delta=(innerWidth-left-right)/2;
+    if(Math.abs(delta)<=1.5)return;
+    const current=parseFloat(body.style.getPropertyValue('--xsf-center-shift'))||0;
+    const next=Math.max(-1200,Math.min(1200,current+delta));
+    if(Math.abs(next-current)>1)body.style.setProperty('--xsf-center-shift',next.toFixed(2)+'px');
+  }
   function syncLayout(){
     const body=document.body;
     if(!body)return;
     const path=location.pathname;
-    const isTimeline=path==='/home'||path==='/explore/tabs/for_you'||path.startsWith('/i/lists/')||path.startsWith('/i/communities/')||body.matches('.HomeTimeline,.List,.Community');
-    const isTweet=/(^|\/)status\/\d+(?:\/|$)/.test(path);
-    const full=options.enabled&&((options.wideTimeline&&isTimeline)||(options.wideTweet&&isTweet));
+    const isTweet=path.includes('/status/') && /\/status\/\d+(?:\/|$)/.test(path);
+    const isTimeline=path==='/home' || path.startsWith('/search') ||
+      path.startsWith('/explore') || path.startsWith('/notifications') ||
+      path.startsWith('/i/history') || path.startsWith('/i/bookmarks') ||
+      path.startsWith('/bookmarks') || path.startsWith('/i/lists/') ||
+      path.startsWith('/i/communities/') ||
+      body.matches('.HomeTimeline,.List,.Community,.History,.Profile,.Search,.Bookmarks') ||
+      /^\/[a-zA-Z0-9_]{1,15}(?:\/|$)/.test(path);
+    const full=options.enabled && (isTweet ? options.wideTweet : (options.wideTimeline && isTimeline));
     body.classList.toggle('xsf-layout-full',full);
-    body.classList.toggle('xsf-hide-side-items',options.enabled&&options.hideSidebarContent&&!full);
+    body.classList.toggle('xsf-sidebar-hidden',options.enabled&&options.hideSidebarContent);
+    body.classList.toggle('xsf-hide-side-items',false);
     body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou);
     body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons);
     syncSearch();
+    centerFeed();
   }
   let interval=setInterval(syncLayout,1200);
   const api={
@@ -588,6 +622,7 @@ load();currentFields=blank();
     clearInterval(interval);
     resetSearch();
     for(const name of bodyClasses)document.body?.classList.remove(name);
+    document.body?.style.removeProperty('--xsf-center-shift');
     style.remove();
     if(window.__xsfLayoutAPI===api)delete window.__xsfLayoutAPI;
     if(window.__xsfLayoutCleanup===cleanup)delete window.__xsfLayoutCleanup;
