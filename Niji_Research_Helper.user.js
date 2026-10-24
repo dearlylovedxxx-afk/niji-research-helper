@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.122
+// @version      1.0.123
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.122';
+  const VERSION = '1.0.123';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -6224,6 +6224,7 @@
           (!clockReady ? ' ／ 配信開始時刻の取得待ち' : '') +
           (stateLc.status ? ' ／ ' + stateLc.status : '');
     }
+    youtubeLiveClockMiniRefresh();
   }
 
   function youtubeLiveClockMarkToggle() {
@@ -6364,6 +6365,213 @@
       console.debug('[NRH][LiveClock setup]', String(error?.message || error));
     }
     youtubeLiveClockRefresh();
+  }
+
+
+  // Tiny, hover-only LiveClock toolbar. The engine beneath it always converts
+  // archive positions to actual broadcast wall-clock instants using startMs.
+  const youtubeLiveClockMini = {
+    host:null, root:null, videoId:'', visible:false, step:1,
+    onMove:null, onDown:null, onBlur:null, touchTimer:0,
+  };
+
+  function youtubeLiveClockMiniShow(show) {
+    const m=youtubeLiveClockMini;
+    if(!m.root?.isConnected)return;
+    m.visible=!!show;
+    m.root.style.setProperty('opacity',show?'1':'0','important');
+    m.root.style.setProperty('visibility',show?'visible':'hidden','important');
+    m.root.style.setProperty('pointer-events',show?'auto':'none','important');
+  }
+
+  function youtubeLiveClockMiniNear(event,host) {
+    const r=host?.getBoundingClientRect?.();
+    if(!r || r.width<200 || r.height<120)return false;
+    const x=Number(event.clientX),y=Number(event.clientY);
+    return Number.isFinite(x)&&Number.isFinite(y)&&
+      x>=r.right-Math.min(250,r.width*.55)&&x<=r.right&&
+      y>=r.top&&y<=r.top+Math.min(88,r.height*.35);
+  }
+
+  function youtubeLiveClockMiniDetach() {
+    const m=youtubeLiveClockMini;
+    clearTimeout(m.touchTimer);
+    if(m.onMove){
+      document.removeEventListener('pointermove',m.onMove,true);
+      document.removeEventListener('mousemove',m.onMove,true);
+    }
+    if(m.onDown)document.removeEventListener('pointerdown',m.onDown,true);
+    if(m.onBlur){
+      window.removeEventListener('blur',m.onBlur);
+      document.removeEventListener('pointerleave',m.onBlur,true);
+      document.removeEventListener('mouseleave',m.onBlur,true);
+    }
+    m.root?.remove();
+    m.root=null;m.host=null;m.videoId='';m.visible=false;
+    m.onMove=null;m.onDown=null;m.onBlur=null;
+    m.touchTimer=0;
+  }
+
+  function youtubeLiveClockMiniRefresh() {
+    const m=youtubeLiveClockMini;
+    if(!m.root?.isConnected)return;
+    const id=currentYoutubeVideoId(),video=youtubeVideoElement();
+    const marked=youtubeLiveClockIsMarked();
+    const readyVideo=!!(id&&video&&Number.isFinite(video.duration)&&video.duration>0);
+    const start=youtubeBroadcastClock.videoId===id?youtubeBroadcastClock.startMs:null;
+    const clockReady=Number.isFinite(start);
+    const power=$('#npf-liveclock-mini-power',m.root);
+    const sync=$('#npf-liveclock-mini-sync',m.root);
+    const time=$('#npf-liveclock-mini-time',m.root);
+    const peers=$('#npf-liveclock-mini-peers',m.root);
+    if(power){
+      power.disabled=!youtubeLiveClockTabs.channel||!readyVideo;
+      power.setAttribute('aria-pressed',String(marked));
+      power.style.setProperty('color',marked?'#6ce9ff':'#eee','important');
+      power.title=marked?'同期対象ON：クリックで解除':'同期対象OFF：クリックで登録';
+    }
+    if(sync){
+      sync.disabled=!youtubeLiveClockTabs.channel||!marked||!readyVideo||!clockReady;
+      sync.title=clockReady?'このアーカイブの実配信時刻に他のタブを合わせる':'実配信開始時刻の取得待ち';
+    }
+    if(time){
+      if(clockReady&&video&&Number.isFinite(video.currentTime)){
+        const date=new Date(start+video.currentTime*1000);
+        time.textContent=date.toLocaleTimeString('ja-JP',
+          {timeZone:'Asia/Tokyo',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+        time.title='実際の配信日時（日本時間） '+date.toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'});
+      }else{
+        time.textContent='時刻取得待ち';time.title='実配信開始時刻が未取得です';
+      }
+    }
+    if(peers){
+      let count=0;const now=Date.now();
+      for(const p of youtubeLiveClockTabs.peers.values())if(p.marked&&now-p.at<12000)count++;
+      peers.textContent=(marked?'ON':'OFF')+' 他'+count;
+      peers.title=youtubeLiveClockTabs.status||('他の同期対象 '+count+'タブ');
+    }
+  }
+
+  function youtubeLiveClockMiniCalibrate(sign) {
+    if(!youtubeVideoElement())return;
+    // Calibration shifts this archive only; the next sync uses its new
+    // real broadcast instant as the common reference.
+    ++youtubeSeekHandoffRun;
+    document.dispatchEvent(new CustomEvent('nrh-liveclock-manual-seek'));
+    seekYoutube(sign*youtubeLiveClockMini.step);
+    youtubeLiveClockMiniRefresh();
+  }
+
+  function ensureYoutubeLiveClockMini() {
+    const m=youtubeLiveClockMini;
+    const watch=location.pathname==='/watch'||
+      /^\/live\/[A-Za-z0-9_-]{11}(?:\/|$)/.test(location.pathname);
+    const id=watch?currentYoutubeVideoId():'';
+    const host=id&&youtubeVideoElement()?youtubeTimestampPlayerHost():null;
+    const valid=host?.isConnected&&(host.id==='movie_player'||host.classList.contains('html5-video-player'));
+    if(!id||!valid){if(m.host||m.root)youtubeLiveClockMiniDetach();return}
+    if(m.root?.isConnected&&m.host===host&&m.videoId===id){youtubeLiveClockMiniRefresh();return}
+    youtubeLiveClockMiniDetach();
+    const root=document.createElement('div');
+    root.id='npf-liveclock-mini';
+    root.setAttribute('role','group');
+    root.setAttribute('aria-label','実配信時刻による複数アーカイブの同期');
+    root.style.cssText=[
+      'position:absolute!important','top:7px!important','right:7px!important',
+      'z-index:190!important','box-sizing:border-box!important','width:205px!important',
+      'padding:5px 6px!important','border-radius:7px!important',
+      'border:1px solid rgba(255,255,255,.22)!important',
+      'background:rgba(10,16,26,.64)!important','color:#fff!important',
+      'backdrop-filter:blur(5px)','-webkit-backdrop-filter:blur(5px)',
+      'font:600 11px/1.3 system-ui,-apple-system,sans-serif!important',
+      'box-shadow:0 2px 7px rgba(0,0,0,.25)!important','text-shadow:none!important',
+      'opacity:0!important','visibility:hidden!important','pointer-events:none!important',
+      'transition:opacity .15s ease,visibility .15s ease!important'
+    ].join(';');
+    const row=()=>{
+      const e=document.createElement('div');
+      e.style.cssText='display:flex!important;align-items:center!important;gap:4px!important;min-width:0!important;';
+      return e;
+    };
+    const btn=(id,icon,title)=>{
+      const e=document.createElement('button');
+      e.id=id;e.type='button';e.textContent=icon;e.title=title;
+      e.setAttribute('aria-label',title);
+      e.style.cssText=[
+        'appearance:none!important','height:23px!important','min-width:25px!important',
+        'padding:0 2px!important','margin:0!important','border-radius:5px!important',
+        'border:1px solid rgba(255,255,255,.22)!important',
+        'background:rgba(255,255,255,.08)!important','color:inherit!important',
+        'font:800 16px/1 system-ui!important','cursor:pointer!important',
+        'display:flex!important','align-items:center!important','justify-content:center!important'
+      ].join(';');
+      for(const kind of ['pointerdown','mousedown','mouseup','dblclick','keydown','keyup']){
+        e.addEventListener(kind,event=>event.stopPropagation());
+      }
+      e.addEventListener('click',event=>{event.preventDefault();event.stopPropagation()});
+      return e;
+    };
+    const top=row();
+    const clock=document.createElement('span');
+    clock.id='npf-liveclock-mini-time';clock.textContent='時刻取得待ち';
+    clock.style.cssText='flex:1;min-width:0;white-space:nowrap;font:700 11px/1.2 system-ui;font-variant-numeric:tabular-nums;';
+    const power=btn('npf-liveclock-mini-power','⏻','このタブを同期対象にする');
+    const sync=btn('npf-liveclock-mini-sync','⟳','この動画の実配信時刻に他のタブを合わせる');
+    top.append(clock,power,sync);root.appendChild(top);
+    const bottom=row();bottom.style.marginTop='4px';
+    const back=btn('npf-liveclock-mini-back','◀','この動画を指定秒数戻す（同期ズレ補正）');
+    const step=document.createElement('input');
+    step.id='npf-liveclock-mini-step';step.type='number';step.min='1';step.max='60';
+    step.step='1';step.value=String(m.step);step.title='ズレ補正秒数（1〜60）';
+    step.setAttribute('aria-label','ズレ補正秒数');
+    step.style.cssText=[
+      'width:34px!important','height:23px!important','min-width:34px!important',
+      'border:1px solid rgba(255,255,255,.3)!important','border-radius:4px!important',
+      'background:rgba(255,255,255,.10)!important','color:#fff!important',
+      'box-sizing:border-box!important','text-align:center!important',
+      'font:600 11px system-ui!important','padding:0!important','margin:0!important'
+    ].join(';');
+    const unit=document.createElement('span');unit.textContent='秒';unit.style.fontSize='10px';
+    const ahead=btn('npf-liveclock-mini-ahead','▶','この動画を指定秒数進める（同期ズレ補正）');
+    const peers=document.createElement('span');peers.id='npf-liveclock-mini-peers';
+    peers.style.cssText='flex:1;white-space:nowrap;text-align:right;opacity:.8;font-size:10px;';
+    bottom.append(back,step,unit,ahead,peers);root.appendChild(bottom);
+    for(const kind of ['pointerdown','mousedown','mouseup','click','dblclick','keydown','keyup']){
+      step.addEventListener(kind,event=>event.stopPropagation());
+    }
+    const updateStep=()=>{
+      const v=Math.round(Number(step.value));
+      m.step=Number.isFinite(v)?Math.min(60,Math.max(1,v)):1;
+      if(step.value)step.value=String(m.step);
+    };
+    step.addEventListener('input',updateStep);
+    step.addEventListener('change',()=>{updateStep();step.value=String(m.step)});
+    power.addEventListener('click',()=>{youtubeLiveClockMarkToggle();youtubeLiveClockMiniRefresh()});
+    sync.addEventListener('click',()=>{youtubeLiveClockSyncFromThisTab();youtubeLiveClockMiniRefresh()});
+    back.addEventListener('click',()=>youtubeLiveClockMiniCalibrate(-1));
+    ahead.addEventListener('click',()=>youtubeLiveClockMiniCalibrate(1));
+    host.appendChild(root);
+    m.root=root;m.host=host;m.videoId=id;m.visible=false;
+
+    m.onMove=event=>{
+      if(event.pointerType==='touch')return;
+      const near=youtubeLiveClockMiniNear(event,host);
+      if(near!==m.visible)youtubeLiveClockMiniShow(near);
+    };
+    m.onDown=event=>{
+      if(event.pointerType!=='touch'||!youtubeLiveClockMiniNear(event,host))return;
+      youtubeLiveClockMiniShow(true);
+      clearTimeout(m.touchTimer);
+      m.touchTimer=setTimeout(()=>youtubeLiveClockMiniShow(false),3500);
+    };
+    m.onBlur=()=>youtubeLiveClockMiniShow(false);
+    document.addEventListener('pointermove',m.onMove,true);
+    document.addEventListener('mousemove',m.onMove,true);
+    document.addEventListener('pointerdown',m.onDown,true);
+    window.addEventListener('blur',m.onBlur);
+    document.addEventListener('pointerleave',m.onBlur,true);
+    document.addEventListener('mouseleave',m.onBlur,true);
+    youtubeLiveClockMiniRefresh();
   }
 
   const YT_TS_MAX_SAVED_VIDEOS = 80;
@@ -13261,6 +13469,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       syncYoutubeTimestampFeature();
       syncYoutubeBroadcastClockFeature();
       syncYoutubeQuickSeekButtons();
+      ensureYoutubeLiveClockMini();
     }, 180);
   }
 
@@ -13272,6 +13481,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
       handleYoutubeNavigation();
       syncYoutubeBroadcastClockFeature();
       syncYoutubeQuickSeekButtons();
+      ensureYoutubeLiveClockMini();
       void applyYoutubeSeekHandoff();
       // Only one NIJI entry point on mobile. Research mounts as a tab inside it;
       // failures in archive initialization must not take down the proven mobile FAB.
@@ -13314,6 +13524,7 @@ e.el.classList.toggle('npf-r-hidden', !show);
         syncYoutubeTimestampFeature();
         syncYoutubeBroadcastClockFeature();
         syncYoutubeQuickSeekButtons();
+        ensureYoutubeLiveClockMini();
         if (research.holodexPaused || wikiRequestsPaused) updateResearchCooldownDisplay();
       }, 1000);
       ytBootBadge?.remove();
