@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.118
+// @version      1.0.119
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.118';
+  const VERSION = '1.0.119';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5750,6 +5750,97 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
+  const youtubeQuickSeekUi = {
+    host: null,
+    controls: null,
+    hideTimer: 0,
+    pointerOverButton: false,
+    onPointerMove: null,
+    onPointerDown: null,
+    onPointerLeave: null,
+  };
+  const YT_QUICK_SEEK_HIDE_DELAY = 3000;
+
+  function setYoutubeQuickSeekVisible(visible) {
+    const controls = youtubeQuickSeekUi.controls;
+    if (!controls?.isConnected) return;
+    controls.style.setProperty('opacity', visible ? '1' : '0', 'important');
+    controls.style.setProperty('visibility', visible ? 'visible' : 'hidden', 'important');
+    controls.style.setProperty('pointer-events', visible ? 'auto' : 'none', 'important');
+  }
+
+  function scheduleYoutubeQuickSeekHide() {
+    clearTimeout(youtubeQuickSeekUi.hideTimer);
+    youtubeQuickSeekUi.hideTimer = setTimeout(() => {
+      if (youtubeQuickSeekUi.pointerOverButton) return;
+      setYoutubeQuickSeekVisible(false);
+    }, YT_QUICK_SEEK_HIDE_DELAY);
+  }
+
+  function showYoutubeQuickSeekTemporarily() {
+    setYoutubeQuickSeekVisible(true);
+    scheduleYoutubeQuickSeekHide();
+  }
+
+  function youtubeQuickSeekNearBar(host, event) {
+    const rect = host?.getBoundingClientRect?.();
+    if (!rect || rect.width < 160 || rect.height < 95) return false;
+    const x = Number(event?.clientX);
+    const y = Number(event?.clientY);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    return x >= rect.left && x <= rect.right &&
+      y >= Math.max(rect.top, rect.bottom - Math.min(145, rect.height * 0.30)) &&
+      y <= rect.bottom;
+  }
+
+  function detachYoutubeQuickSeek() {
+    const ui = youtubeQuickSeekUi;
+    clearTimeout(ui.hideTimer);
+    ui.hideTimer = 0;
+    if (ui.host) {
+      if (ui.onPointerMove) ui.host.removeEventListener('pointermove', ui.onPointerMove, true);
+      if (ui.onPointerDown) ui.host.removeEventListener('pointerdown', ui.onPointerDown, true);
+      if (ui.onPointerLeave) ui.host.removeEventListener('pointerleave', ui.onPointerLeave);
+    }
+    ui.controls?.remove();
+    ui.host = null;
+    ui.controls = null;
+    ui.onPointerMove = null;
+    ui.onPointerDown = null;
+    ui.onPointerLeave = null;
+    ui.pointerOverButton = false;
+  }
+
+  function attachYoutubeQuickSeek(host, controls) {
+    // A single handler per player avoids duplicates after YouTube SPA navigation.
+    detachYoutubeQuickSeek();
+    const ui = youtubeQuickSeekUi;
+    ui.host = host;
+    ui.controls = controls;
+
+    ui.onPointerMove = event => {
+      if (event.pointerType === 'touch') return;
+      if (youtubeQuickSeekNearBar(host, event)) showYoutubeQuickSeekTemporarily();
+    };
+    ui.onPointerDown = event => {
+      // A touch near the progress bar first reveals the controls; taps on the
+      // revealed circular buttons are then handled by their click listeners.
+      if (event.pointerType === 'touch' && youtubeQuickSeekNearBar(host, event)) {
+        showYoutubeQuickSeekTemporarily();
+      }
+    };
+    ui.onPointerLeave = () => {
+      ui.pointerOverButton = false;
+      scheduleYoutubeQuickSeekHide();
+    };
+    host.addEventListener('pointermove', ui.onPointerMove, true);
+    host.addEventListener('pointerdown', ui.onPointerDown, true);
+    host.addEventListener('pointerleave', ui.onPointerLeave);
+    // Hidden on first load: the first pointer movement in the bottom region
+    // reveals both buttons, even while YouTube's standard controls are visible.
+    setYoutubeQuickSeekVisible(false);
+  }
+
   function syncYoutubeQuickSeekButtons() {
     // Not on Shorts, home-page previews or the floating mini player.
     const onWatch = location.pathname === '/watch' ||
@@ -5760,10 +5851,12 @@
       (host.id === 'movie_player' || host.classList.contains('html5-video-player'));
     const existing = document.getElementById(YT_QUICK_SEEK_ID);
     if (!onWatch || !currentYoutubeVideoId() || !validHost) {
+      detachYoutubeQuickSeek();
       existing?.remove();
       return;
     }
-    if (existing?.parentElement === host) return;
+    if (existing?.parentElement === host && youtubeQuickSeekUi.host === host &&
+        youtubeQuickSeekUi.controls === existing) return;
     existing?.remove();
     ensureYoutubeQuickSeekStyle();
 
@@ -5777,6 +5870,8 @@
       'left:50%!important', 'bottom:' + (mobile ? '54px' : '62px') + '!important',
       'transform:translateX(-50%)!important',
       'z-index:95!important', 'display:flex!important',
+      'opacity:0!important','visibility:hidden!important',
+      'transition:opacity .22s ease,visibility .22s ease!important',
       'align-items:center!important','justify-content:center!important',
       'gap:' + (mobile ? '9px' : '12px') + '!important','height:auto!important','width:auto!important',
       'pointer-events:none!important','box-sizing:border-box!important'
@@ -5804,6 +5899,15 @@
         'transition:background .12s ease,opacity .12s ease,transform .12s ease!important'
       ].join(';');
       button.appendChild(createYoutubeQuickSeekIcon(delta));
+      button.addEventListener('pointerenter', () => {
+        youtubeQuickSeekUi.pointerOverButton = true;
+        clearTimeout(youtubeQuickSeekUi.hideTimer);
+        setYoutubeQuickSeekVisible(true);
+      });
+      button.addEventListener('pointerleave', () => {
+        youtubeQuickSeekUi.pointerOverButton = false;
+        scheduleYoutubeQuickSeekHide();
+      });
       // YouTube's parent player listens for clicks to toggle play/pause or
       // double clicks to fullscreen; only our control receives those events.
       for (const type of ['pointerdown','pointerup','mousedown','mouseup','dblclick']) {
@@ -5819,10 +5923,12 @@
         event.stopImmediatePropagation();
         // Reuse the exact seek routine already used by the helper's +/- buttons.
         seekYoutube(delta);
+        showYoutubeQuickSeekTemporarily();
       });
       controls.appendChild(button);
     }
     host.appendChild(controls);
+    attachYoutubeQuickSeek(host, controls);
   }
 
   // ---------- Archived livestream wall clock beside YouTube playback time ----------
