@@ -711,7 +711,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const pairs=normalizeTermPairs(rows).sort((a,b)=>b.from.length-a.from.length);
     if(!pairs.length)return String(text||'');
     const lookup=new Map(pairs.map(p=>[p.from,p.to]));
-    const escaped=pairs.map(p=>p.from.replace(/[-\/\\^$*+?.()|[\]{}]/g,'\\  const novelId = () => {'));
+    const escaped=pairs.map(p=>p.from.replace(/[-\/\\^$*+?.()|[\]{}]/g,character=>'\\'+character));
     return String(text||'').replace(new RegExp(escaped.join('|'),'g'),m=>lookup.get(m));
   }
   function previewTermPages(){
