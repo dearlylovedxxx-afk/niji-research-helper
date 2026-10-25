@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.41
+// @version      0.6.43
 // @description  Pixiv統合ツール：全体ブクマ・原寸画像PNG/ZIP保存・iPhone共有シート（ファイル/pCloud）・小説TXT・保存検索。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -664,6 +664,219 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   let dialogueSpacingToggle = null;
   let indentModeSelect = null;
 
+
+  // ------ Read-only diagnostics for Pixiv's OWN "単語を変換" feature ------
+  // This is not a second conversion UI: nothing is typed or replaced here.
+  // The report never contains replacement names, novel text or storage values.
+  const TERM_DIAG_KEY='pnte-native-term-diagnostic-safe-v1';
+  let termDiag=null,termDiagPanel=null,termDiagView=null;
+  let termDiagTimer=0;
+
+  function termDiagSignature(v){
+    // An in-memory checksum is enough to detect a changed storage entry.
+    // Raw stored values and the actual replacement words are never copied.
+    const text=String(v??'');
+    let hash=2166136261;
+    for(let i=0;i<text.length;i++)hash=Math.imul(hash^text.charCodeAt(i),16777619);
+    return text.length+':'+(hash>>>0).toString(16);
+  }
+
+  function termDiagSnapshot(){
+    const result={local:{},session:{}};
+    for(const [label,store] of [['local',localStorage],['session',sessionStorage]]){
+      try{
+        for(let i=0;i<Math.min(1500,store.length);i++){
+          const key=store.key(i);
+          if(!key||key===TERM_DIAG_KEY)continue;
+          const raw=store.getItem(key);
+          result[label][key]=termDiagSignature(raw);
+        }
+      }catch{/* Browser storage may be unavailable in privacy mode. */}
+    }
+    return result;
+  }
+
+  function termDiagMaskKey(key){
+    // Mask digits and high-entropy words; show only a non-secret key hint.
+    const masked=String(key).slice(0,90)
+      .replace(/[A-Za-z0-9_-]{16,}/g,'[長い識別子]')
+      .replace(/\d/g,'#');
+    return masked.slice(0,65);
+  }
+
+  function termDiagDiff(before,after){
+    const changed=[];
+    for(const area of ['local','session']){
+      const keys=new Set([...Object.keys(before?.[area]||{}),...Object.keys(after?.[area]||{})]);
+      for(const key of keys){
+        const a=before?.[area]?.[key],b=after?.[area]?.[key];
+        if(a===b)continue;
+        changed.push({
+          area,
+          keyHint:termDiagMaskKey(key),
+          change:a===undefined?'追加':b===undefined?'削除':'更新',
+        });
+      }
+    }
+    return changed.slice(0,35);
+  }
+
+  function termDiagCapture(){
+    const d=termDiag;
+    if(!d?.active)return;
+    const nodes=[...document.querySelectorAll('input,textarea')].filter(el=>
+      !overlay?.contains(el) &&
+      (/変換後|置換後|replacement|convert/i.test(String(el.placeholder||'')) ||
+       /変換後|置換後/i.test(String(el.getAttribute('aria-label')||'')))
+    );
+    if(nodes.length){
+      d.foundInputs=Math.max(d.foundInputs,nodes.length);
+      d.seenPlaceholders=[...new Set([
+        ...d.seenPlaceholders,
+        ...nodes.map(n=>String(n.placeholder||n.getAttribute('aria-label')||'').replace(/\d/g,'#').slice(0,45))
+      ])].slice(0,10);
+      // DOM structure only. No input values, surrounding text, or novel bodies.
+      d.inputStructure=nodes.slice(0,10).map(el=>({
+        element:el.tagName.toLowerCase(),type:el.type||'',
+        parentTags:[el.parentElement?.tagName||'',el.parentElement?.parentElement?.tagName||''],
+        nearestRole:el.closest('[role="dialog"]')?.getAttribute('role')||'',
+      }));
+    }
+    d.observedAt=Date.now();
+  }
+
+  function termDiagSafeReport(){
+    const d=termDiag;
+    if(!d)return null;
+    return {
+      diagnosticVersion:1,
+      context:'pixiv小説・単語変換',
+      nativeFieldCount:d.foundInputs,
+      placeholderHints:d.seenPlaceholders,
+      fieldStructure:d.inputStructure,
+      clickedNativeApply:!!d.clickedNativeApply,
+      storageChanges:termDiagDiff(d.before,termDiagSnapshot()),
+      note:'本文・入力した名前・ブラウザの保存値は含まれません。',
+    };
+  }
+
+  function termDiagReportToText(report){
+    return JSON.stringify(report,null,2);
+  }
+
+  function termDiagStoreSafeReport(){
+    const report=termDiagSafeReport();
+    if(!report)return null;
+    try{sessionStorage.setItem(TERM_DIAG_KEY,JSON.stringify(report))}catch{}
+    return report;
+  }
+
+  function termDiagReadSafeReport(){
+    if(termDiag)return termDiagSafeReport();
+    try{return JSON.parse(sessionStorage.getItem(TERM_DIAG_KEY)||'null')}catch{return null}
+  }
+
+  function termDiagOnClick(event){
+    const button=event.target?.closest?.('button,[role="button"],input[type="submit"]');
+    if(!button||overlay?.contains(button))return;
+    const label=String(button.textContent||button.value||'').replace(/\s+/g,'').slice(0,55);
+    if(/適用して読む|適用して読|Applyandstartreading|Apply/i.test(label)){
+      termDiagCapture();
+      if(termDiag)termDiag.clickedNativeApply=true;
+      // Allow Pixiv to save its own setting before comparing storage.
+      setTimeout(()=>{termDiagStoreSafeReport();renderTermDiag()},950);
+    }
+  }
+
+  function stopTermDiag(){
+    const d=termDiag;
+    if(!d)return;
+    if(d.observer)d.observer.disconnect();
+    document.removeEventListener('input',termDiagCapture,true);
+    document.removeEventListener('focusin',termDiagCapture,true);
+    document.removeEventListener('click',termDiagOnClick,true);
+    clearInterval(termDiagTimer);termDiagTimer=0;
+    d.active=false;
+    termDiagStoreSafeReport();
+    renderTermDiag();
+  }
+
+  function startTermDiag(){
+    stopTermDiag();
+    termDiag={
+      active:true,before:termDiagSnapshot(),clickedNativeApply:false,
+      foundInputs:0,seenPlaceholders:[],inputStructure:[],observedAt:0,
+      observer:null,
+    };
+    document.addEventListener('input',termDiagCapture,true);
+    document.addEventListener('focusin',termDiagCapture,true);
+    document.addEventListener('click',termDiagOnClick,true);
+    termDiag.observer=new MutationObserver(()=>{
+      if(termDiag?.active && Date.now()-termDiag.observedAt>180)termDiagCapture();
+    });
+    termDiag.observer.observe(document.body,{subtree:true,childList:true});
+    termDiagTimer=setInterval(()=>{
+      if(!termDiag?.active)return;
+      termDiagCapture();
+      termDiagStoreSafeReport();
+    },1500);
+    termDiagCapture();
+    if(termDiagPanel)termDiagPanel.open=true;
+    renderTermDiag();
+    // Return to the real Pixiv reader, so the native dialog can be used.
+    closeOverlay();
+  }
+
+  function renderTermDiag(){
+    if(!termDiagView)return;
+    const r=termDiagReadSafeReport();
+    termDiagView.textContent=r
+      ? '観測：' + (termDiag?.active?'実行中':'停止') +
+        ' ／変換欄 ' + r.nativeFieldCount+'件'+
+        ' ／Pixivの「適用して読む」 '+(r.clickedNativeApply?'確認':'未確認')+
+        ' ／保存情報の変化 '+r.storageChanges.length+'件'
+      : '診断開始後、Pixivの「単語を変換」から「適用して読む」を試してください。';
+  }
+
+  function makeTermDiagPanel(){
+    const details=document.createElement('details');
+    details.className='pnte-diag';
+    termDiagPanel=details;
+    const summary=document.createElement('summary');
+    summary.textContent='🔎 Pixiv単語変換の診断（自動取得の調査用）';
+    details.appendChild(summary);
+    const hint=document.createElement('p');
+    hint.textContent='設定の手入力は不要です。「診断開始」を押すと元のPixiv画面に戻ります。そこで普段どおり単語を変換して「適用して読む」を押し、再び「📖 小説TXT」を開いてください。';
+    details.appendChild(hint);
+    const actions=document.createElement('div');
+    actions.className='pnte-diag-actions';
+    const start=document.createElement('button');
+    start.type='button';start.textContent='▶ 診断開始（Pixivへ戻る）';
+    start.addEventListener('click',startTermDiag);
+    const stop=document.createElement('button');
+    stop.type='button';stop.textContent='■ 診断停止・結果を確定';
+    stop.addEventListener('click',stopTermDiag);
+    const copy=document.createElement('button');
+    copy.type='button';copy.textContent='📋 安全な診断結果をコピー';
+    copy.addEventListener('click',async()=>{
+      const r=termDiagReadSafeReport();
+      if(!r)return renderTermDiag();
+      const output=termDiagReportToText(r);
+      try{
+        await navigator.clipboard.writeText(output);
+        termDiagView.textContent='診断結果をコピーしました。本文・入力した名前・保存値は含みません。';
+      }catch{
+        termDiagView.textContent=output;
+      }
+    });
+    actions.append(start,stop,copy);
+    termDiagView=document.createElement('div');
+    termDiagView.className='pnte-diag-status';
+    details.append(actions,termDiagView);
+    renderTermDiag();
+    return details;
+  }
+
   const novelId = () => {
     const u = new URL(location.href);
     return u.pathname === '/novel/show.php' && /^\d+$/.test(u.searchParams.get('id') || '')
@@ -1017,6 +1230,10 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     overlay.classList.add('pnte-open');
     pageHost.replaceChildren();
     statusNode.textContent = 'pixivから本文を取得中…';
+    if(termDiag||termDiagReadSafeReport()){
+      if(termDiagPanel)termDiagPanel.open=true;
+      renderTermDiag();
+    }
 
     try {
       const body = await fetchNovel(id);
@@ -1058,6 +1275,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       .pnte-bar .pnte-save{background:#0096fa;color:#fff;border-color:#0096fa}
       .pnte-meta{max-width:980px;margin:8px auto 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:12px;color:#59636e}
       .pnte-status{max-width:980px;margin:7px auto 0;font-size:12px;color:#59636e;overflow-wrap:anywhere}
+      .pnte-diag{max-width:980px;margin:8px auto;border:1px solid #cdd9e8;background:#f6f9ff;border-radius:8px;padding:8px 12px;font-size:12px}
+      .pnte-diag summary{cursor:pointer;font-weight:750;color:#19396c}
+      .pnte-diag p,.pnte-diag-status{font-size:11px;line-height:1.6;color:#546273;margin:8px 0}
+      .pnte-diag-actions{display:flex;flex-wrap:wrap;gap:6px}
+      .pnte-diag-actions button{border:1px solid #ccd6e8;border-radius:6px;padding:8px;background:white;color:#19396c;cursor:pointer;font-size:12px}
+
       .pnte-pages{max-width:980px;margin:0 auto;padding:12px 10px 80px}
       .pnte-page{background:#fff;border:1px solid #dfe3e8;border-radius:10px;margin:0 0 12px;padding:10px;transition:opacity .15s}
       .pnte-page.pnte-excluded{opacity:.46}
@@ -1155,7 +1378,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     statusNode.className = 'pnte-status';
     statusNode.textContent = 'まだ取得していません。';
 
-    header.append(bar, meta, statusNode);
+    header.append(bar, meta, makeTermDiagPanel(), statusNode);
     pageHost = document.createElement('main');
     pageHost.className = 'pnte-pages';
     overlay.append(header, pageHost);
