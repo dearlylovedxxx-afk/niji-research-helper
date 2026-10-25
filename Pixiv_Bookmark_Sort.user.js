@@ -1049,7 +1049,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     summary.textContent='🔎 Pixiv単語変換の診断（自動取得の調査用）';
     details.appendChild(summary);
     const hint=document.createElement('p');
-    hint.textContent='前回の診断で「words」形式の保存データを発見しました。今回はその配列要素の項目名・型だけ（実際の名前は非表示）を確認します。診断開始→Pixivで「単語を変換」→「適用して読む」→小説TXTへ戻り、結果をコピーしてください。';
+    hint.textContent='前回の診断で「words」形式の保存データを確認できたので、今回は既存の保存データから単語の構造だけを読み取ります。「📋 保存済み変換の構造だけコピー」を押すだけでOK。名前の再入力・再適用は不要です。';
     details.appendChild(hint);
     const actions=document.createElement('div');
     actions.className='pnte-diag-actions';
@@ -1072,7 +1072,26 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
         termDiagView.textContent=output;
       }
     });
-    actions.append(start,stop,copy);
+
+    const schemaOnly=document.createElement('button');
+    schemaOnly.type='button';
+    schemaOnly.textContent='📋 保存済み変換の構造だけコピー';
+    schemaOnly.title='変換済みの名前や小説本文はコピーせず、words配列の項目名とデータ型だけをコピーします。再適用不要。';
+    schemaOnly.addEventListener('click',async()=>{
+      const payload=JSON.stringify({
+        diagnosticVersion:3,
+        context:'pixiv小説・単語変換',
+        nativeWordsSchema:termDiagNativeWordsEvidence(),
+        note:'Pixivに保存済みの単語変換データの項目名・型のみ。元の単語・変換後の名前・本文・値は含まれません。'
+      },null,2);
+      try{
+        await navigator.clipboard.writeText(payload);
+        termDiagView.textContent='保存済みの単語変換データの構造だけをコピーしました。';
+      }catch{
+        termDiagView.textContent=payload;
+      }
+    });
+    actions.append(start,stop,copy,schemaOnly);
     termDiagView=document.createElement('div');
     termDiagView.className='pnte-diag-status';
     details.append(actions,termDiagView);
