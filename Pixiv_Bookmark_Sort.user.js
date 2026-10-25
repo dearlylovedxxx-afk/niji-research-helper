@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.44
+// @version      0.6.45
 // @description  Pixiv統合ツール：全体ブクマ・原寸画像PNG/ZIP保存・iPhone共有シート（ファイル/pCloud）・小説TXT・保存検索。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -738,6 +738,70 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   }
 
 
+
+  function termDiagWordItemSchema(word){
+    const k=val=>val===null?'null':Array.isArray(val)?'array':typeof val;
+    if(!word||typeof word!=='object')return {itemType:k(word)};
+    if(Array.isArray(word))return {
+      itemType:'array',
+      slots:word.slice(0,8).map((value,index)=>({index,valueType:k(value)}))
+    };
+    const names=Object.keys(word).slice(0,20);
+    const allow=/^(?:id|wordId|termId|term_id|word_id|source|target|before|after|from|to|name|title|text|value|original|replacement|replace|convert|converted|convertedText|replaceText|input|inputText|newWord|oldWord|newText|oldText|seriesId|type|data|word|label|key|userInput|translation|alias)$/i;
+    return {
+      itemType:'object',
+      fieldCount:Object.keys(word).length,
+      fields:names.map(name=>({
+        field:allow.test(name)?name:'[不明な項目]',
+        valueType:k(word[name])
+      }))
+    };
+  }
+
+  function termDiagNativeWordsEvidence(){
+    // Locate the storage object identified by the user's earlier report:
+    // series-like entries with {words:[]} objects. Only inspect field shapes.
+    // Never output the series keys, source words or replacement values.
+    const findings=[];
+    for(const [area,store] of [['local',localStorage],['session',sessionStorage]]){
+      try{
+        for(let i=0;i<Math.min(store.length,1500)&&findings.length<6;i++){
+          const key=store.key(i);
+          if(!key||key===TERM_DIAG_KEY||key===TERM_DIAG_STATE_KEY)continue;
+          const raw=store.getItem(key);
+          if(!raw||raw.length>300000)continue;
+          let parsed;
+          try{parsed=JSON.parse(raw)}catch{continue}
+          if(!parsed||Array.isArray(parsed)||typeof parsed!=='object')continue;
+          const entries=Object.entries(parsed);
+          if(!entries.length||entries.length>100)continue;
+          const withWords=entries.filter(([,value])=>
+            value&&typeof value==='object'&&!Array.isArray(value)&&
+            Array.isArray(value.words)&&value.words.length<=10);
+          if(!withWords.length)continue;
+          findings.push({
+            area,
+            // We do not emit key names/series identifiers or stored values.
+            seriesEntryCount:entries.length,
+            wordsEntries:withWords.length,
+            seriesKeyFormats:[...new Set(withWords.map(([id])=>
+              /^\d+$/.test(id)?'numeric':/^[0-9a-f-]{16,}$/i.test(id)?'opaque-id':'other'))],
+            examples:withWords.slice(0,3).map(([,entry])=>({
+              wordCount:entry.words.length,
+              wordItemSchema:termDiagWordItemSchema(entry.words[0]),
+              siblingFields:Object.keys(entry).filter(k=>k!=='words').slice(0,5).map(k=>({
+                name:/^(?:updatedAt|createdAt|timestamp|time|lastUsed|lastAccess|date|version)$/i.test(k)
+                  ? k:'[他の項目]',
+                valueType:entry[k]===null?'null':Array.isArray(entry[k])?'array':typeof entry[k]
+              }))
+            }))
+          });
+        }
+      }catch{/* unavailable in a private browsing context */}
+    }
+    return findings;
+  }
+
   function termDiagStorageSummary(snapshot){
     const counts={local:0,session:0};
     const candidates=[];
@@ -853,7 +917,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     const after=termDiagSnapshot();
     const summary=termDiagStorageSummary(after);
     return {
-      diagnosticVersion:2,
+      diagnosticVersion:3,
       context:'pixiv小説・単語変換',
       resumedAcrossNavigation:!!d.resumedAcrossNavigation,
       nativeFieldCount:d.foundInputs||0,
@@ -864,11 +928,12 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       clickedNativeApply:!!d.clickedNativeApply,
       storageKeyCounts:summary.counts,
       possibleConversionStorage:summary.candidates,
+      nativeWordsSchema:termDiagNativeWordsEvidence(),
       storageChanges:termDiagDiff(d.before,after),
       warning:(!d.foundInputs&&!d.modalObserved&&!d.clickedNativeApply)
         ? '変換画面の検出に失敗しました。Pixivの画面構造や再読み込み経路が異なる可能性があります。'
         : '',
-      note:'本文・入力した名前・ブラウザの保存値は含まれません。既存の同じ設定を再適用すると保存内容が変化しない場合もあります。',
+      note:'単語変換データの配列要素の項目名・型だけ追加調査します。設定した名前・変換前単語・作品本文・保存値は含まれません。',
     };
   }
 
@@ -984,7 +1049,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     summary.textContent='🔎 Pixiv単語変換の診断（自動取得の調査用）';
     details.appendChild(summary);
     const hint=document.createElement('p');
-    hint.textContent='設定の手入力は不要です。「診断開始」を押すとPixiv画面へ戻ります。普段どおり「単語を変換」を開き、名前を適用したら再び「📖 小説TXT」へ。画面移動や再読み込みがあっても診断を引き継ぎます。';
+    hint.textContent='前回の診断で「words」形式の保存データを発見しました。今回はその配列要素の項目名・型だけ（実際の名前は非表示）を確認します。診断開始→Pixivで「単語を変換」→「適用して読む」→小説TXTへ戻り、結果をコピーしてください。';
     details.appendChild(hint);
     const actions=document.createElement('div');
     actions.className='pnte-diag-actions';
