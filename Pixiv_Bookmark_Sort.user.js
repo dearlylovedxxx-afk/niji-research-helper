@@ -704,6 +704,38 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     return masked.slice(0,65);
   }
 
+
+  function termDiagValueShape(raw){
+    // Only report JSON structure and primitive types, not names or text.
+    if(raw==null)return 'deleted';
+    if(String(raw).length>500000)return 'large-value';
+    let parsed;
+    try{parsed=JSON.parse(raw)}catch{return 'plain-string'}
+    const describe=(value,depth)=>{
+      if(value===null)return 'null';
+      if(Array.isArray(value)){
+        return {
+          type:'array',count:value.length,
+          item:depth<2&&value.length?describe(value[0],depth+1):'not-inspected'
+        };
+      }
+      if(typeof value==='object'){
+        const entries=Object.entries(value);
+        return {
+          type:'object',count:entries.length,
+          fields:entries.slice(0,12).map(([key,val])=>{
+            // Only fixed schema-like field names may be exposed.
+            const schema=/^(?:id|name|value|text|word|words|term|terms|series|seriesId|novel|novelId|data|list|items|settings|replacements|conversions|replacementText|target|source)$/i.test(key)
+              ? key : '[任意のキー]';
+            return {key:schema,value:depth<2?describe(val,depth+1):typeof val};
+          })
+        };
+      }
+      return typeof value;
+    };
+    return describe(parsed,0);
+  }
+
   function termDiagDiff(before,after){
     const changed=[];
     for(const area of ['local','session']){
@@ -711,10 +743,14 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       for(const key of keys){
         const a=before?.[area]?.[key],b=after?.[area]?.[key];
         if(a===b)continue;
+        const store=area==='local'?localStorage:sessionStorage;
+        let shape='unavailable';
+        try{shape=termDiagValueShape(store.getItem(key))}catch{}
         changed.push({
           area,
           keyHint:termDiagMaskKey(key),
           change:a===undefined?'追加':b===undefined?'削除':'更新',
+          valueShape:shape,
         });
       }
     }
@@ -795,6 +831,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     document.removeEventListener('input',termDiagCapture,true);
     document.removeEventListener('focusin',termDiagCapture,true);
     document.removeEventListener('click',termDiagOnClick,true);
+    window.removeEventListener('pagehide',termDiagStoreSafeReport);
     clearInterval(termDiagTimer);termDiagTimer=0;
     d.active=false;
     termDiagStoreSafeReport();
@@ -811,6 +848,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     document.addEventListener('input',termDiagCapture,true);
     document.addEventListener('focusin',termDiagCapture,true);
     document.addEventListener('click',termDiagOnClick,true);
+    window.addEventListener('pagehide',termDiagStoreSafeReport);
     termDiag.observer=new MutationObserver(()=>{
       if(termDiag?.active && Date.now()-termDiag.observedAt>180)termDiagCapture();
     });
