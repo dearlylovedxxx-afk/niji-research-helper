@@ -14,11 +14,13 @@ class Store {
   key(i){return [...this.data.keys()][i]??null}
   getItem(k){return this.data.get(k)??null}
   setItem(k,v){this.data.set(k,String(v))}
+  removeItem(k){this.data.delete(k)}
 }
-function harness(){
+function harness(shared={}){
   const secret='CONFIDENTIAL_REPLACEMENT_123';
-  const local=new Store({pixivNovelWords:JSON.stringify({words:[{name:'みょうじ',value:secret}]})});
-  const session=new Store(),handlers=new Map(),winHandlers=new Map();
+  const local=shared.local || new Store({pixivNovelWords:JSON.stringify({words:[{name:'みょうじ',value:secret}]})});
+  const session=shared.session || new Store();
+  const handlers=new Map(),winHandlers=new Map();
   const input={
     tagName:'INPUT',type:'text',placeholder:'変換後のテキスト',
     value:secret,parentElement:{tagName:'DIV',parentElement:{tagName:'SECTION'}},
@@ -42,7 +44,7 @@ function harness(){
     'class MutationObserver {observe(){} disconnect(){}}'
   ].join('\n');
   const exported=[
-    'return {termDiagSnapshot,termDiagDiff,termDiagValueShape,startTermDiag,',
+    'return {termDiagSnapshot,termDiagDiff,termDiagValueShape,startTermDiag,termDiagResumeOnLoad,',
     'stopTermDiag,termDiagCapture,termDiagOnClick,termDiagSafeReport,',
     'termDiagReadSafeReport,termDiagStoreSafeReport,termDiagReportToText,',
     'get state(){return termDiag},get closed(){return closed}}'
@@ -54,8 +56,8 @@ function harness(){
 
 test('script and metadata match diagnostic release',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+0\.6\.43/);
-  assert.match(meta,/@version\s+0\.6\.43/);
+  assert.match(script,/@version\s+0\.6\.44/);
+  assert.match(meta,/@version\s+0\.6\.44/);
 });
 
 test('storage snapshots never include private names or novel content',()=>{
@@ -105,4 +107,54 @@ test('existing TXT extraction, preview, and export flow are unchanged',()=>{
   assert.match(script,/const parsed = parseContent\(body\.content\)/);
   assert.match(script,/const text = buildOutput\(\)/);
   assert.match(script,/header\.append\(bar, meta, makeTermDiagPanel\(\), statusNode\)/);
+});
+
+test('diagnostic includes generic input counts and masked storage hints even with unchanged values',()=>{
+  const h=harness();
+  h.api.startTermDiag();
+  const report=h.api.termDiagSafeReport();
+  assert.equal(report.diagnosticVersion,2);
+  assert.ok(report.inputCandidateCount>=1);
+  assert.ok(report.storageKeyCounts.local>=1);
+  assert.equal(report.storageChanges.length,0);
+  assert.ok(report.possibleConversionStorage.length>=1);
+  assert.doesNotMatch(JSON.stringify(report),/CONFIDENTIAL_REPLACEMENT_123/);
+});
+
+test('diagnostic checkpoint records non-secret baseline before user navigation',()=>{
+  const h=harness();
+  h.api.startTermDiag();
+  const raw=h.session.getItem('pnte-native-term-diagnostic-state-v2');
+  assert.ok(raw);
+  const saved=JSON.parse(raw);
+  assert.equal(saved.version,2);
+  assert.equal(saved.active,true);
+  assert.equal(saved.foundInputs,1);
+  assert.doesNotMatch(raw,/CONFIDENTIAL_REPLACEMENT_123/);
+  h.api.stopTermDiag();
+  assert.equal(h.session.getItem('pnte-native-term-diagnostic-state-v2'),null);
+});
+
+test('a loaded page can resume diagnosis from previous session state',()=>{
+  assert.match(script,/function termDiagResumeOnLoad\(\)/);
+  assert.match(script,/const restored=termDiagRestoreCheckpoint\(\)/);
+  assert.match(script,/termDiag=restored/);
+  assert.match(script,/termDiagResumeOnLoad\(\);\s*void init\(\)/);
+  assert.match(script,/sessionStorage\.setItem\(TERM_DIAG_STATE_KEY/);
+  assert.match(script,/document\.addEventListener\('pointerup',termDiagCapture,true\)/);
+  assert.match(script,/document\.addEventListener\('touchend',termDiagCapture,true\)/);
+});
+
+test('reload-restored diagnosis correctly compares original and new conversion state',()=>{
+  const first=harness();
+  first.api.startTermDiag();
+  assert.ok(first.session.getItem('pnte-native-term-diagnostic-state-v2'));
+  first.local.setItem('pixivNovelWords',JSON.stringify({words:[{name:'みょうじ',value:'PRIVATE_AFTER_RELOAD'}]}));
+  const next=harness({local:first.local,session:first.session});
+  next.api.termDiagResumeOnLoad();
+  const report=next.api.termDiagSafeReport();
+  assert.equal(report.resumedAcrossNavigation,true);
+  assert.equal(report.storageChanges.length,1);
+  assert.equal(report.storageChanges[0].change,'更新');
+  assert.doesNotMatch(JSON.stringify(report),/PRIVATE_AFTER_RELOAD/);
 });
