@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.41
+// @version      0.6.42
 // @description  Pixiv統合ツール：全体ブクマ・原寸画像PNG/ZIP保存・iPhone共有シート（ファイル/pCloud）・小説TXT・保存検索。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -664,6 +664,122 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   let dialogueSpacingToggle = null;
   let indentModeSelect = null;
 
+
+  // Reader-selected name/term conversions for TXT export. Pixiv stores its
+  // own browser conversion values in an undocumented format; user-controlled
+  // pairs provide a reliable, offline and reversible alternative.
+  const TERM_KEY = 'pnte-local-term-conversions-v1';
+  let termScope = '', termPairs = [], termOn = false;
+  let termRows = null, termInfo = null, termPanel = null;
+
+  function getTermScope(body,id){
+    const value=body?.seriesNavData?.seriesId || body?.seriesId ||
+      body?.seriesData?.id || body?.series?.id;
+    return value && /^\d+$/.test(String(value))
+      ? 'series:'+String(value) : 'novel:'+String(id);
+  }
+  function normalizeTermPairs(rows) {
+    const seen=new Set();
+    return (Array.isArray(rows)?rows:[]).slice(0,10).flatMap(row=>{
+      const from=String(row?.from||'').trim().slice(0,100);
+      const to=String(row?.to||'').slice(0,100);
+      if(!from||!to||seen.has(from))return [];
+      seen.add(from);return [{from,to}];
+    });
+  }
+  function readTermSettings(){
+    try{
+      const store=JSON.parse(localStorage.getItem(TERM_KEY)||'{}');
+      const setting=store?.[termScope];
+      return {rows:normalizeTermPairs(setting?.rows),on:!!setting?.on};
+    }catch{return {rows:[],on:false}}
+  }
+  function saveTermSettings(){
+    if(!termScope)return;
+    try{
+      const old=JSON.parse(localStorage.getItem(TERM_KEY)||'{}');
+      const all=old&&typeof old==='object'&&!Array.isArray(old)?old:{};
+      all[termScope]={rows:normalizeTermPairs(termPairs),on:termOn,at:Date.now()};
+      const kept=Object.entries(all)
+        .sort((a,b)=>Number(b[1]?.at||0)-Number(a[1]?.at||0)).slice(0,50);
+      localStorage.setItem(TERM_KEY,JSON.stringify(Object.fromEntries(kept)));
+    }catch{if(termInfo)termInfo.textContent='設定を保存できませんでした（現在の画面では使用できます）。'}
+  }
+  // Apply a single longest-first pass, without cascading replacements.
+  // Escape literal regex metacharacters so names like [苗字] also work.
+  function applyTermPairs(text,rows){
+    const pairs=normalizeTermPairs(rows).sort((a,b)=>b.from.length-a.from.length);
+    if(!pairs.length)return String(text||'');
+    const lookup=new Map(pairs.map(p=>[p.from,p.to]));
+    const escaped=pairs.map(p=>p.from.replace(/[-\/\\^$*+?.()|[\]{}]/g,character=>'\\'+character));
+    return String(text||'').replace(new RegExp(escaped.join('|'),'g'),m=>lookup.get(m));
+  }
+  function previewTermPages(){
+    return (original?.pages||[]).map(page=>termOn?applyTermPairs(page,termPairs):page);
+  }
+  function termMessage(msg){if(termInfo)termInfo.textContent=msg}
+  function applyTerms(){
+    if(!original)return;
+    termOn=normalizeTermPairs(termPairs).length>0;
+    saveTermSettings();
+    drawPages(previewTermPages());
+    termMessage(termOn?'変換後の本文をプレビューに反映しました。':'変換設定が空のため原文を表示しました。');
+    statusNode.textContent='名前変換後の本文を確認してからTXT保存してください。';
+  }
+  function renderTermRows(){
+    if(!termRows)return;
+    termRows.replaceChildren();
+    termPairs.forEach((pair,i)=>{
+      const row=document.createElement('div');row.className='pnte-term-row';
+      const src=document.createElement('input');
+      src.type='text';src.placeholder='変換前の単語';src.value=pair.from;
+      src.setAttribute('aria-label','変換前の単語 '+(i+1));
+      const dest=document.createElement('input');
+      dest.type='text';dest.placeholder='変換後の名前';dest.value=pair.to;
+      dest.setAttribute('aria-label','変換後の名前 '+(i+1));
+      const del=document.createElement('button');
+      del.type='button';del.textContent='削除';
+      const edited=()=>{
+        pair.from=src.value.slice(0,100);pair.to=dest.value.slice(0,100);
+        saveTermSettings();
+        termMessage('入力を変更しました。「本文に反映」を押すとプレビューが更新されます。');
+      };
+      src.addEventListener('input',edited);dest.addEventListener('input',edited);
+      del.addEventListener('click',()=>{
+        termPairs.splice(i,1);saveTermSettings();renderTermRows();
+        termMessage('削除しました。本文への変更は「本文に反映」で反映できます。');
+      });
+      row.append(src,dest,del);termRows.appendChild(row);
+    });
+  }
+  function buildTermPanel(){
+    const details=document.createElement('details');details.className='pnte-term-panel';
+    const summary=document.createElement('summary');
+    summary.textContent='🪄 名前変換（単語変換）';
+    details.appendChild(summary);
+    const hint=document.createElement('p');
+    hint.textContent='Pixivの単語変換の「変換前 → 変換後」を入力して本文に反映します。設定はこの端末のシリーズごとに記憶（Pixivの設定を直接自動読込する機能は未対応）。';
+    details.appendChild(hint);
+    termRows=document.createElement('div');termRows.className='pnte-term-rows';
+    details.appendChild(termRows);
+    const actions=document.createElement('div');actions.className='pnte-term-actions';
+    const add=document.createElement('button');add.type='button';add.textContent='＋ 単語を追加';
+    add.addEventListener('click',()=>{
+      if(termPairs.length>=10)return termMessage('最大10単語までです。');
+      termPairs.push({from:'',to:''});renderTermRows();
+    });
+    const apply=document.createElement('button');apply.type='button';
+    apply.className='pnte-term-apply';apply.textContent='🪄 本文に反映';
+    apply.title='現在のTXT編集内容を、変換設定を適用した原文で読み込み直します';
+    apply.addEventListener('click',applyTerms);
+    const restore=document.createElement('button');restore.type='button';
+    restore.textContent='↩ 原文を表示';restore.addEventListener('click',restorePages);
+    actions.append(add,apply,restore);details.appendChild(actions);
+    termInfo=document.createElement('p');termInfo.className='pnte-term-info';
+    details.appendChild(termInfo);termPanel=details;
+    return details;
+  }
+
   const novelId = () => {
     const u = new URL(location.href);
     return u.pathname === '/novel/show.php' && /^\d+$/.test(u.searchParams.get('id') || '')
@@ -970,7 +1086,9 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
   function restorePages() {
     if (!original) return;
+    termOn=false;saveTermSettings();
     drawPages(original.pages);
+    termMessage('原文を表示しました。変換設定は保持されています。');
     statusNode.textContent = '取得時の本文に戻しました。';
   }
 
@@ -1029,7 +1147,14 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
         format: parsed.format,
         pages: parsed.pages
       };
-      drawPages(original.pages);
+      termScope=getTermScope(body,id);
+      const saved=readTermSettings();
+      termPairs=saved.rows.map(row=>({...row}));
+      termOn=saved.on&&termPairs.length>0;
+      renderTermRows();
+      if(termPanel)termPanel.open=termPairs.length>0;
+      drawPages(previewTermPages());
+      termMessage(termOn?'保存済みの名前変換を適用中です。':'現在は原文です。必要なら変換前／変換後を登録してください。');
       const total = original.pages.reduce((n, p) => n + Array.from(p).length, 0);
       statusNode.textContent = `取得成功：${original.pages.length}ページ／${total.toLocaleString('ja-JP')}字／取得形式 ${original.format}`;
     } catch (err) {
@@ -1058,6 +1183,16 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
       .pnte-bar .pnte-save{background:#0096fa;color:#fff;border-color:#0096fa}
       .pnte-meta{max-width:980px;margin:8px auto 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:12px;color:#59636e}
       .pnte-status{max-width:980px;margin:7px auto 0;font-size:12px;color:#59636e;overflow-wrap:anywhere}
+      .pnte-term-panel{max-width:980px;margin:8px auto;padding:8px 12px;background:#f6f9ff;border:1px solid #cfd9ea;border-radius:9px;font-size:12px}
+      .pnte-term-panel summary{cursor:pointer;font-weight:800;color:#233a64}
+      .pnte-term-panel p{font-size:11px;line-height:1.5;color:#59636e;margin:7px 0}
+      .pnte-term-rows{display:grid;gap:6px;margin:8px 0}
+      .pnte-term-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 46px;gap:6px}
+      .pnte-term-row input{width:100%;min-width:0;padding:7px;border:1px solid #c5d2e7;border-radius:6px;background:#fff;color:#222;font:inherit}
+      .pnte-term-row button,.pnte-term-actions button{border:1px solid #c5d2e7;border-radius:6px;padding:6px;background:#fff;color:#233a64;cursor:pointer;font:inherit}
+      .pnte-term-actions{display:flex;flex-wrap:wrap;gap:7px}
+      .pnte-term-actions .pnte-term-apply{background:#0969da;color:#fff;border-color:#0969da}
+
       .pnte-pages{max-width:980px;margin:0 auto;padding:12px 10px 80px}
       .pnte-page{background:#fff;border:1px solid #dfe3e8;border-radius:10px;margin:0 0 12px;padding:10px;transition:opacity .15s}
       .pnte-page.pnte-excluded{opacity:.46}
@@ -1155,7 +1290,7 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     statusNode.className = 'pnte-status';
     statusNode.textContent = 'まだ取得していません。';
 
-    header.append(bar, meta, statusNode);
+    header.append(bar, meta, buildTermPanel(), statusNode);
     pageHost = document.createElement('main');
     pageHost.className = 'pnte-pages';
     overlay.append(header, pageHost);
