@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.5
+// @version      1.3.6
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -62,7 +62,11 @@
         'xsf-hide-side-items','xsf-display-active',
         'xsf-monochrome-buttons','xsf-hide-for-you'
       ];
-      if(!guardedTL || opts.nativeSearch===false)classes.push('xsf-native-search-on');
+      // Keep X's original search visible on BOTH protected timelines and
+      // protected post detail pages. Everything else remains video-guarded.
+      const allowNativeSearch=opts.enabled===true && opts.nativeSearch!==false &&
+        (guardedTL || guardedPost);
+      if(!allowNativeSearch)classes.push('xsf-native-search-on');
       document.body?.classList.remove(...classes);
     }
     root.classList.toggle('xsf-pre-full',wide);
@@ -188,7 +192,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.5', KEY='xsf_userscript_v1';
+const VERSION='1.3.6', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -849,9 +853,11 @@ load();currentFields=blank();
     const protectedTL=options.enabled && options.tlVideoIsolation &&
       (location.pathname==='/home'||location.pathname.startsWith('/i/lists/')||
        location.pathname.startsWith('/i/communities/'));
+    const protectedPost=options.enabled && options.videoGuard &&
+      /\/status\/\d+(?:\/|$)/.test(location.pathname);
     const newMode=options.enabled && options.nativeSearch &&
       (body.classList.contains('xsf-layout-full') ||
-       body.classList.contains('xsf-sidebar-hidden') || protectedTL);
+       body.classList.contains('xsf-sidebar-hidden') || protectedTL || protectedPost);
     // A search field already exists in the main column on Search/Explore.
     if ((location.pathname.startsWith('/search') || location.pathname.startsWith('/explore')) &&
         document.querySelector('[data-testid="primaryColumn"] form[role="search"]')) {
@@ -908,9 +914,9 @@ load();currentFields=blank();
     body.classList.toggle('xsf-hide-side-items',false);
     body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou&&!guardedPage);
     body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons&&!guardedPage);
-    // Only restore the existing X search DOM, never add a fake input or
-    // re-enable the XSF panel/DOM-wide observer on the protected timeline.
-    if(guardedPost || (guardedTL && !options.nativeSearch))resetSearch();
+    // Reuse the same native X search form on guarded posts as guarded TL.
+    // No additional search UI or DOM-wide observation is introduced.
+    if(guardedPage && (!options.enabled || !options.nativeSearch))resetSearch();
     else syncSearch();
     window.__xsfUpdateEarly?.();
   }
