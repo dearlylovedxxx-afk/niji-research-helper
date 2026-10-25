@@ -181,3 +181,10 @@ test('Pixiv native words[] schema is discovered without leaking its source or re
   const exported=JSON.stringify(report);
   assert.doesNotMatch(exported,/SECRET_DESIRED_NAME|ALSO_SECRET|OTHER_SECRET|みょうじ|なまえ|9283714/);
 });
+
+test('one-click native schema export reads existing words without requiring reapplication',()=>{
+  assert.match(script,/保存済み変換の構造だけコピー/);
+  assert.match(script,/nativeWordsSchema:termDiagNativeWordsEvidence\(\)/);
+  assert.match(script,/actions\.append\(start,stop,copy,schemaOnly\)/);
+  assert.match(script,/navigator\.clipboard\.writeText\(payload\)/);
+});
