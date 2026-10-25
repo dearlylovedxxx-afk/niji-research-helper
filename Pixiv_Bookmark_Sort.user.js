@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.45
+// @version      0.6.46
 // @description  Pixiv統合ツール：全体ブクマ・原寸画像PNG/ZIP保存・iPhone共有シート（ファイル/pCloud）・小説TXT・保存検索。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -663,6 +663,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
   let metaToggle = null;
   let dialogueSpacingToggle = null;
   let indentModeSelect = null;
+  let nativeTermToggle = null;
+  let nativeTermLabel = null;
 
 
   // ------ Read-only diagnostics for Pixiv's OWN "単語を変換" feature ------
@@ -1099,6 +1101,102 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     return details;
   }
 
+
+  // Reuse Pixiv's OWN saved words, matched to the official series glossary.
+  // Each local record: novel_series_glossary_{viewerId}[seriesId].words
+  // has {id: term ID, word: replacement text}. No second name-entry UI.
+  function pixivNativeSeriesId(novel){
+    const val=novel?.seriesNavData?.seriesId ??
+      novel?.seriesId ?? novel?.seriesData?.seriesId ?? novel?.series?.id;
+    const id=String(val??'');
+    return /^\d+$/.test(id)&&id!=='0'?id:'';
+  }
+  function pixivNativeSavedWords(seriesId,store=localStorage){
+    if(!/^\d+$/.test(String(seriesId)))return [];
+    const candidates=[];
+    try{
+      for(let i=0;i<Math.min(store.length,2500);i++){
+        const key=store.key(i);
+        if(!/^novel_series_glossary_\d+$/.test(String(key||'')))continue;
+        let data;
+        try{data=JSON.parse(store.getItem(key)||'null')}catch{continue}
+        const rows=data?.[String(seriesId)]?.words;
+        if(!Array.isArray(rows))continue;
+        const found=[],seen=new Set();
+        for(const item of rows.slice(0,10)){
+          const id=String(item?.id??'').trim(),word=item?.word;
+          if(!id||typeof word!=='string'||!word||word.length>300||seen.has(id))continue;
+          seen.add(id);found.push({id,word});
+        }
+        if(found.length)candidates.push(found);
+      }
+    }catch{return []}
+    if(!candidates.length)return [];
+    const sig=rows=>JSON.stringify(rows.slice().sort((a,b)=>a.id.localeCompare(b.id)));
+    return candidates.every(x=>sig(x)===sig(candidates[0]))?candidates[0]:[];
+  }
+  function pixivNativeGlossaryPairs(words,glossary){
+    const categories=glossary?.body?.categories;
+    if(!Array.isArray(categories))return [];
+    const permitted=Array.isArray(glossary?.body?.replaceeItemIds)
+      ?new Set(glossary.body.replaceeItemIds.map(String)):null;
+    const sources=new Map();
+    for(const category of categories){
+      for(const item of Array.isArray(category?.items)?category.items:[]){
+        if(item?.id==null||typeof item.name!=='string'||!item.name)continue;
+        const id=String(item.id);
+        if(permitted&&!permitted.has(id))continue;
+        sources.set(id,item.name);
+      }
+    }
+    const seen=new Set(),result=[];
+    for(const item of words){
+      const from=sources.get(String(item.id)),to=item.word;
+      if(!from||!to||from===to||seen.has(from))continue;
+      seen.add(from);result.push({from,to});
+    }
+    return result.sort((a,b)=>b.from.length-a.from.length);
+  }
+  function pixivNativeApplyNames(raw,pairs){
+    const valid=Array.isArray(pairs)?pairs.filter(x=>x&&typeof x.from==='string'&&
+      x.from&&typeof x.to==='string'&&x.to):[];
+    if(!valid.length)return String(raw??'');
+    const ordered=valid.slice().sort((a,b)=>b.from.length-a.from.length);
+    const escape=value=>value.replace(/[-\/\\^$*+?.()|[\]{}]/g,c=>'\\'+c);
+    const values=new Map(ordered.map(x=>[x.from,x.to]));
+    const all=new RegExp(ordered.map(x=>escape(x.from)).join('|'),'g');
+    const square=ordered.filter(x=>x.from.includes('[')||x.from.includes(']'));
+    const bracketed=square.length?new RegExp(square.map(x=>escape(x.from)).join('|'),'g'):null;
+    const convert=(text,re)=>text.replace(re,hit=>values.get(hit));
+    return String(raw??'').replace(/(\[[^\[\]]*\]|[^\[\]]+)/g,part=>{
+      // Preserve Pixiv tags unless the original term itself uses [].
+      if(part.startsWith('['))return bracketed?convert(part,bracketed):part;
+      return convert(part,all);
+    });
+  }
+  async function pixivNativeConvertNovel(novel){
+    const seriesId=pixivNativeSeriesId(novel);
+    if(!seriesId)return {content:novel.content,applied:false,message:'シリーズ外のため名前変換なし'};
+    const words=pixivNativeSavedWords(seriesId);
+    if(!words.length)return {content:novel.content,applied:false,message:'保存済みの名前変換なし'};
+    try{
+      const res=await fetch('/ajax/novel/series/'+seriesId+'/glossary',
+        {credentials:'same-origin',headers:{Accept:'application/json'}});
+      if(!res.ok)throw Error('HTTP '+res.status);
+      const glossary=await res.json();
+      if(glossary?.error)throw Error('Pixiv設定資料の取得エラー');
+      const pairs=pixivNativeGlossaryPairs(words,glossary);
+      if(!pairs.length)return {content:novel.content,applied:false,message:'名前変換の対応語なし（原文）'};
+      const content=pixivNativeApplyNames(novel.content,pairs);
+      return content===novel.content
+        ?{content,applied:false,message:'名前変換設定あり・本文の一致なし'}
+        :{content,applied:true,message:'Pixivの名前変換を自動適用（'+pairs.length+'単語）'};
+    }catch(e){
+      return {content:novel.content,applied:false,
+        message:'名前変換を取得できず原文表示：'+String(e?.message||e)};
+    }
+  }
+
   const novelId = () => {
     const u = new URL(location.href);
     return u.pathname === '/novel/show.php' && /^\d+$/.test(u.searchParams.get('id') || '')
@@ -1405,8 +1503,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
 
   function restorePages() {
     if (!original) return;
-    drawPages(original.pages);
-    statusNode.textContent = '取得時の本文に戻しました。';
+    drawPages(nativeTermToggle?.checked ? original.pages : (original.plainPages || original.pages));
+    statusNode.textContent = '読み込み時の本文に戻しました。';
   }
 
   function drawPages(pages) {
@@ -1460,17 +1558,26 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     try {
       const body = await fetchNovel(id);
       const parsed = parseContent(body.content);
+      const native = await pixivNativeConvertNovel(body);
+      const converted = native.applied ? parseContent(native.content) : parsed;
+      const safe = native.applied && converted.pages.length === parsed.pages.length;
       original = {
         id,
         title: body.title || document.title || '無題',
         userName: body.userName || body.user?.name || '',
         url: `https://www.pixiv.net/novel/show.php?id=${id}`,
         format: parsed.format,
-        pages: parsed.pages
+        plainPages: parsed.pages,
+        pages: safe ? converted.pages : parsed.pages,
+        nameApplied:!!safe
       };
+      if (nativeTermLabel && nativeTermToggle) {
+        nativeTermLabel.style.display = safe ? '' : 'none';
+        nativeTermToggle.checked = !!safe;
+      }
       drawPages(original.pages);
       const total = original.pages.reduce((n, p) => n + Array.from(p).length, 0);
-      statusNode.textContent = `取得成功：${original.pages.length}ページ／${total.toLocaleString('ja-JP')}字／取得形式 ${original.format}`;
+      statusNode.textContent = '取得成功：'+original.pages.length+'ページ／'+total.toLocaleString('ja-JP')+'字／取得形式 '+original.format+'／'+(native.applied&&!safe?'変換でページ数が変化したため原文表示':native.message);
     } catch (err) {
       original = null;
       statusNode.textContent = `取得失敗：${err?.message || err}`;
@@ -1592,9 +1699,21 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     dialogueSpacingToggle.type = 'checkbox'; dialogueSpacingToggle.checked = false;
     dialogueLabel.append(dialogueSpacingToggle, document.createTextNode(' 整形時、会話と地の文の間を1行空ける'));
 
+    nativeTermLabel=document.createElement('label');
+    nativeTermLabel.style.display='none';
+    nativeTermToggle=document.createElement('input');
+    nativeTermToggle.type='checkbox';nativeTermToggle.checked=true;
+    nativeTermToggle.addEventListener('change',()=>{
+      if(!original)return;
+      drawPages(nativeTermToggle.checked?original.pages:original.plainPages);
+      statusNode.textContent=nativeTermToggle.checked
+        ?'Pixivの名前変換後の本文を表示':'名前変換前の原文を表示';
+    });
+    nativeTermLabel.append(nativeTermToggle,document.createTextNode(' Pixivの名前変換を反映'));
+    nativeTermLabel.title='切り替えると本文の手編集は読み込み直されます';
     const hint = document.createElement('span');
     hint.textContent = '不要なページはチェックOFF／一部分だけ消す場合は本文を直接編集';
-    meta.append(metaLabel, indentLabel, dialogueLabel, hint);
+    meta.append(metaLabel, indentLabel, dialogueLabel, nativeTermLabel, hint);
 
     statusNode = document.createElement('div');
     statusNode.className = 'pnte-status';
