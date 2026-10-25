@@ -54,8 +54,8 @@ function harness(){
 
 test('script and metadata match diagnostic release',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+0\.6\.43/);
-  assert.match(meta,/@version\s+0\.6\.43/);
+  assert.match(script,/@version\s+0\.6\.44/);
+  assert.match(meta,/@version\s+0\.6\.44/);
 });
 
 test('storage snapshots never include private names or novel content',()=>{
@@ -105,4 +105,40 @@ test('existing TXT extraction, preview, and export flow are unchanged',()=>{
   assert.match(script,/const parsed = parseContent\(body\.content\)/);
   assert.match(script,/const text = buildOutput\(\)/);
   assert.match(script,/header\.append\(bar, meta, makeTermDiagPanel\(\), statusNode\)/);
+});
+
+test('diagnostic includes generic input counts and masked storage hints even with unchanged values',()=>{
+  const h=harness();
+  h.api.startTermDiag();
+  const report=h.api.termDiagSafeReport();
+  assert.equal(report.diagnosticVersion,2);
+  assert.ok(report.inputCandidateCount>=1);
+  assert.ok(report.storageKeyCounts.local>=1);
+  assert.equal(report.storageChanges.length,0);
+  assert.ok(report.possibleConversionStorage.length>=1);
+  assert.doesNotMatch(JSON.stringify(report),/CONFIDENTIAL_REPLACEMENT_123/);
+});
+
+test('diagnostic checkpoint records non-secret baseline before user navigation',()=>{
+  const h=harness();
+  h.api.startTermDiag();
+  const raw=h.session.getItem('pnte-native-term-diagnostic-state-v2');
+  assert.ok(raw);
+  const saved=JSON.parse(raw);
+  assert.equal(saved.version,2);
+  assert.equal(saved.active,true);
+  assert.equal(saved.foundInputs,1);
+  assert.doesNotMatch(raw,/CONFIDENTIAL_REPLACEMENT_123/);
+  h.api.stopTermDiag();
+  assert.equal(h.session.getItem('pnte-native-term-diagnostic-state-v2'),null);
+});
+
+test('a loaded page can resume diagnosis from previous session state',()=>{
+  assert.match(script,/function termDiagResumeOnLoad\(\)/);
+  assert.match(script,/const restored=termDiagRestoreCheckpoint\(\)/);
+  assert.match(script,/termDiag=restored/);
+  assert.match(script,/termDiagResumeOnLoad\(\);\s*void init\(\)/);
+  assert.match(script,/sessionStorage\.setItem\(TERM_DIAG_STATE_KEY/);
+  assert.match(script,/document\.addEventListener\('pointerup',termDiagCapture,true\)/);
+  assert.match(script,/document\.addEventListener\('touchend',termDiagCapture,true\)/);
 });
