@@ -56,8 +56,8 @@ function harness(shared={}){
 
 test('script and metadata match diagnostic release',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+0\.6\.44/);
-  assert.match(meta,/@version\s+0\.6\.44/);
+  assert.match(script,/@version\s+0\.6\.45/);
+  assert.match(meta,/@version\s+0\.6\.45/);
 });
 
 test('storage snapshots never include private names or novel content',()=>{
@@ -113,7 +113,7 @@ test('diagnostic includes generic input counts and masked storage hints even wit
   const h=harness();
   h.api.startTermDiag();
   const report=h.api.termDiagSafeReport();
-  assert.equal(report.diagnosticVersion,2);
+  assert.equal(report.diagnosticVersion,3);
   assert.ok(report.inputCandidateCount>=1);
   assert.ok(report.storageKeyCounts.local>=1);
   assert.equal(report.storageChanges.length,0);
@@ -157,4 +157,34 @@ test('reload-restored diagnosis correctly compares original and new conversion s
   assert.equal(report.storageChanges.length,1);
   assert.equal(report.storageChanges[0].change,'更新');
   assert.doesNotMatch(JSON.stringify(report),/PRIVATE_AFTER_RELOAD/);
+});
+
+test('Pixiv native words[] schema is discovered without leaking its source or replacement',()=>{
+  const h=harness();
+  const secretOriginal='みょうじ';
+  const secretNew='SECRET_DESIRED_NAME';
+  const data={
+    '9283714':{words:[{id:1234,termId:992,source:secretOriginal,replacement:secretNew},{id:2,termId:993,source:'なまえ',replacement:'ALSO_SECRET'}],updatedAt:1720000000},
+    '9283715':{words:[{id:3,termId:994,replacement:'OTHER_SECRET'}],updatedAt:1720000001}
+  };
+  h.local.setItem('opaque_storage_key','plain text unrelated');
+  h.local.setItem('termConversionStore',JSON.stringify(data));
+  h.api.startTermDiag();
+  const report=h.api.termDiagSafeReport();
+  const schema=report.nativeWordsSchema;
+  assert.ok(schema.length>=1);
+  const matching=schema.find(e=>e.seriesEntryCount===2&&e.wordsEntries===2);
+  assert.ok(matching);
+  assert.equal(matching.seriesKeyFormats[0],'numeric');
+  assert.equal(matching.examples[0].wordCount,2);
+  assert.deepEqual(matching.examples[0].wordItemSchema.fields.map(e=>e.valueType),['number','number','string','string']);
+  const exported=JSON.stringify(report);
+  assert.doesNotMatch(exported,/SECRET_DESIRED_NAME|ALSO_SECRET|OTHER_SECRET|みょうじ|なまえ|9283714/);
+});
+
+test('one-click native schema export reads existing words without requiring reapplication',()=>{
+  assert.match(script,/保存済み変換の構造だけコピー/);
+  assert.match(script,/nativeWordsSchema:termDiagNativeWordsEvidence\(\)/);
+  assert.match(script,/actions\.append\(start,stop,copy,schemaOnly\)/);
+  assert.match(script,/navigator\.clipboard\.writeText\(payload\)/);
 });
