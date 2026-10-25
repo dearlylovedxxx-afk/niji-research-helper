@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.6
+// @version      1.3.7
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -192,7 +192,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.6', KEY='xsf_userscript_v1';
+const VERSION='1.3.7', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -341,7 +341,7 @@ const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views
   const sections=[
     ['切り替え',[['enabled','表示変更機能を有効にする']]],
     ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['tlVideoIsolation','TL動画の分離保護（全幅表示は維持）'],['tlLauncher','TLに軽量「🔎 検索」起動ボタンを表示（試験的）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
-    ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
+    ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['quoteShortcut','詳細ページに「引用を表示」リンクを追加'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
     ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
   ];
   for(const [heading,items] of sections){
@@ -688,7 +688,7 @@ load();currentFields=blank();
   const KEY='xsf_display_settings_v1';
   const defaults={
     enabled:false,
-    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,tlVideoIsolation:true,tlLauncher:true,nativeSearch:true,
+    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,tlVideoIsolation:true,tlLauncher:true,quoteShortcut:true,nativeSearch:true,
     hideSidebarContent:true,hideForYou:false,hidePromoted:false,
     hideGrok:true,hidePremium:true,hideSubscriptions:true,
     hideMoney:true,hideJobs:true,hideAnalytics:true,
@@ -948,3 +948,83 @@ load();currentFields=blank();
 if(document.readyState==='loading'){
   document.addEventListener('DOMContentLoaded',xsfStartWhenDomReady,{once:true});
 }else{xsfStartWhenDomReady()}
+
+
+/**
+ * "View quotes" fallback independent of X's existing media and tweet trees.
+ * X often hides the native link; clicking this route-only shortcut navigates
+ * directly to the first-party quotes list for the current post.
+ * No MutationObserver and no changes to article/video/media descendants.
+ */
+(() => {
+  'use strict';
+  if (window.top !== window.self) return;
+  window.__xsfQuoteShortcutCleanup?.();
+  document.getElementById('xsf-quote-shortcut-host')?.remove();
+
+  const host=document.createElement('div');
+  host.id='xsf-quote-shortcut-host';
+  host.style.cssText=[
+    'position:fixed!important','width:0!important','height:0!important',
+    'top:0!important','left:0!important','pointer-events:none!important',
+    'z-index:2147482998!important'
+  ].join(';');
+  const shadow=host.attachShadow({mode:'open'});
+  const css=document.createElement('style');
+  css.textContent=[
+    ':host{all:initial}',
+    'a{display:flex;position:fixed;align-items:center;justify-content:center;',
+    'width:113px;height:31px;box-sizing:border-box;pointer-events:auto;',
+    'padding:0 9px;border:1px solid #cfd9de;border-radius:16px;',
+    'background:#ffffffeb;color:#536471;box-shadow:0 1px 5px #00000012;',
+    'font:600 12px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;',
+    'text-decoration:none;white-space:nowrap;cursor:pointer}',
+    'a:hover{background:#e8f4fd;color:#1d9bf0;border-color:#b3d9f2}',
+    'a:focus-visible{outline:2px solid #1d9bf0;outline-offset:2px}',
+    '@media(prefers-color-scheme:dark){',
+    'a{background:#181b1eea;color:#e7e9ea;border-color:#42474b}',
+    'a:hover{background:#25394a;color:#8ecdf8}}'
+  ].join('');
+  const link=document.createElement('a');
+  link.textContent='引用を表示 ↗';
+  link.setAttribute('aria-label','このポストの引用を表示');
+  link.title='このポストへの引用一覧を開く（引用が0件でも表示されます）';
+  shadow.append(css,link);
+  let lastHref='',lastX=NaN,lastY=NaN,alive=true;
+
+  function enabled(){
+    try{
+      const settings=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}')||{};
+      return settings.quoteShortcut!==false;
+    }catch{return true;}
+  }
+  function update(){
+    if(!alive)return;
+    const match=location.pathname.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)\/?$/);
+    const primary=match ? document.querySelector('[data-testid="primaryColumn"]') : null;
+    if(!match||!primary||!enabled()){
+      host.remove();lastHref='';return;
+    }
+    const rect=primary.getBoundingClientRect();
+    if(rect.width<210||rect.right<120||rect.left>innerWidth-90){
+      host.remove();return;
+    }
+    const href=new URL('/'+match[1]+'/status/'+match[2]+'/quotes',location.origin).href;
+    if(href!==lastHref){link.href=href;lastHref=href;}
+    const x=Math.max(6,Math.min(innerWidth-119,Math.round(rect.right-122)));
+    const y=Math.max(51,Math.round(rect.top+8));
+    if(x!==lastX){link.style.left=x+'px';lastX=x;}
+    if(y!==lastY){link.style.top=y+'px';lastY=y;}
+    if(!host.isConnected)document.documentElement.append(host);
+  }
+  update();
+  const timer=setInterval(update,1150);
+  function cleanup(){
+    if(!alive)return;
+    alive=false;clearInterval(timer);host.remove();
+    window.removeEventListener('pagehide',cleanup);
+    if(window.__xsfQuoteShortcutCleanup===cleanup)delete window.__xsfQuoteShortcutCleanup;
+  }
+  window.__xsfQuoteShortcutCleanup=cleanup;
+  window.addEventListener('pagehide',cleanup,{once:true});
+})();
