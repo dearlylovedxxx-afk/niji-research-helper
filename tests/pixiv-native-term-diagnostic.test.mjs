@@ -14,6 +14,7 @@ class Store {
   key(i){return [...this.data.keys()][i]??null}
   getItem(k){return this.data.get(k)??null}
   setItem(k,v){this.data.set(k,String(v))}
+  removeItem(k){this.data.delete(k)}
 }
 function harness(){
   const secret='CONFIDENTIAL_REPLACEMENT_123';
