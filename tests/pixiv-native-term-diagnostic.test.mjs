@@ -16,10 +16,11 @@ class Store {
   setItem(k,v){this.data.set(k,String(v))}
   removeItem(k){this.data.delete(k)}
 }
-function harness(){
+function harness(shared={}){
   const secret='CONFIDENTIAL_REPLACEMENT_123';
-  const local=new Store({pixivNovelWords:JSON.stringify({words:[{name:'みょうじ',value:secret}]})});
-  const session=new Store(),handlers=new Map(),winHandlers=new Map();
+  const local=shared.local || new Store({pixivNovelWords:JSON.stringify({words:[{name:'みょうじ',value:secret}]})});
+  const session=shared.session || new Store();
+  const handlers=new Map(),winHandlers=new Map();
   const input={
     tagName:'INPUT',type:'text',placeholder:'変換後のテキスト',
     value:secret,parentElement:{tagName:'DIV',parentElement:{tagName:'SECTION'}},
@@ -43,7 +44,7 @@ function harness(){
     'class MutationObserver {observe(){} disconnect(){}}'
   ].join('\n');
   const exported=[
-    'return {termDiagSnapshot,termDiagDiff,termDiagValueShape,startTermDiag,',
+    'return {termDiagSnapshot,termDiagDiff,termDiagValueShape,startTermDiag,termDiagResumeOnLoad,',
     'stopTermDiag,termDiagCapture,termDiagOnClick,termDiagSafeReport,',
     'termDiagReadSafeReport,termDiagStoreSafeReport,termDiagReportToText,',
     'get state(){return termDiag},get closed(){return closed}}'
@@ -142,4 +143,18 @@ test('a loaded page can resume diagnosis from previous session state',()=>{
   assert.match(script,/sessionStorage\.setItem\(TERM_DIAG_STATE_KEY/);
   assert.match(script,/document\.addEventListener\('pointerup',termDiagCapture,true\)/);
   assert.match(script,/document\.addEventListener\('touchend',termDiagCapture,true\)/);
+});
+
+test('reload-restored diagnosis correctly compares original and new conversion state',()=>{
+  const first=harness();
+  first.api.startTermDiag();
+  assert.ok(first.session.getItem('pnte-native-term-diagnostic-state-v2'));
+  first.local.setItem('pixivNovelWords',JSON.stringify({words:[{name:'みょうじ',value:'PRIVATE_AFTER_RELOAD'}]}));
+  const next=harness({local:first.local,session:first.session});
+  next.api.termDiagResumeOnLoad();
+  const report=next.api.termDiagSafeReport();
+  assert.equal(report.resumedAcrossNavigation,true);
+  assert.equal(report.storageChanges.length,1);
+  assert.equal(report.storageChanges[0].change,'更新');
+  assert.doesNotMatch(JSON.stringify(report),/PRIVATE_AFTER_RELOAD/);
 });
