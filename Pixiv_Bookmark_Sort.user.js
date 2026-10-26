@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv イラスト・小説 ブクマ順（検索結果横断）
 // @namespace    local.pixiv.bookmark-sort.cross-page
-// @version      0.6.47
+// @version      0.6.48
 // @description  Pixiv統合ツール：全体ブクマ・原寸画像PNG/ZIP保存・iPhone共有シート（ファイル/pCloud）・小説TXT・保存検索。
 // @match        https://www.pixiv.net/*
 // @run-at       document-idle
@@ -78,18 +78,32 @@ async function detail(id,kind,signal){const b=await json('/ajax/'+(kind==='novel
 const host=document.createElement('div');host.id='pixiv-bookmark-sort-cross-page-v05';const root=host.attachShadow({mode:'open'});root.innerHTML=`<style>:host{all:initial;font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;color-scheme:light}*{box-sizing:border-box}button,select,input{font:inherit;border:1px solid #d5d9e2;background:#fff;color:#263040;padding:9px;border-radius:8px}button,select{cursor:pointer}button:disabled{opacity:.5}.launch{position:fixed;right:12px;bottom:max(50px,env(safe-area-inset-bottom));z-index:2147483645;background:#eb3e63;color:white;border:0;border-radius:30px;font-weight:700;padding:13px 16px;box-shadow:0 4px 18px #0004}.veil{display:none;position:fixed;z-index:2147483646;inset:0;background:#111a}.veil.open{display:flex}.panel{margin:auto;width:min(1100px,100%);height:min(94dvh,100%);display:flex;flex-direction:column;overflow:hidden;background:#f5f6fb;color:#263040;border-radius:16px}.head{flex:0 1 auto;max-height:min(49dvh,380px);overflow-y:auto;overscroll-behavior:contain;padding:12px;background:white;border-bottom:1px solid #ddd}.heading,.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.heading{justify-content:space-between;position:sticky;top:-12px;background:#fff;z-index:2;padding:4px 0}.heading h2{font-size:17px;margin:0}.controls{margin-top:10px}.primary{background:#eb3e63;color:white}.minimum{width:105px}.status{white-space:pre-wrap;font-size:13px;line-height:1.5;margin-top:10px}.counted{font-size:12px;color:#b4294e;margin-top:8px}.note{font-size:11px;line-height:1.5;color:#586277;margin:8px 0 0}.results{flex:1;overflow:auto;min-height:32dvh;display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));align-content:start;gap:10px;padding:12px}.card{display:flex;flex-direction:column;text-decoration:none;color:#263040;background:white;border-radius:9px;overflow:hidden;min-width:0}.card img{width:100%;aspect-ratio:1/1;object-fit:cover;background:#e6e9ef}.card.novel img{aspect-ratio:3/4;object-fit:contain}.info{padding:8px}.num{color:#e33159;font-weight:700}.title{font-size:12px;overflow-wrap:anywhere}.author{font-size:11px;color:#647087}@media(max-width:600px){.panel{height:100dvh;border-radius:0}.results{grid-template-columns:repeat(2,minmax(0,1fr))}}</style><button class="launch">♥ 全体ブクマ順</button><div class="veil" role="dialog" aria-modal="true"><section class="panel"><div class="head"><div class="heading"><h2>♥ 検索結果をブックマーク数順に</h2><button class="open-results" type="button">📚 結果一覧を開く</button><button class="close" aria-label="閉じる">×</button></div><div class="controls"><button class="start primary">全件の調査を開始／再開</button><button class="stop" disabled>一時停止</button><button class="reset">保存結果を消して再調査</button><select class="limit" aria-label="表示数"><option value="100">上位100件</option><option value="300">上位300件</option><option value="1000">上位1000件</option></select><label>年齢制限 <select class="age" aria-label="年齢制限"><option value="all">すべて</option><option value="safe">全年齢</option><option value="r18">R-18</option></select></label><label>最低ブクマ数 <input class="minimum" type="number" inputmode="numeric" min="0" max="1000000000" step="1">件以上</label><select class="preset" aria-label="最低ブクマ数の候補"><option value="custom">件数を選ぶ</option><option value="0">指定なし</option><option value="100">100件以上</option><option value="500">500件以上</option><option value="1000">1000件以上</option><option value="5000">5000件以上</option><option value="10000">10000件以上</option></select></div><div class="status" aria-live="polite"></div><button class="debug" hidden>エラーの診断用URLを表示</button><div class="counted" aria-live="polite"></div><p class="note">検索結果の各ページから作品を調べ、確認済み作品を人気順に表示します。途中で止めても結果は保存され、全件調査が終わるまでは暫定順位です。最低ブクマ数は表示だけを絞り、取得件数を減らすものではありません。作品数やpixivの制限により全件取得できない場合があります。アクセス制限の迂回・自動再試行はしません。</p></div><div class="results"></div></section></div>`;document.body.append(host);
 const $=s=>root.querySelector(s),launch=$('.launch'),veil=$('.veil'),startBtn=$('.start'),stopBtn=$('.stop'),status=$('.status'),items=$('.results'),age=$('.age'),minInput=$('.minimum'),preset=$('.preset'),counted=$('.counted'),debug=$('.debug');minInput.value=String(minimum);preset.value=[0,100,500,1000,5000,10000].includes(minimum)?String(minimum):'custom';
 const message=s=>{status.textContent=s},buttons=on=>{startBtn.disabled=on;stopBtn.disabled=!on},stop=()=>running?.abort();
+let bookmarkViewerOpenPending=false;
 function showSavedBookmarkResults(){
-  // A separate viewer lives in the same shadowRoot. It supports saved
-  // ranking, newest order, and filters. The original grid is a fallback.
-  const button=root.querySelector('.pbs-new-button');
-  if(button){
-    button.click();
-    return true;
+  // Open the separate saved-results viewer directly. Do not proxy through
+  // another (possibly hidden) button: its existence did not ensure navigation.
+  bookmarkViewerOpenPending=true;
+  const openViewer=root.__pixivOpenBookmarkResults;
+  if(typeof openViewer!=='function'){
+    message('結果一覧画面を準備中です。保存済みの調査結果はそのままです。');
+    return false;
   }
-  message('結果一覧画面を読み込み中です。保存データはそのままです。');
-  items?.scrollIntoView?.({block:'start',behavior:'smooth'});
+  try{
+    if(openViewer()){
+      bookmarkViewerOpenPending=false;
+      return true;
+    }
+    bookmarkViewerOpenPending=false;
+    message('結果一覧を開けませんでした。Pixivの検索ページから開いてください。');
+  }catch(e){
+    bookmarkViewerOpenPending=false;
+    message('結果一覧の表示エラー：'+(e?.message||String(e)));
+  }
   return false;
 }
+root.__pixivOnBookmarkViewerReady=()=>{
+  if(bookmarkViewerOpenPending)showSavedBookmarkResults();
+};
 root.querySelector('.open-results')?.addEventListener('click',showSavedBookmarkResults);
 function showSavedBookmarkResultsAfterScan(key){
   setTimeout(()=>{
@@ -601,18 +615,25 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     extraStatus = $new('div', 'pbs-extra-status');
     header.append(bar, filters, excludeBox, summary, help, extraStatus);
     results = $new('div', 'pbs-new-list'); overlay.append(header, results); root.append(overlay);
-    openButton.addEventListener('click', () => {
+    function openResultsViewer() {
+      // Single entry point for both the visible research-panel button and
+      // the detailed viewer button. Keep the full-screen results UI intact.
       viewContext = searchContext();
-      if (!viewContext) { window.alert('Pixivのタグ検索・作品検索ページから開いてください。'); return; }
+      if (!viewContext) { window.alert('Pixivのタグ検索・作品検索ページから開いてください。'); return false; }
       const baseMinimum = root.querySelector('.minimum');
       minInput.value = baseMinimum?.value || '0';
       ageSelect.value = viewContext.age || 'all';
       fromInput.value = viewContext.from;
       toInput.value = viewContext.to;
-      open = true; overlay.classList.add('pbs-open'); overlay.scrollTop = 0;
+      open = true;
+      overlay.classList.add('pbs-open');
+      overlay.scrollTop = 0;
       syncExcludeWordUi();
-      renderList();
-    });
+      try { renderList(); }
+      catch (e) { summary.textContent = '結果の読み込みエラー：' + (e?.message || String(e)); }
+      return overlay.classList.contains('pbs-open');
+    }
+    openButton.addEventListener('click', openResultsViewer);
     back.addEventListener('click', hide);
     root.querySelector('.close')?.addEventListener('click', hide);
     ageSelect.addEventListener('change', applyAgeToSearch);
@@ -656,6 +677,8 @@ minInput.addEventListener('change',()=>changeMin(minInput.value));minInput.addEv
     } catch {}
     new MutationObserver(scheduleRender).observe(source, {childList:true});
     new MutationObserver(scheduleRender).observe(counted, {childList:true,characterData:true,subtree:true});
+    root.__pixivOpenBookmarkResults = openResultsViewer;
+    root.__pixivOnBookmarkViewerReady?.();
     return true;
   }
   if (!init()) {
