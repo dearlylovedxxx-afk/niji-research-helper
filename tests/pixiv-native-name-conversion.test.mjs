@@ -46,8 +46,8 @@ const service=new Function('localStorage','fetch',methods+
 const novel=content=>({content,seriesNavData:{seriesId:'654321',title:'Test'}});
 test('versions match and JS syntax parses',()=>{
   assert.doesNotThrow(()=>new Function(src));
-  assert.match(src,/@version\s+0\.6\.46/);
-  assert.match(meta,/@version\s+0\.6\.46/);
+  assert.match(src,/@version\s+0\.6\.47/);
+  assert.match(meta,/@version\s+0\.6\.47/);
 });
 test('reader storage maps word values to author glossary items via matching IDs',()=>{
   const words=service.pixivNativeSavedWords('654321');

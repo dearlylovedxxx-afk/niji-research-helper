@@ -56,8 +56,8 @@ function harness(shared={}){
 
 test('script and metadata match diagnostic release',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+0\.6\.46/);
-  assert.match(meta,/@version\s+0\.6\.46/);
+  assert.match(script,/@version\s+0\.6\.47/);
+  assert.match(meta,/@version\s+0\.6\.47/);
 });
 
 test('storage snapshots never include private names or novel content',()=>{
