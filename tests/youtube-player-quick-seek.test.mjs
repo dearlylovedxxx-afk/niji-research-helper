@@ -7,8 +7,8 @@ const meta=readFileSync(new URL('../Niji_Research_Helper.meta.js',import.meta.ur
 
 test('Quick Seek script parses and both metadata versions match',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script, /@version\s+1\.0\.123/);
-  assert.match(meta, /@version\s+1\.0\.123/);
+  assert.match(script, /@version\s+1\.0\.124/);
+  assert.match(meta, /@version\s+1\.0\.124/);
 });
 
 test('two seek buttons are created once and attached to the player',()=>{
@@ -62,4 +62,13 @@ test('a stationary cursor cannot keep the controls pinned on screen forever',()=
   assert.match(script,/Math\.abs\(y - ui\.lastPointerY\) < 2/);
   assert.match(script,/lastPointerX: null/);
   assert.match(script,/lastPointerY: null/);
+});
+
+test('10-second hit targets are large rectangular buttons on desktop and mobile',()=>{
+  assert.match(script, /'width:' \+ \(mobile \? '76px' : '84px'\)/);
+  assert.match(script, /'height:' \+ \(mobile \? '54px' : '58px'\)/);
+  assert.match(script, /'min-width:' \+ \(mobile \? '76px' : '84px'\)/);
+  assert.match(script, /'min-height:' \+ \(mobile \? '54px' : '58px'\)/);
+  assert.match(script, /'border-radius:9px!important'/);
+  assert.doesNotMatch(script, /'border-radius:50%!important','border:1px solid rgba\(255,255,255,.40\)/);
 });
