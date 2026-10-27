@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.123
+// @version      1.0.124
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.123';
+  const VERSION = '1.0.124';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM storage only; never part of NRH DB/cloud backup
@@ -5701,6 +5701,105 @@
 
 
 
+  // ---------- Auto-translate YouTube's own comment translations ----------
+  // Click only the native, currently-untranslated button on comments in view.
+  // No third-party translation API, no change to live chat or reply expansion.
+  function installYoutubeNativeCommentAutoTranslate() {
+    if (!isYoutubeHost() || window.__nrhCommentAutoTranslateV1) return;
+    window.__nrhCommentAutoTranslateV1 = true;
+    const selector = [
+      'ytd-comment-view-model .translate-button',
+      'ytd-comment-view-model #translate-button',
+      'ytd-comment-renderer .translate-button',
+      'ytd-comment-renderer #translate-button',
+      'ytd-comment-reply-renderer .translate-button',
+      'ytd-comment-reply-renderer #translate-button'
+    ].join(', ');
+    const ownerSelector = 'ytd-comment-view-model, ytd-comment-renderer, ytd-comment-reply-renderer';
+    const enabledPage = () => location.pathname === '/watch' ||
+      /^\/live\/[A-Za-z0-9_-]{11}(?:\/|$)/.test(location.pathname) ||
+      location.pathname.startsWith('/shorts/');
+    let watched = new WeakSet();
+    let clicked = new WeakSet();
+    let currentRoute = location.pathname + location.search;
+    let scanTimer = 0;
+
+    function nativeTranslateTarget(node) {
+      if (!node?.isConnected || clicked.has(node) || !node.closest(ownerSelector)) return null;
+      if (node.closest('[hidden], [aria-hidden="true"]')) return null;
+      const state = (node.getAttribute('state') || '').toLowerCase();
+      if (state === 'toggled' || state === 'true') return null;
+      const target = node.querySelector('button, tp-yt-paper-button, [role="button"]') || node;
+      const label = [node.textContent, node.getAttribute('aria-label'),
+        target.getAttribute('aria-label'), target.getAttribute('title')].join(' ').trim();
+      // A translated comment may offer "Show original" at the same location.
+      // Never auto-click that switch or undo a translation done by the user.
+      if (/原文|元の文章|オリジナルを表示|show original|see original|view original|원문|원본 보기|查看原文/i.test(label)) return null;
+      if (state !== 'untoggled' &&
+          !/翻訳|translate|번역|翻译|翻譯/i.test(label)) return null;
+      if (target.matches('[disabled], [aria-disabled="true"]')) return null;
+      return target;
+    }
+
+    const visibleObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const node = entry.target;
+        visibleObserver.unobserve(node);
+        watched.delete(node);
+        if (!enabledPage() || document.hidden) continue;
+        const target = nativeTranslateTarget(node);
+        if (!target) continue;
+        clicked.add(node); // One click per comment; preserve manual "original" choice.
+        try { target.click(); }
+        catch (err) { console.debug('[NRH] native comment translation unavailable', err); }
+      }
+    }, { rootMargin:'0px 0px 180px 0px', threshold:0 });
+
+    function scan() {
+      if (!enabledPage() || document.hidden) return;
+      const route = location.pathname + location.search;
+      if (route !== currentRoute) {
+        currentRoute = route;
+        visibleObserver.disconnect();
+        watched = new WeakSet();
+        clicked = new WeakSet();
+      }
+      for (const node of document.querySelectorAll(selector)) {
+        if (clicked.has(node) || watched.has(node)) continue;
+        watched.add(node);
+        visibleObserver.observe(node);
+      }
+    }
+
+    function scheduleScan() {
+      if (scanTimer) return;
+      scanTimer = setTimeout(() => { scanTimer=0; scan(); }, 220);
+    }
+    const domObserver = new MutationObserver(changes => {
+      if (!enabledPage()) return;
+      for (const change of changes) {
+        for (const node of change.addedNodes) {
+          if (!(node instanceof Element)) continue;
+          const tag = node.localName || '';
+          if (tag.startsWith('ytd-comment') || tag.startsWith('ytm-comment') ||
+              node.matches('.translate-button, #translate-button') ||
+              node.querySelector('.translate-button, #translate-button, ytd-comment-view-model')) {
+            scheduleScan();
+            return;
+          }
+        }
+      }
+    });
+    domObserver.observe(document.documentElement, {childList:true, subtree:true});
+    document.addEventListener('yt-navigate-finish', scheduleScan);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) scheduleScan();
+    });
+    setInterval(scan, 4000); // Recover late native buttons without polling every frame.
+    scan();
+  }
+
   // ---------- YouTube player +10s/-10s on-screen controls ----------
   // These controls deliberately live inside YouTube's video player so theater
   // mode, resizing and fullscreen retain the same relative placement.
@@ -5711,8 +5810,8 @@
     const ns = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(ns, 'svg');
     svg.setAttribute('viewBox', '0 0 24 24');
-    svg.setAttribute('width', '31');
-    svg.setAttribute('height', '31');
+    svg.setAttribute('width', '35');
+    svg.setAttribute('height', '35');
     svg.setAttribute('aria-hidden', 'true');
     svg.style.cssText = 'display:block;pointer-events:none;flex:none;';
     const ring = document.createElementNS(ns, 'path');
@@ -5896,7 +5995,7 @@
       'opacity:0!important','visibility:hidden!important',
       'transition:opacity .22s ease,visibility .22s ease!important',
       'align-items:center!important','justify-content:center!important',
-      'gap:' + (mobile ? '9px' : '12px') + '!important','height:auto!important','width:auto!important',
+      'gap:' + (mobile ? '10px' : '12px') + '!important','height:auto!important','width:auto!important',
       'pointer-events:none!important','box-sizing:border-box!important'
     ].join(';');
 
@@ -5909,9 +6008,9 @@
       button.title = delta < 0 ? '10秒戻す' : '10秒進む';
       button.style.cssText = [
         'display:flex!important','align-items:center!important','justify-content:center!important',
-        'width:45px!important','height:45px!important','min-width:45px!important',
-        'min-height:45px!important','padding:0!important','margin:0!important',
-        'border-radius:50%!important','border:1px solid rgba(255,255,255,.40)!important',
+        'width:' + (mobile ? '76px' : '84px') + '!important','height:' + (mobile ? '54px' : '58px') + '!important','min-width:' + (mobile ? '76px' : '84px') + '!important',
+        'min-height:' + (mobile ? '54px' : '58px') + '!important','padding:0!important','margin:0!important',
+        'border-radius:9px!important','border:1px solid rgba(255,255,255,.40)!important',
         'background:rgba(27,31,40,.46)','color:#fff!important',
         'box-shadow:0 2px 9px rgba(0,0,0,.24)!important',
         'backdrop-filter:blur(4px)','-webkit-backdrop-filter:blur(4px)',
@@ -13543,7 +13642,10 @@ e.el.classList.toggle('npf-r-hidden', !show);
   // 実機でここが待ち状態になると従来は「読み込み中」もボタンも出なくなりえた。
   // 起動したパネルは、保存済み設定の読込後に再描画する。
   const mobileYoutubeBoot = isMobileYoutubeUi();
-  if (isYoutubeHost()) installYoutubeCommentShortcut();
+  if (isYoutubeHost()) {
+    installYoutubeCommentShortcut();
+    installYoutubeNativeCommentAutoTranslate();
+  }
   if (mobileYoutubeBoot) startYoutubeHelper();
 
   state.apiKey = await gmGet(KEY_API, '');
