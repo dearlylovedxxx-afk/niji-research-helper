@@ -5,10 +5,10 @@ import {readFileSync} from 'node:fs';
 const script=readFileSync(new URL('../Niji_Research_Helper.user.js',import.meta.url),'utf8');
 const meta=readFileSync(new URL('../Niji_Research_Helper.meta.js',import.meta.url),'utf8');
 
-test('v1.0.123 integrates a compact video player hover overlay',()=>{
+test('v1.0.124 integrates a compact video player hover overlay',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+1\.0\.123/);
-  assert.match(meta,/@version\s+1\.0\.123/);
+  assert.match(script,/@version\s+1\.0\.124/);
+  assert.match(meta,/@version\s+1\.0\.124/);
   assert.match(script,/root\.id='npf-liveclock-mini'/);
   assert.match(script,/width:205px!important/);
   assert.match(script,/youtubeLiveClockMiniNear\(event,host\)/);
