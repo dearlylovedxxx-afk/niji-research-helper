@@ -20,12 +20,12 @@ test('all merged userscripts keep valid JavaScript syntax', () => {
 
 test('native X search remains native and bundled with X Search Favorites', () => {
   const script = file('X_Search_Favorites.user.js');
-  assert.match(script, /@version\s+1\.3\.5/);
+  assert.match(script, /@version\s+1\.3\.8/);
   assert.match(script, /cpft-native-only-search-css/);
   assert.match(script, /SearchBox_Search_Input/);
   assert.match(script, /cpft-native-search-on/);
   assert.match(script, /window\.__xsfUserscriptCleanup/);
-  assert.match(script, /const VERSION='1\.3\.5'/);
+  assert.match(script, /const VERSION='1\.3\.8'/);
 });
 
 test('N3 retains F13-F14 video dial and limits NicoLive comments module to its watch pages', () => {
@@ -41,8 +41,8 @@ test('N3 retains F13-F14 video dial and limits NicoLive comments module to its w
 test('LiveClock is one-shot, tab-scoped and available from Niji Research Helper', () => {
   const script = file('Niji_Research_Helper.user.js');
   const meta = file('Niji_Research_Helper.meta.js');
-  assert.match(script, /@version\s+1\.0\.123/);
-  assert.match(meta, /@version\s+1\.0\.123/);
+  assert.match(script, /@version\s+1\.0\.124/);
+  assert.match(meta, /@version\s+1\.0\.124/);
   assert.match(script, /new BroadcastChannel\('niji-research-helper-liveclock-v1'\)/);
   assert.match(script, /youtubeLiveClockReceiveSync\(message\)/);
   assert.match(script, /youtubeLiveClockMarkToggle\(\)/);
