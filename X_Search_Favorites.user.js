@@ -53,11 +53,11 @@
     root.classList.toggle('xsf-guard-wide',guardedWide);
     root.classList.toggle('xsf-guard-tl',guardedTL && opts.wideTimeline!==false);
     root.classList.toggle('xsf-guard-search',guardedSearch && opts.wideTimeline!==false);
-    root.classList.toggle('xsf-guard-tl-grok',guardedTL && opts.hideGrok!==false);
-    root.classList.toggle('xsf-guard-tl-chat',guardedTL && opts.hideMessageDrawer!==false);
-    root.classList.toggle('xsf-guard-tl-premium',guardedTL && opts.hidePremium!==false);
-    root.classList.toggle('xsf-guard-tl-calls',guardedTL && opts.hideCalls!==false);
-    root.classList.toggle('xsf-guard-tl-creator',guardedTL && opts.hideCreatorStudio!==false);
+    root.classList.toggle('xsf-guard-tl-grok',(guardedTL || guardedSearch) && opts.hideGrok!==false);
+    root.classList.toggle('xsf-guard-tl-chat',(guardedTL || guardedSearch) && opts.hideMessageDrawer!==false);
+    root.classList.toggle('xsf-guard-tl-premium',(guardedTL || guardedSearch) && opts.hidePremium!==false);
+    root.classList.toggle('xsf-guard-tl-calls',(guardedTL || guardedSearch) && opts.hideCalls!==false);
+    root.classList.toggle('xsf-guard-tl-creator',(guardedTL || guardedSearch) && opts.hideCreatorStudio!==false);
     if(guarded){
       // TL needs its native Search form while the rest of XSF remains isolated.
       // Do not clear the search overlay class from the guarded TL on each
