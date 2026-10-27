@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.7
+// @version      1.3.8
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -38,16 +38,21 @@
       path.startsWith('/i/communities/');
     const guardedPost=tweet && opts.videoGuard!==false;
     const guardedTL=opts.enabled===true && opts.tlVideoIsolation!==false && timeline;
-    const guarded=guardedPost || guardedTL;
+    // Search results are also a media feed. Reuse TL's video-safe outer
+    // layout instead of enabling the GPU-sensitive full-layout rules.
+    const guardedSearch=opts.enabled===true && opts.searchVideoIsolation!==false &&
+      /^\/(?:search|explore)(?:\/|$)/.test(path);
+    const guarded=guardedPost || guardedTL || guardedSearch;
     const wide=opts.enabled===true && supported && !guarded &&
       (tweet?(opts.wideTweet!==false && opts.videoSafeTweet===false):opts.wideTimeline!==false);
     // This class deliberately does NOT activate the main XSF UI, native
     // search relocation, hide rules or DOM watchers on a video post.
     const guardedWide=opts.enabled===true &&
       ((guardedPost && opts.guardWidePost!==false && opts.wideTweet!==false) ||
-       (guardedTL && opts.wideTimeline!==false));
+       ((guardedTL || guardedSearch) && opts.wideTimeline!==false));
     root.classList.toggle('xsf-guard-wide',guardedWide);
     root.classList.toggle('xsf-guard-tl',guardedTL && opts.wideTimeline!==false);
+    root.classList.toggle('xsf-guard-search',guardedSearch && opts.wideTimeline!==false);
     root.classList.toggle('xsf-guard-tl-grok',guardedTL && opts.hideGrok!==false);
     root.classList.toggle('xsf-guard-tl-chat',guardedTL && opts.hideMessageDrawer!==false);
     root.classList.toggle('xsf-guard-tl-premium',guardedTL && opts.hidePremium!==false);
@@ -115,7 +120,9 @@
     /* Only the outer native TL column wrappers: preserve the React video
        player, cards and descendants. CPFT-style child width correction. */
     html.xsf-guard-tl [data-testid="primaryColumn"] > div:first-child,
-    html.xsf-guard-tl [data-testid="primaryColumn"] > div:first-child > div:last-child {
+    html.xsf-guard-tl [data-testid="primaryColumn"] > div:first-child > div:last-child,
+    html.xsf-guard-search [data-testid="primaryColumn"] > div:first-child,
+    html.xsf-guard-search [data-testid="primaryColumn"] > div:first-child > div:last-child {
       width:100%!important;
       max-width:none!important;
       min-width:0!important;
@@ -192,7 +199,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.7', KEY='xsf_userscript_v1';
+const VERSION='1.3.8', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -340,7 +347,7 @@ const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views
   layout.append(msg);
   const sections=[
     ['切り替え',[['enabled','表示変更機能を有効にする']]],
-    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['tlVideoIsolation','TL動画の分離保護（全幅表示は維持）'],['tlLauncher','TLに軽量「🔎 検索」起動ボタンを表示（試験的）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
+    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['tlVideoIsolation','TL動画の分離保護（全幅表示は維持）'],['searchVideoIsolation','検索結果の動画保護（検索・いいね順機能は維持）'],['tlLauncher','TLに軽量「🔎 検索」起動ボタンを表示（試験的）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
     ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['quoteShortcut','詳細ページに「引用を表示」リンクを追加'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
     ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
   ];
@@ -628,7 +635,13 @@ function syncCoreObserver(){
   }
   protectedLauncherHost.remove();
   // Only search filtering/collecting needs a DOM-wide observer.
-  const needsObserver=activeSearch() &&
+  // Unlike the video-safe TL, Search must still allow explicit collection.
+  // Its 1.1s collector already works without observing every mutation in X's
+  // video/player subtree. Keep the broad observer disconnected there.
+  const searchProtected=location.pathname.startsWith('/search') &&
+    window.__xsfLayoutAPI?.get()?.enabled===true &&
+    window.__xsfLayoutAPI?.get()?.searchVideoIsolation!==false;
+  const needsObserver=activeSearch() && !searchProtected &&
     (filterOn || scanRunning || manualCapture || !sorted.hidden);
   if(needsObserver && !observerActive){
     observer.observe(document.documentElement,{childList:true,subtree:true});
@@ -688,7 +701,7 @@ load();currentFields=blank();
   const KEY='xsf_display_settings_v1';
   const defaults={
     enabled:false,
-    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,tlVideoIsolation:true,tlLauncher:true,quoteShortcut:true,nativeSearch:true,
+    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,tlVideoIsolation:true,searchVideoIsolation:true,tlLauncher:true,quoteShortcut:true,nativeSearch:true,
     hideSidebarContent:true,hideForYou:false,hidePromoted:false,
     hideGrok:true,hidePremium:true,hideSubscriptions:true,
     hideMoney:true,hideJobs:true,hideAnalytics:true,
@@ -904,12 +917,16 @@ load();currentFields=blank();
     const timelineGuardRoute=path==='/home'||path.startsWith('/i/lists/')||
       path.startsWith('/i/communities/');
     const guardedTL=options.enabled && options.tlVideoIsolation && timelineGuardRoute;
-    const guardedPage=guardedPost || guardedTL;
+    const guardedSearch=options.enabled && options.searchVideoIsolation &&
+      /^\/(?:search|explore)(?:\/|$)/.test(path);
+    const guardedPage=guardedPost || guardedTL || guardedSearch;
     const videoSafePage=options.enabled && options.videoSafeTweet && isTweet;
     const full=options.enabled && !guardedPage && !videoSafePage && (isTweet ? options.wideTweet : (options.wideTimeline && isTimeline));
     body.classList.toggle('xsf-layout-full',full);
     body.classList.toggle('xsf-layout-profile',full&&isProfile);
     body.classList.toggle('xsf-sidebar-hidden',options.enabled&&options.hideSidebarContent&&!guardedPage&&!videoSafePage);
+    // Search/Explore retain native rendering; extra hide CSS can modify
+    // player ancestors after React mounts the search-result feed.
     body.classList.toggle('xsf-display-active',options.enabled&&!guardedPage);
     body.classList.toggle('xsf-hide-side-items',false);
     body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou&&!guardedPage);
