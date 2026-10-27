@@ -84,7 +84,9 @@ test('search keeps native X feed, saved-search panel and like tools available',(
   assert.match(source,/function applyFilter\(\)/);
   assert.match(source,/function navigate\(q,mode='live'\)/);
   assert.match(source,/if\(!isGuardedVideoPage\(\)\)\(document.body\|\|document.documentElement\)\.append\(host\)/);
-  assert.doesNotMatch(source,/const isGuardedVideoPage=\(\)=>\{[\s\S]*?if\(!post&&!timeline\)[\s\S]*?searchVideoIsolation/);
+  const guardedBody=source.slice(source.indexOf('const isGuardedVideoPage=()=>{'),source.indexOf('const isProtectedTimeline=()=>{'));
+  assert.match(guardedBody,/if\(!post&&!timeline\)return false/);
+  assert.doesNotMatch(guardedBody,/searchVideoIsolation/);
 });
 test('search route does not attach a document-wide media mutation observer',()=>{
   assert.match(source,/const searchProtected=location\.pathname\.startsWith\('\/search'\)/);
