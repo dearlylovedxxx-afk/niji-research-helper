@@ -8,7 +8,7 @@ const to=source.indexOf('  function update(){',from);
 assert.ok(from>0&&to>from);
 const position=new Function(source.slice(from,to)+'\nreturn quoteShortcutPosition;')();
 
-test('X Search Favorites v1.3.9 parses',()=>{
+test('X Search Favorites v1.3.10 parses',()=>{
   assert.doesNotThrow(()=>new Function(source));
   assert.match(source,/@version\s+1\.3\.9/);
   assert.match(source,/const VERSION='1\.3\.9'/);
