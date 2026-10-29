@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.12
+// @version      1.3.13
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -47,6 +47,9 @@
     const guardedLikes=opts.enabled===true && opts.likesVideoIsolation!==false &&
       /^\/[a-zA-Z0-9_]{1,15}\/likes\/?$/.test(path);
     const guarded=guardedPost || guardedTL || guardedSearch || guardedLikes;
+    // Independent, video-safe navigation cleanup: never rely on
+    // body.xsf-display-active, which is deliberately removed for media safety.
+    root.classList.toggle('xsf-guarded-ui', opts.enabled===true && guarded);
     const wide=opts.enabled===true && supported && !guarded &&
       (tweet?(opts.wideTweet!==false && opts.videoSafeTweet===false):opts.wideTimeline!==false);
     // This class deliberately does NOT activate the main XSF UI, native
@@ -216,7 +219,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.12', KEY='xsf_userscript_v1';
+const VERSION='1.3.13', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -777,6 +780,50 @@ load();currentFields=blank();
       '[data-testid="UserCell"]:has(a[href^="/i/connect_people"])'
     ]
   };
+  // While the video guard is active, hide ONLY navigation, menus, side
+  // modules, and non-video page chrome. Never target an article, video,
+  // player wrapper, or its React descendants from these protected rules.
+  // Regular pages continue using the full hiddenSelectors rules below.
+  const protectedHideSelectors={
+    hideGrok:[
+      'header nav a[href="/i/grok"]','[role="menuitem"] a[href="/i/grok"]',
+      'a[href="/i/grok"]','[data-testid="GrokDrawer"]',
+      '[data-testid="GrokDrawerHeader"]','button[data-testid="grokImgGen"]',
+      'button[data-testid="grokButton"]',
+      'button[aria-label="Grok actions"]',
+      'button[aria-label="Grokに質問する"]',
+      'button[aria-label="Grokのアクション"]'
+    ],
+    hidePremium:[
+      'header nav a[href^="/i/premium"]',
+      'header nav a[href^="/i/verified"]',
+      '[role="menuitem"] a[href^="/i/premium_sign_up"]'
+    ],
+    hideSubscriptions:[
+      'header nav a[href*="creator-subscriptions"]',
+      'a[href$="/creator-subscriptions/subscriptions"]'
+    ],
+    hideMoney:[
+      'header nav a[href="/i/money"]','a[href="/i/money"]'
+    ],
+    hideJobs:[
+      'header nav a[href="/jobs"]','[role="menuitem"] a[href="/jobs"]'
+    ],
+    hideAnalytics:[
+      'header nav a[href="/i/account_analytics"]',
+      '[role="menuitem"] a[href="/i/account_analytics"]'
+    ],
+    hideMessageDrawer:['[data-testid="chat-drawer-root"]'],
+    hideWhoToFollow:[
+      'aside[role="complementary"]:has(a[href^="/i/connect_people"])',
+      '[data-testid="UserCell"]:has(a[href^="/i/connect_people"])'
+    ],
+    hideCalls:['header nav a[href="/i/calls"]','[role="menuitem"] a[href="/i/calls"]'],
+    hideCreatorStudio:[
+      'header nav a[href$="/creators/studio"]',
+      '[role="menuitem"] a[href$="/creators/studio"]'
+    ]
+  };
   const bodyClasses=[
     'xsf-layout-full','xsf-layout-profile','xsf-hide-side-items','xsf-sidebar-hidden','xsf-native-search-on','xsf-display-active','xsf-hide-for-you',
     'xsf-monochrome-buttons'
@@ -858,8 +905,18 @@ load();currentFields=blank();
     `);
     if(options.enabled) for (const [key, selectors] of Object.entries(hiddenSelectors)) {
       if(!options[key])continue;
+      // Full display rules only operate when the page is NOT video-guarded.
       rules.push(selectors.map(s=>'body.xsf-display-active '+s).join(',\n')+' {display:none!important}');
+      // The smaller video-safe set stays active on guarded posts and feeds.
+      const safe=protectedHideSelectors[key];
+      if(safe?.length) rules.push(
+        safe.map(s=>'html.xsf-guarded-ui '+s).join(',\n')+' {display:none!important}'
+      );
     }
+    // Hide the For You tab only; this selector never addresses video nodes.
+    if(options.enabled && options.hideForYou) rules.push(
+      'html.xsf-guarded-ui [data-testid="primaryColumn"] nav[role="navigation"] [role="tablist"] > div:first-child {display:none!important}'
+    );
     style.textContent=rules.join('\n');
   }
   function markSearch(form,sidebar){
