@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.8
+// @version      1.3.9
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -199,7 +199,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.8', KEY='xsf_userscript_v1';
+const VERSION='1.3.9', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -1015,6 +1015,20 @@ if(document.readyState==='loading'){
       return settings.quoteShortcut!==false;
     }catch{return true;}
   }
+  // Keep the first-party post "More" (… / block / mute / report) clickable.
+  // The old right-edge placement covered that native menu completely.
+  function quoteShortcutPosition(columnRect, menuRect, viewportWidth) {
+    const w=113, h=31, gap=10;
+    if (columnRect.width<410) return null; // Narrow view: prefer the native menu.
+    const menuLeft=menuRect && menuRect.width>0 && menuRect.height>0
+      ? menuRect.left : columnRect.right-46;
+    const x=Math.round(menuLeft-w-gap);
+    if (x<Math.max(6,columnRect.left+175) ||
+        x+w>menuLeft-gap || x+w>viewportWidth-6) return null;
+    const top=menuRect && menuRect.width>0 && menuRect.height>0
+      ? menuRect.top+(menuRect.height-h)/2 : columnRect.top+8;
+    return {x,y:Math.max(51,Math.round(top))};
+  }
   function update(){
     if(!alive)return;
     const match=location.pathname.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)\/?$/);
@@ -1028,8 +1042,13 @@ if(document.readyState==='loading'){
     }
     const href=new URL('/'+match[1]+'/status/'+match[2]+'/quotes',location.origin).href;
     if(href!==lastHref){link.href=href;lastHref=href;}
-    const x=Math.max(6,Math.min(innerWidth-119,Math.round(rect.right-122)));
-    const y=Math.max(51,Math.round(rect.top+8));
+    const menu=primary.querySelector(
+      'article[data-testid="tweet"] [data-testid="caret"], [data-testid="tweet"] [data-testid="caret"]');
+    const placement=quoteShortcutPosition(rect,menu?.getBoundingClientRect(),innerWidth);
+    if(!placement){
+      host.remove();return; // Never obstruct X's own block/report menu.
+    }
+    const {x,y}=placement;
     if(x!==lastX){link.style.left=x+'px';lastX=x;}
     if(y!==lastY){link.style.top=y+'px';lastY=y;}
     if(!host.isConnected)document.documentElement.append(host);
