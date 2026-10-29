@@ -54,8 +54,8 @@ const settings={enabled:true,wideTimeline:true,wideTweet:true,videoGuard:true,
 
 test('v1.3.10 source parses and preserves original storage',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.3\.8/);
-  assert.match(source,/const VERSION='1\.3\.8'/);
+  assert.match(source,/@version\s+1\.3\.10/);
+  assert.match(source,/const VERSION='1\.3\.10'/);
   assert.match(source,/KEY='xsf_userscript_v1'/);
   assert.match(source,/xsf_display_settings_v1/);
 });
