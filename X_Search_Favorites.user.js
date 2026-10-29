@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.10
+// @version      1.3.11
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -211,7 +211,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.10', KEY='xsf_userscript_v1';
+const VERSION='1.3.11', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -1027,19 +1027,19 @@ if(document.readyState==='loading'){
       return settings.quoteShortcut!==false;
     }catch{return true;}
   }
-  // Keep the first-party post "More" (… / block / mute / report) clickable.
-  // The old right-edge placement covered that native menu completely.
-  function quoteShortcutPosition(columnRect, menuRect, viewportWidth) {
-    const w=113, h=31, gap=10;
-    if (columnRect.width<410) return null; // Narrow view: prefer the native menu.
-    const menuLeft=menuRect && menuRect.width>0 && menuRect.height>0
-      ? menuRect.left : columnRect.right-46;
-    const x=Math.round(menuLeft-w-gap);
-    if (x<Math.max(6,columnRect.left+175) ||
-        x+w>menuLeft-gap || x+w>viewportWidth-6) return null;
-    const top=menuRect && menuRect.width>0 && menuRect.height>0
-      ? menuRect.top+(menuRect.height-h)/2 : columnRect.top+8;
-    return {x,y:Math.max(51,Math.round(top))};
+  // Position this independent quote shortcut in the POST PAGE HEADING
+  // ("← ポスト"), not the post's upper-right action area. The previous
+  // caret-relative placement could suppress the shortcut entirely if X's
+  // native More control was measured at an unexpected position.
+  // Reading only the native primary column geometry avoids touching posts,
+  // action menus, video descendants or their React rendering.
+  function quoteShortcutPosition(columnRect, viewportWidth) {
+    const width=113;
+    if (!columnRect || columnRect.width<285) return null;
+    const x=Math.round(columnRect.left+Math.min(165, Math.max(124,columnRect.width-width-22)));
+    if (x+width+12>Math.min(columnRect.right,viewportWidth)) return null;
+    const y=Math.max(54,Math.round(columnRect.top+9));
+    return {x,y};
   }
   function update(){
     if(!alive)return;
@@ -1054,11 +1054,9 @@ if(document.readyState==='loading'){
     }
     const href=new URL('/'+match[1]+'/status/'+match[2]+'/quotes',location.origin).href;
     if(href!==lastHref){link.href=href;lastHref=href;}
-    const menu=primary.querySelector(
-      'article[data-testid="tweet"] [data-testid="caret"], [data-testid="tweet"] [data-testid="caret"]');
-    const placement=quoteShortcutPosition(rect,menu?.getBoundingClientRect(),innerWidth);
+    const placement=quoteShortcutPosition(rect,innerWidth);
     if(!placement){
-      host.remove();return; // Never obstruct X's own block/report menu.
+      host.remove();return; // Extremely narrow column; leave native UI intact.
     }
     const {x,y}=placement;
     if(x!==lastX){link.style.left=x+'px';lastX=x;}
