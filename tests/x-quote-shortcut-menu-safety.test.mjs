@@ -10,8 +10,8 @@ const position=new Function(source.slice(from,to)+'\nreturn quoteShortcutPositio
 
 test('X Search Favorites v1.3.10 parses',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.3\.9/);
-  assert.match(source,/const VERSION='1\.3\.9'/);
+  assert.match(source,/@version\s+1\.3\.10/);
+  assert.match(source,/const VERSION='1\.3\.10'/);
 });
 test('native post More remains clickable next to quote shortcut',()=>{
   const caret={left:575,top:32,width:30,height:30};
