@@ -363,9 +363,13 @@ const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views
   if(!api){layout.append(E('div','muted','表示設定の初期化を確認できません。Xを再読み込みしてください。'));return;}
   const msg=E('div','muted','Control Panel for Twitterを無効にしてから、代替機能をオンにしてください。元の拡張機能を削除する前に各画面で確認を。設定はこのブラウザ内に保存されます。');
   layout.append(msg);
+  layout.append(E('div','muted',
+    '動画完全保護がONでもGrok・Premium・通話などのメニュー非表示は有効です。' +
+    'ポスト詳細の全幅設定は保護中、動画の内側に触れず外側の列幅のみ調整します。' +
+    '投稿内の広告・一部ボタン装飾などは動画の再生を優先して対象外になる場合があります。'));
   const sections=[
     ['切り替え',[['enabled','表示変更機能を有効にする']]],
-    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['tlVideoIsolation','TL動画の分離保護（全幅表示は維持）'],['searchVideoIsolation','検索結果の動画保護（検索・いいね順機能は維持）'],['likesVideoIsolation','プロフィールの「いいね」の動画保護（元の横幅を優先）'],['tlLauncher','動画保護中も軽量「🔎 検索」ボタンを表示'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
+    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示（動画保護中は外側の列を調整）'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['tlVideoIsolation','TL動画の分離保護（全幅表示は維持）'],['searchVideoIsolation','検索結果の動画保護（検索・いいね順機能は維持）'],['likesVideoIsolation','プロフィールの「いいね」の動画保護（元の横幅を優先）'],['tlLauncher','動画保護中も軽量「🔎 検索」ボタンを表示'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
     ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['quoteShortcut','詳細ページに「引用を表示」リンクを追加'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
     ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
   ];
