@@ -52,10 +52,10 @@ const settings={enabled:true,wideTimeline:true,wideTweet:true,videoGuard:true,
   videoSafeTweet:true,tlVideoIsolation:true,searchVideoIsolation:true,
   hideSidebarContent:true,nativeSearch:true,hideGrok:true};
 
-test('v1.3.11 source parses and preserves original storage',()=>{
+test('v1.3.12 source parses and preserves original storage',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.3\.11/);
-  assert.match(source,/const VERSION='1\.3\.11'/);
+  assert.match(source,/@version\s+1\.3\.12/);
+  assert.match(source,/const VERSION='1\.3\.12'/);
   assert.match(source,/KEY='xsf_userscript_v1'/);
   assert.match(source,/xsf_display_settings_v1/);
 });
@@ -84,8 +84,8 @@ test('search keeps native X feed, saved-search panel and like tools available',(
   assert.match(source,/function applyFilter\(\)/);
   assert.match(source,/function navigate\(q,mode='live'\)/);
   assert.match(source,/if\(!isGuardedVideoPage\(\)\)\(document.body\|\|document.documentElement\)\.append\(host\)/);
-  const guardedBody=source.slice(source.indexOf('const isGuardedVideoPage=()=>{'),source.indexOf('const isProtectedTimeline=()=>{'));
-  assert.match(guardedBody,/if\(!post&&!timeline\)return false/);
+  const guardedBody=source.slice(source.indexOf('const isGuardedVideoPage=()=>{'),source.indexOf('const isProtectedLaunchRoute=()=>'));
+  assert.match(guardedBody,/if\(!post&&!timeline&&!likes\)return false/);
   assert.doesNotMatch(guardedBody,/searchVideoIsolation/);
 });
 test('search route does not attach a document-wide media mutation observer',()=>{
