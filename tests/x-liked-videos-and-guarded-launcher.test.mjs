@@ -57,10 +57,10 @@ const defaults={enabled:true,wideTimeline:true,wideTweet:true,tlVideoIsolation:t
   searchVideoIsolation:true,likesVideoIsolation:true,videoGuard:true,videoSafeTweet:true,
   hideSidebarContent:true,hideForYou:false,monochromeButtons:false,nativeSearch:true};
 
-test('v1.3.12 scripts parse and preserve the same saved-data keys',()=>{
+test('v1.3.13 scripts parse and preserve the same saved-data keys',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+1\.3\.12/);
-  assert.match(script,/const VERSION='1\.3\.12'/);
+  assert.match(script,/@version\s+1\.3\.13/);
+  assert.match(script,/const VERSION='1\.3\.13'/);
   assert.match(script,/KEY='xsf_userscript_v1'/);
   assert.match(script,/const KEY='xsf_display_settings_v1'/);
 });
