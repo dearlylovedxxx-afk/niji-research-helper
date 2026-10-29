@@ -52,10 +52,10 @@ const settings={enabled:true,wideTimeline:true,wideTweet:true,videoGuard:true,
   videoSafeTweet:true,tlVideoIsolation:true,searchVideoIsolation:true,
   hideSidebarContent:true,nativeSearch:true,hideGrok:true};
 
-test('v1.3.12 source parses and preserves original storage',()=>{
+test('v1.3.13 source parses and preserves original storage',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.3\.12/);
-  assert.match(source,/const VERSION='1\.3\.12'/);
+  assert.match(source,/@version\s+1\.3\.13/);
+  assert.match(source,/const VERSION='1\.3\.13'/);
   assert.match(source,/KEY='xsf_userscript_v1'/);
   assert.match(source,/xsf_display_settings_v1/);
 });
