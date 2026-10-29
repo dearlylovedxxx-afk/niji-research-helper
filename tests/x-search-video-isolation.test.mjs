@@ -52,7 +52,7 @@ const settings={enabled:true,wideTimeline:true,wideTweet:true,videoGuard:true,
   videoSafeTweet:true,tlVideoIsolation:true,searchVideoIsolation:true,
   hideSidebarContent:true,nativeSearch:true,hideGrok:true};
 
-test('v1.3.8 source parses and preserves original storage',()=>{
+test('v1.3.9 source parses and preserves original storage',()=>{
   assert.doesNotThrow(()=>new Function(source));
   assert.match(source,/@version\s+1\.3\.8/);
   assert.match(source,/const VERSION='1\.3\.8'/);
