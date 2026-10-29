@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.9
+// @version      1.3.10
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -104,6 +104,18 @@
       flex-grow:0!important;
       margin-inline-start:max(0px,calc((100vw - 1230px)/2))!important;
     }
+    /*
+      Home/list/community: the native nav + feed group is already mostly
+      centered. The legacy 1230px margin shifts the group about 45px to the
+      right at desktop widths (e.g. 1648px), leaving excess blank space left.
+      Shift only the OUTER nav margin, never the video/GPU feed subtree.
+      Search, post details, and narrower windows keep their prior layout.
+    */
+    @media (min-width:1320px) {
+      html.xsf-guard-wide.xsf-guard-tl header[role="banner"] {
+        margin-inline-start:max(0px,calc((100vw - 1320px)/2))!important;
+      }
+    }
     html.xsf-guard-wide main[role="main"] > div {
       width:100%!important;
       max-width:none!important;
@@ -199,7 +211,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.9', KEY='xsf_userscript_v1';
+const VERSION='1.3.10', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
