@@ -8,10 +8,10 @@ const to=source.indexOf('  function update(){',from);
 assert.ok(from>0&&to>from);
 const position=new Function(source.slice(from,to)+'\nreturn quoteShortcutPosition;')();
 
-test('X Search Favorites v1.3.12 parses',()=>{
+test('X Search Favorites v1.3.13 parses',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.3\.12/);
-  assert.match(source,/const VERSION='1\.3\.12'/);
+  assert.match(source,/@version\s+1\.3\.13/);
+  assert.match(source,/const VERSION='1\.3\.13'/);
 });
 test('screenshot-sized post shows quote shortcut beside the page title, not the More menu',()=>{
   const column={left:620,right:1320,top:51,width:700};
