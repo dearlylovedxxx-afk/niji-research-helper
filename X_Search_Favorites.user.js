@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.11
+// @version      1.3.12
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -42,7 +42,11 @@
     // layout instead of enabling the GPU-sensitive full-layout rules.
     const guardedSearch=opts.enabled===true && opts.searchVideoIsolation!==false &&
       /^\/(?:search|explore)(?:\/|$)/.test(path);
-    const guarded=guardedPost || guardedTL || guardedSearch;
+    // The profile's Likes tab uses another video feed. Leave it in X's native
+    // layout: custom full-width CSS has previously blanked video surfaces.
+    const guardedLikes=opts.enabled===true && opts.likesVideoIsolation!==false &&
+      /^\/[a-zA-Z0-9_]{1,15}\/likes\/?$/.test(path);
+    const guarded=guardedPost || guardedTL || guardedSearch || guardedLikes;
     const wide=opts.enabled===true && supported && !guarded &&
       (tweet?(opts.wideTweet!==false && opts.videoSafeTweet===false):opts.wideTimeline!==false);
     // This class deliberately does NOT activate the main XSF UI, native
@@ -53,6 +57,7 @@
     root.classList.toggle('xsf-guard-wide',guardedWide);
     root.classList.toggle('xsf-guard-tl',guardedTL && opts.wideTimeline!==false);
     root.classList.toggle('xsf-guard-search',guardedSearch && opts.wideTimeline!==false);
+    root.classList.toggle('xsf-guard-likes',guardedLikes);
     root.classList.toggle('xsf-guard-tl-grok',(guardedTL || guardedSearch) && opts.hideGrok!==false);
     root.classList.toggle('xsf-guard-tl-chat',(guardedTL || guardedSearch) && opts.hideMessageDrawer!==false);
     root.classList.toggle('xsf-guard-tl-premium',(guardedTL || guardedSearch) && opts.hidePremium!==false);
@@ -211,27 +216,25 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.11', KEY='xsf_userscript_v1';
+const VERSION='1.3.12', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
   const timeline=path==='/home'||path.startsWith('/i/lists/')||
     path.startsWith('/i/communities/');
-  if(!post&&!timeline)return false;
+  const likes=/^\/[a-zA-Z0-9_]{1,15}\/likes\/?$/.test(path);
+  if(!post&&!timeline&&!likes)return false;
   try{
     const opts=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}')||{};
-    return post ? opts.videoGuard!==false :
-      (opts.enabled===true && opts.tlVideoIsolation!==false);
-  }catch{return post}
+    if(post)return opts.videoGuard!==false;
+    if(likes)return opts.enabled===true && opts.likesVideoIsolation!==false;
+    return opts.enabled===true && opts.tlVideoIsolation!==false;
+  }catch{return post;}
 };
-const isProtectedTimeline=()=>{
-  const path=location.pathname;
-  if(!(path==='/home'||path.startsWith('/i/lists/')||path.startsWith('/i/communities/')))return false;
-  try{
-    const opts=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}')||{};
-    return opts.enabled===true&&opts.tlVideoIsolation!==false;
-  }catch{return false}
-};
+// A video-guarded page still needs a lightweight entry to saved searches,
+// history and display settings. The full panel/DOM observers remain detached
+// until the user explicitly opens it.
+const isProtectedLaunchRoute=()=>isGuardedVideoPage();
 const tlLauncherEnabled=()=>{
   try{
     const opts=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}')||{};
@@ -324,7 +327,7 @@ function closeAll(){panel.hidden=true;sorted.hidden=true;}
 // Detached from X's player and from the XSF panel host until the user clicks.
 const protectedLauncherHost=E('div');
 protectedLauncherHost.id='xsf-video-safe-launcher';
-protectedLauncherHost.style.cssText='position:fixed!important;right:12px!important;bottom:14px!important;z-index:2147483640!important;pointer-events:auto!important;';
+protectedLauncherHost.style.cssText='position:fixed!important;right:82px!important;bottom:16px!important;z-index:2147483640!important;pointer-events:auto!important;';
 const launchShadow=protectedLauncherHost.attachShadow({mode:'open'});
 const launchCSS=E('style');
 launchCSS.textContent=`:host{all:initial}button{appearance:none;cursor:pointer;border:1px solid #b3d9f2;background:#1d9bf0;color:#fff;border-radius:22px;padding:10px 11px;box-shadow:0 4px 15px #0004;min-height:43px;font:700 12px system-ui}`;
@@ -333,7 +336,7 @@ protectedButton.type='button';
 protectedButton.setAttribute('aria-label','X Search Favoritesを開く');
 launchShadow.append(launchCSS,protectedButton);
 protectedButton.onclick=()=>{
-  if(!isProtectedTimeline()||!tlLauncherEnabled())return;
+  if(!isProtectedLaunchRoute()||!tlLauncherEnabled())return;
   protectedLauncherHost.remove();
   (document.body||document.documentElement).append(host);
   panel.hidden=true;
@@ -342,7 +345,7 @@ protectedButton.onclick=()=>{
 launch.onclick=()=>{
   const open=panel.hidden;closeAll();
   if(open){panel.hidden=false;renderPanel();}
-  else if(isProtectedTimeline()){
+  else if(isProtectedLaunchRoute()){
     host.remove();
     if(tlLauncherEnabled()&&!protectedLauncherHost.isConnected)
       (document.body||document.documentElement).append(protectedLauncherHost);
@@ -359,7 +362,7 @@ const layout=E('div','tab');layout.dataset.tab='layout';layout.hidden=true;views
   layout.append(msg);
   const sections=[
     ['切り替え',[['enabled','表示変更機能を有効にする']]],
-    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['tlVideoIsolation','TL動画の分離保護（全幅表示は維持）'],['searchVideoIsolation','検索結果の動画保護（検索・いいね順機能は維持）'],['tlLauncher','TLに軽量「🔎 検索」起動ボタンを表示（試験的）'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
+    ['横幅',[['wideTimeline','ホーム・リスト・コミュニティを全幅表示'],['wideTweet','ポスト個別ページ・返信も全幅表示'],['videoSafeTweet','旧方式：詳細を通常幅（完全保護オフの場合のみ）'],['videoGuard','動画完全保護：ポスト詳細ではXSFの画面変更と監視を一時停止'],['guardWidePost','動画保護を保ったまま詳細の幅だけ広げる（試験的）'],['tlVideoIsolation','TL動画の分離保護（全幅表示は維持）'],['searchVideoIsolation','検索結果の動画保護（検索・いいね順機能は維持）'],['likesVideoIsolation','プロフィールの「いいね」の動画保護（元の横幅を優先）'],['tlLauncher','動画保護中も軽量「🔎 検索」ボタンを表示'],['nativeSearch','右上にX純正の検索欄を表示（実験的）']]],
     ['表示を整理',[['hideSidebarContent','おすすめ・トレンドなど右サイドバー内の余分な項目を非表示'],['hideForYou','ホームの「おすすめ」タブを非表示'],['hidePromoted','広告（プロモーション投稿）を非表示'],['hideGrok','Grok関連のメニュー・ボタンを非表示'],['hidePremium','Premium購入誘導を非表示'],['hideSubscriptions','サブスクリプション関連を非表示'],['hideMoney','Moneyメニューを非表示'],['hideJobs','求人関連の項目を非表示'],['hideAnalytics','投稿アナリティクスのリンクを非表示'],['hideMessageDrawer','右下のチャットドロワーを非表示'],['hideWhoToFollow','おすすめユーザー表示を抑制'],['quoteShortcut','詳細ページに「引用を表示」リンクを追加'],['hideCalls','左の「通話」を非表示'],['hideCreatorStudio','左の「クリエイタースタジオ」を非表示']]],
     ['見た目',[['monochromeButtons','投稿アクションの見た目を落ち着かせる（試験的）']]],
   ];
@@ -630,7 +633,7 @@ function syncCoreObserver(){
     if(!scanBar.hidden)scanBar.hidden=true;
     if(!sorted.hidden)sorted.hidden=true;
     if(filterOn){filterOn=false;restore();}
-    if(isProtectedTimeline() && tlLauncherEnabled()){
+    if(isProtectedLaunchRoute() && tlLauncherEnabled()){
       // Only a tiny launcher remains while playing video. The original
       // complete search panel mounts solely while the user opens it.
       if(!panel.hidden && host.isConnected){protectedLauncherHost.remove();}
@@ -713,7 +716,7 @@ load();currentFields=blank();
   const KEY='xsf_display_settings_v1';
   const defaults={
     enabled:false,
-    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,tlVideoIsolation:true,searchVideoIsolation:true,tlLauncher:true,quoteShortcut:true,nativeSearch:true,
+    wideTimeline:true,wideTweet:true,videoSafeTweet:true,videoGuard:true,guardWidePost:true,tlVideoIsolation:true,searchVideoIsolation:true,likesVideoIsolation:true,tlLauncher:true,quoteShortcut:true,nativeSearch:true,
     hideSidebarContent:true,hideForYou:false,hidePromoted:false,
     hideGrok:true,hidePremium:true,hideSubscriptions:true,
     hideMoney:true,hideJobs:true,hideAnalytics:true,
@@ -931,7 +934,9 @@ load();currentFields=blank();
     const guardedTL=options.enabled && options.tlVideoIsolation && timelineGuardRoute;
     const guardedSearch=options.enabled && options.searchVideoIsolation &&
       /^\/(?:search|explore)(?:\/|$)/.test(path);
-    const guardedPage=guardedPost || guardedTL || guardedSearch;
+    const guardedLikes=options.enabled && options.likesVideoIsolation &&
+      /^\/[a-zA-Z0-9_]{1,15}\/likes\/?$/.test(path);
+    const guardedPage=guardedPost || guardedTL || guardedSearch || guardedLikes;
     const videoSafePage=options.enabled && options.videoSafeTweet && isTweet;
     const full=options.enabled && !guardedPage && !videoSafePage && (isTweet ? options.wideTweet : (options.wideTimeline && isTimeline));
     body.classList.toggle('xsf-layout-full',full);
