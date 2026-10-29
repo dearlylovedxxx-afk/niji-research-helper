@@ -8,9 +8,9 @@ const cssEnd=src.indexOf('    html.xsf-guard-wide main[role="main"] > div {',css
 assert.ok(cssStart>0 && cssEnd>cssStart);
 const navRule=src.slice(cssStart,cssEnd);
 
-test('XSF 1.3.10 has valid JavaScript and a scoped home/list nav rule',()=>{
+test('XSF 1.3.11 has valid JavaScript and a scoped home/list nav rule',()=>{
   assert.doesNotThrow(()=>new Function(src));
-  assert.match(src,/@version\s+1\.3\.10/);
+  assert.match(src,/@version\s+1\.3\.11/);
   assert.match(navRule,/html\.xsf-guard-wide\.xsf-guard-tl header\[role="banner"\]/);
   assert.match(navRule,/margin-inline-start:max\(0px,calc\(\(100vw - 1320px\)\/2\)\)!important/);
 });
