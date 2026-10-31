@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.2.6
+// @version      0.2.7
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
@@ -61,7 +61,7 @@ function savePixivFeedExcludeTags(tags){
  try{window.dispatchEvent(new Event('pixiv-feed-exclude-tags-cloud-applied'));}catch{}
 }
 const enc=new TextEncoder(), dec=new TextDecoder('utf-8',{fatal:true});
-let settings={enabled:false,token:'',lastSavedAt:0,lastSha:'',syncInitialized:false,lastContentSha:'',lastRemoteId:'',lastSyncAt:0},working=false,nextScan=0,notice='未接続';
+let settings={enabled:false,token:'',lastSavedAt:0,lastSha:'',syncInitialized:false,lastContentSha:'',lastRemoteId:'',lastSyncAt:0,recoveryHold:false},working=false,nextScan=0,notice='未接続';
 try {
  const savedConfig=await GM.getValue(CONFIG,null);
  if(savedConfig&&typeof savedConfig==='object')settings={...settings,...savedConfig};
@@ -76,7 +76,7 @@ const el=(tag,klass='',value)=>{const n=document.createElement(tag);if(klass)n.c
 const sha=async data=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),b=>b.toString(16).padStart(2,'0')).join('');
 function b64(bytes){let s='';for(let i=0;i<bytes.length;i+=32768)s+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(s);}
 function fromB64(s){const t=atob(s);return Uint8Array.from(t,c=>c.charCodeAt(0));}
-async function saveSettings(){await GM.setValue(CONFIG,{enabled:settings.enabled,token:settings.token,lastSavedAt:settings.lastSavedAt,lastSha:settings.lastSha,syncInitialized:!!settings.syncInitialized,lastContentSha:settings.lastContentSha||'',lastRemoteId:settings.lastRemoteId||'',lastSyncAt:Number(settings.lastSyncAt||0)});}
+async function saveSettings(){await GM.setValue(CONFIG,{enabled:settings.enabled,token:settings.token,lastSavedAt:settings.lastSavedAt,lastSha:settings.lastSha,syncInitialized:!!settings.syncInitialized,lastContentSha:settings.lastContentSha||'',lastRemoteId:settings.lastRemoteId||'',lastSyncAt:Number(settings.lastSyncAt||0),recoveryHold:!!settings.recoveryHold});}
 function xhr(method,path,body=null,token=settings.token){
  return new Promise((resolve,reject)=>{
   const api=GM.xmlHttpRequest||GM.xmlhttpRequest;
@@ -502,8 +502,11 @@ async function migrateLegacyBackups(){
  }
  return merged;
 }
-async function syncShared({force=false}={}){
+async function syncShared({force=false,confirmRecovery=false}={}){
  if(working||!settings.enabled||!settings.token)return;
+ // Manual history recovery MUST NOT be overwritten or uploaded in the
+ // background. A user must explicitly confirm before resuming sync.
+ if(app.id==='pixiv'&&settings.recoveryHold&&!confirmRecovery)return;
  if(!force&&Date.now()-Number(settings.lastSyncAt||0)<30000)return;
  working=true;update();
  try{
@@ -532,13 +535,19 @@ async function syncShared({force=false}={}){
   let needUpload=false;
 
   if(!initialized){
-   if(hasMeaningfulPayload(local)&&localHash!==remoteHash){
+   if(app.id==='pixiv'){
+    // Never delete local restored searches during token reconnection.
+    await restore(remote,{mode:'merge'});
+    const merged=await snapshot({allowEmpty:true});
+    localHash=await payloadSha(merged);
+    needUpload=localHash!==remoteHash;
+   }else if(hasMeaningfulPayload(local)&&localHash!==remoteHash){
     await restore(remote,{mode:'merge'});needUpload=true;
    }else{
     await restore(remote,{mode:'replace'});
    }
   }else if(remoteChanged&&!localChanged){
-   await restore(remote,{mode:'replace'});
+   await restore(remote,{mode:app.id==='pixiv'?'merge':'replace'});
    const after=await snapshot({allowEmpty:true}),afterHash=await payloadSha(after);
    if(afterHash!==remoteHash){local=after;localHash=afterHash;needUpload=true;}
   }else if(localChanged&&!remoteChanged){
@@ -549,6 +558,17 @@ async function syncShared({force=false}={}){
 
   if(needUpload){
    const merged=await snapshot({allowEmpty:true});
+   // An empty Safari storage after clearing history must not create a new
+   // empty cloud generation that prunes the last recoverable history.
+   if(app.id==='pixiv' && list.length>0 &&
+      !Array.isArray(merged.payload?.savedSearches)) {
+    throw Error('保存検索の形式を確認できないため、クラウドへの上書きを保留しました');
+   }
+   if(app.id==='pixiv' && list.length>0 &&
+      (merged.payload.savedSearches?.length||0)===0 &&
+      (remote.payload?.savedSearches?.length||0)>0){
+    throw Error('クラウドに保存検索があるのに端末は0件です。上書きを保留しました');
+   }
    const saved=await uploadShared(merged);
    latest=saved.item;
    localHash=saved.contentSha;
@@ -557,7 +577,9 @@ async function syncShared({force=false}={}){
    localHash=await payloadSha(current);
   }
 
-  settings.syncInitialized=true;settings.lastContentSha=localHash;settings.lastRemoteId=String(latest?.id||'');settings.lastSha=latest?.sha256||settings.lastSha;settings.lastSavedAt=Date.now();settings.lastSyncAt=Date.now();await saveSettings();
+  settings.syncInitialized=true;settings.lastContentSha=localHash;settings.lastRemoteId=String(latest?.id||'');settings.lastSha=latest?.sha256||settings.lastSha;settings.lastSavedAt=Date.now();settings.lastSyncAt=Date.now();
+  if(app.id==='pixiv'&&confirmRecovery)settings.recoveryHold=false;
+  await saveSettings();
   stateText(`✅ 全端末共通データ同期済み：${new Date(settings.lastSyncAt).toLocaleString('ja-JP')}`);
  }catch(e){
   stateText('⚠️ Niji Cloud同期失敗：'+String(e?.message||e));console.warn('[NCB sync]',e);
@@ -573,16 +595,40 @@ async function showBackups(){
   for(const b of backups){
    const common=b.device===device()?'全端末共通':'旧端末別';
    const line=el('div','entry'),label=el('span','',`${common} ／ ${new Date(b.createdAt).toLocaleString('ja-JP')} ／ ${b.device} ／ ${(Number(b.size||0)/1048576).toFixed(1)}MB`);
+   const inspectBtn=el('button','','内容確認のみ');
+   inspectBtn.onclick=async()=>{
+    if(working)return;
+    working=true;update();
+    try{
+     const data=await fetchBackup(b);
+     const count=Array.isArray(data?.payload?.savedSearches)?data.payload.savedSearches.length:null;
+     const dbCount=(data?.payload?.databases||[]).reduce((total,db)=>total+
+       Object.values(db.stores||{}).reduce((sum,rows)=>sum+(Array.isArray(rows)?rows.length:0),0),0);
+     stateText('🔎 読み取り専用の確認：'+new Date(b.createdAt).toLocaleString('ja-JP')+
+       '\n保存検索 '+(count===null?'不明':count)+'件 ／ 調査DB行 '+dbCount+
+       '件。データの復元や同期はしていません。');
+    }catch(e){stateText('⚠️ 内容確認に失敗：'+String(e?.message||e));}
+    finally{working=false;update();}
+   };
    const restoreBtn=el('button','','読み取り検証して統合復元');
    restoreBtn.onclick=async()=>{
     if(working)return;
     if(!confirm(`${app.label}：${b.createdAt}\n${common}バックアップを、現在データを残して統合しますか？`))return;
     working=true;update();
-    try{const obj=await fetchBackup(b);const msg=await restore(obj,{mode:'merge'});settings.lastContentSha='';settings.lastSyncAt=0;await saveSettings();stateText('✅ '+msg+' 次回同期で共通データへ反映します。');}
+    try{
+     const obj=await fetchBackup(b);
+     const msg=await restore(obj,{mode:'merge'});
+     settings.lastContentSha='';settings.lastSyncAt=0;
+     if(app.id==='pixiv')settings.recoveryHold=true;
+     await saveSettings();
+     stateText('✅ '+msg+(app.id==='pixiv'
+       ? '\n🛡️ 復元内容を保護中：自動同期・自動アップロードを一時停止しました。保存検索を確認後、「今すぐ同期・検証」で再開してください。'
+       : ' 次回同期で共通データへ反映します。'));
+    }
     catch(e){stateText('⚠️ 復元失敗：'+String(e.message||e));console.warn('[NCB restore]',e);}
     finally{working=false;update();}
    };
-   line.append(label,restoreBtn);backupList.append(line);
+   line.append(label,inspectBtn,restoreBtn);backupList.append(line);
   }
   stateText('バックアップ履歴を取得しました。通常は自動同期だけでOKです。履歴は復旧用です。');
  }catch(e){stateText('⚠️ 一覧取得失敗：'+String(e.message||e));}
@@ -615,6 +661,8 @@ connect.onclick=async()=>{
   else status=await xhr('GET','/status',null,token);
   if(!status.connected||!status.remoteOk)throw Error('pCloudが接続されていません');
   settings.token=token;settings.enabled=true;settings.syncInitialized=false;settings.lastContentSha='';settings.lastRemoteId='';settings.lastSyncAt=0;
+  // Preserve a manual recovery hold when reconnecting with a new token.
+  if(app.id!=='pixiv')settings.recoveryHold=false;
   if(app.id==='pictbland')await GM.setValue(GLOBAL_TOKEN_KEY,token);
   await saveSettings();tokenInput.value='';
   stateText('接続OK。全端末共通データを初回同期します。');
@@ -626,14 +674,20 @@ connect.onclick=async()=>{
  finally{working=false;update();}
  if(settings.enabled)void syncShared({force:true});
 };
-backup.onclick=()=>void syncShared({force:true});
+backup.onclick=()=>{
+ if(app.id==='pixiv'&&settings.recoveryHold &&
+    !confirm('復元データの保存検索が正しく表示されていることを確認しましたか？\n同期再開するとクラウドへ新しい世代が作成され、古い世代が整理される場合があります。'))return;
+ void syncShared({force:true,confirmRecovery:true});
+};
 listButton.onclick=()=>void showBackups();
 disconnect.onclick=async()=>{
  if(!confirm('この端末のNiji Cloud同期を停止しますか？ クラウドとローカルのデータは削除しません。'))return;
  settings.enabled=false;settings.token='';settings.lastSha='';await saveSettings();stateText('この端末の自動同期を停止しました。クラウド上の共通データは残っています。');update();
 };
 if(settings.enabled&&settings.token)void saveSettings().catch(()=>{});
-stateText(settings.enabled?`☁️ 全端末共通同期ON。最終同期：${settings.lastSyncAt?new Date(settings.lastSyncAt).toLocaleString('ja-JP'):'これから同期'}`:'未接続：NIJI CLIENT TOKENを入力してください');update();
+stateText(settings.recoveryHold&&app.id==='pixiv'
+ ? '🛡️ 復元内容の保護中：自動同期を一時停止しています。保存検索を確認してから手動で同期を再開してください。'
+ :settings.enabled?`☁️ 全端末共通同期ON。最終同期：${settings.lastSyncAt?new Date(settings.lastSyncAt).toLocaleString('ja-JP'):'これから同期'}`:'未接続：NIJI CLIENT TOKENを入力してください');update();
 // Keep a single launcher per site: expose backup inside each existing tool's panel.
 // Cloud credentials and data stay in this userscript; native buttons only open its panel.
 function integrateNativeBackup() {
