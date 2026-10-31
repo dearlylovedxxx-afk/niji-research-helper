@@ -107,6 +107,6 @@ test('backup inspection is read-only and separate from restore',()=>{
 test('Pixiv manual recovery pauses auto sync until user confirms',()=>{
   assert.match(script,/settings\.recoveryHold=true/);
   assert.match(script,/settings\.recoveryHold&&!confirmRecovery\)return/);
-  assert.match(script,/backup\.onclick=\(\)=>\{/);
+  assert.match(script,/backup\.onclick=async\(\)=>\{/);
   assert.match(script,/syncShared\(\{force:true,confirmRecovery:true\}\)/);
 });
