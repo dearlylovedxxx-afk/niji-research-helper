@@ -706,7 +706,7 @@ tokenCopy.onclick=async()=>{
  try{
   if(!navigator.clipboard?.writeText)throw Error('クリップボードAPIが利用できません');
   await navigator.clipboard.writeText(settings.token);
-  stateText('✅ トークンをコピーしました。iPhoneの「パスワード」アプリで「＋」から新規登録し、Webサイトを niji-research-backup.dearlylovedxxx.workers.dev、ユーザ名を pixiv-niji-cloud として保管してください。値は画面には表示していません。');
+  stateText('✅ トークンをコピーしました。iPhoneの「パスワード」アプリで「＋」から新規登録し、Webサイトを niji-research-backup.dearlylovedxxx.workers.dev、ユーザ名を '+app.id+'-niji-cloud として保管してください。値は画面には表示していません。');
  }catch(e){stateText('⚠️ クリップボードへのコピーが許可されませんでした。Safariの権限設定を確認してください。トークン自体は変更していません。');}
 };
 listButton.onclick=()=>void showBackups();
