@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.2.7
+// @version      0.2.8
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
@@ -648,10 +648,20 @@ const tokenLabel=el('label','',app.id==='pictbland'?'NIJI CLIENT TOKEN':'Cloudfl
 const tokenInput=el('input');tokenInput.type='password';
 tokenInput.placeholder='Cloudflareの'+AUTH_SECRET_NAME+'と同じ値（チャットには送らない）';
 tokenInput.autocomplete='off';
-const actions=el('div','actions'),connect=el('button','','接続・初回同期'),backup=el('button','','今すぐ同期・検証'),listButton=el('button','','履歴・復元'),disconnect=el('button','','この端末の同期を停止'),close=el('button','','閉じる');
-actions.append(connect,backup,listButton,disconnect,close);const info=el('div','status');const backupList=el('div');panel.append(header,note,tokenLabel,tokenInput,actions,info,backupList);
+const actions=el('div','actions'),connect=el('button','','接続・初回同期'),backup=el('button','','今すぐ同期・検証'),listButton=el('button','','履歴・復元'),tokenCopy=el('button','','🔐 トークンの控えをコピー'),disconnect=el('button','','この端末の同期を停止'),close=el('button','','閉じる');
+actions.append(connect,backup,listButton,tokenCopy,disconnect,close);
+const info=el('div','status'),tokenNote=el('p','note','Safariの履歴消去でログイン状態やサイト保存データが失われる場合があります。Niji CloudトークンはMacaque内に保存しますが、Safariによる削除からの保護は保証できません。iPhoneの「パスワード」アプリにも控えを保存してください。トークンはクラウド履歴には含めません。');
+const backupList=el('div');panel.append(header,note,tokenLabel,tokenInput,tokenNote,actions,info,backupList);
 function stateText(s){notice=s;info.textContent=s;}
-function update(){connect.disabled=working;backup.disabled=working||!settings.enabled;listButton.disabled=working||!settings.token;disconnect.disabled=working||!settings.enabled;}
+function update(){
+ connect.disabled=working;
+ backup.disabled=working||!settings.enabled;
+ backup.textContent=app.id==='pixiv'&&settings.recoveryHold
+   ? '✅ 復元確認・自動バックアップ再開' : '今すぐ同期・検証';
+ listButton.disabled=working||!settings.token;
+ tokenCopy.disabled=working||!settings.token;
+ disconnect.disabled=working||!settings.enabled;
+}
 launch.onclick=()=>{panel.hidden=!panel.hidden;update();};close.onclick=()=>{panel.hidden=true;};
 connect.onclick=async()=>{
  const token=tokenInput.value.trim();if(token.length<24){stateText('24文字以上の'+AUTH_SECRET_NAME+'を入力してください');return;}
@@ -667,7 +677,7 @@ connect.onclick=async()=>{
   if(app.id!=='pixiv')settings.recoveryHold=false;
   if(app.id==='pictbland')await GM.setValue(GLOBAL_TOKEN_KEY,token);
   await saveSettings();tokenInput.value='';
-  stateText('接続OK。全端末共通データを初回同期します。');
+  stateText('接続OK。全端末共通データを初回同期します。トークンはiPhoneの「パスワード」アプリにも控えを保存してください。');
  }catch(e){
   const detail=String(e.message||e);
   stateText('⚠️ 接続できません：'+detail+
@@ -676,10 +686,28 @@ connect.onclick=async()=>{
  finally{working=false;update();}
  if(settings.enabled)void syncShared({force:true});
 };
-backup.onclick=()=>{
- if(app.id==='pixiv'&&settings.recoveryHold &&
-    !confirm('復元データの保存検索が正しく表示されていることを確認しましたか？\n同期再開するとクラウドへ新しい世代が作成され、古い世代が整理される場合があります。'))return;
+backup.onclick=async()=>{
+ if(working)return;
+ if(app.id==='pixiv'&&settings.recoveryHold){
+  let snap;
+  try{snap=await snapshot({allowEmpty:true});}
+  catch(e){stateText('⚠️ 保存検索の確認に失敗したため、自動バックアップは停止したままです：'+String(e.message||e));return;}
+  const count=Array.isArray(snap?.payload?.savedSearches)?snap.payload.savedSearches.length:0;
+  if(count===0){
+   stateText('🛡️ 保存検索が0件です。自動バックアップは再開していません。履歴の「内容確認のみ」から復元可能な世代を探してください。');return;
+  }
+  if(!confirm('保存検索 '+count+'件を確認しました。復元データを確定して自動同期を再開しますか？\n最初の同期でクラウドに新世代が作られる場合があり、古い履歴は最大5世代の制限で整理されます。'))return;
+ }
  void syncShared({force:true,confirmRecovery:true});
+};
+tokenCopy.onclick=async()=>{
+ if(working||!settings.token)return;
+ if(!confirm('Niji Cloudトークンを一時的にクリップボードへコピーします。iPhoneの「パスワード」アプリに新規登録して、安全に保管してください。貼り付け後はほかの文字列をコピーしてクリップボードを上書きしてください。'))return;
+ try{
+  if(!navigator.clipboard?.writeText)throw Error('クリップボードAPIが利用できません');
+  await navigator.clipboard.writeText(settings.token);
+  stateText('✅ トークンをコピーしました。iPhoneの「パスワード」アプリで「＋」から新規登録し、Webサイトを niji-research-backup.dearlylovedxxx.workers.dev、ユーザ名を pixiv-niji-cloud として保管してください。値は画面には表示していません。');
+ }catch(e){stateText('⚠️ クリップボードへのコピーが許可されませんでした。Safariの権限設定を確認してください。トークン自体は変更していません。');}
 };
 listButton.onclick=()=>void showBackups();
 disconnect.onclick=async()=>{
