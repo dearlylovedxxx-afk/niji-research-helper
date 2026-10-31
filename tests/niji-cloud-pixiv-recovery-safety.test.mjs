@@ -55,9 +55,9 @@ function scenario({localNames=[],remoteNames=[],initialized=true,remoteChanged=f
   return {sync,settings,calls,getLocal:()=>local};
 }
 
-test('v0.2.7 parses and recovery hold is stored in the private GM config',()=>{
+test('v0.2.8 parses and recovery hold is stored in the private GM config',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+0\.2\.7/);
+  assert.match(script,/@version\s+0\.2\.8/);
   assert.match(script,/recoveryHold:!!settings\.recoveryHold/);
   assert.match(script,/if\(app\.id==='pixiv'\)settings\.recoveryHold=true/);
 });
