@@ -565,9 +565,11 @@ async function syncShared({force=false,confirmRecovery=false}={}){
     throw Error('保存検索の形式を確認できないため、クラウドへの上書きを保留しました');
    }
    if(app.id==='pixiv' && list.length>0 &&
-      (merged.payload.savedSearches?.length||0)===0 &&
-      (remote.payload?.savedSearches?.length||0)>0){
-    throw Error('クラウドに保存検索があるのに端末は0件です。上書きを保留しました');
+      (merged.payload.savedSearches?.length||0)===0){
+    // Even if the current/latest cloud backup is empty, an older recovery
+    // generation may still hold saved searches. Never prune it by silently
+    // uploading an empty saved-search list.
+    throw Error('保存検索が0件です。古い復元履歴を守るため新しい世代の自動作成を保留しました。履歴の「内容確認のみ」を使用してください');
    }
    const saved=await uploadShared(merged);
    latest=saved.item;
