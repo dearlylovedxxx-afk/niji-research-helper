@@ -7,8 +7,8 @@ const meta=readFileSync(new URL('../Niji_Research_Helper.meta.js',import.meta.ur
 
 test('Quick Seek script parses and both metadata versions match',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script, /@version\s+1\.0\.124/);
-  assert.match(meta, /@version\s+1\.0\.124/);
+  assert.match(script, /@version\s+1\.0\.125/);
+  assert.match(meta, /@version\s+1\.0\.125/);
 });
 
 test('two seek buttons are created once and attached to the player',()=>{
