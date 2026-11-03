@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.124
+// @version      1.0.125
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -6070,6 +6070,7 @@
     if(stateClock.boundVideo){
       stateClock.boundVideo.removeEventListener('timeupdate', updateYoutubeBroadcastClock);
       stateClock.boundVideo.removeEventListener('loadedmetadata', updateYoutubeBroadcastClock);
+      stateClock.boundVideo.removeEventListener('seeked', youtubeLiveClockOnSeeked);
       stateClock.boundVideo=null;
     }
     stateClock.videoId=videoId;
@@ -6210,10 +6211,14 @@
       if(clock.boundVideo){
         clock.boundVideo.removeEventListener('timeupdate',updateYoutubeBroadcastClock);
         clock.boundVideo.removeEventListener('loadedmetadata',updateYoutubeBroadcastClock);
+        clock.boundVideo.removeEventListener('seeked',youtubeLiveClockOnSeeked);
       }
+      clearTimeout(youtubeLiveClockTabs.autoSeekTimer);
+      youtubeLiveClockTabs.autoSeekTimer=0;
       clock.boundVideo=video;
       video?.addEventListener('timeupdate',updateYoutubeBroadcastClock,{passive:true});
       video?.addEventListener('loadedmetadata',updateYoutubeBroadcastClock,{passive:true});
+      video?.addEventListener('seeked',youtubeLiveClockOnSeeked,{passive:true});
     }
     if(clock.source!=='YouTube' && Date.now()-clock.lastPageProbe>2500){
       clock.lastPageProbe=Date.now();
@@ -6232,9 +6237,10 @@
   }
 
 
-  // ---------- YouTube LiveClock-style one-shot synchronization across archive tabs ----------
-  // No extension permissions, cloud backup, persistent marking, or continuous playback control.
-  // BroadcastChannel messages are scoped to the youtube.com origin and only marked tabs seek.
+  // ---------- YouTube LiveClock sync across selected archive tabs ----------
+  // Explicit sync remains available; user-initiated seeks also sync automatically.
+  // Ordinary playback never streams positions. Only opted-in archive tabs seek.
+  // BroadcastChannel messages are scoped to the youtube.com origin.
   const youtubeLiveClockTabs = {
     tabId: 'nrh-lc-' + Math.random().toString(36).slice(2) + '-' + Date.now(),
     markedVideoId: '',
@@ -6244,6 +6250,8 @@
     lastSyncToken: '',
     tick: null,
     lifecycleAttached: false,
+    autoSeekTimer: 0,
+    suppressedSeek: null,
   };
 
   function youtubeLiveClockEmit(kind, fields = {}) {
@@ -6277,6 +6285,9 @@
     const stateLc = youtubeLiveClockTabs;
     if (!stateLc.markedVideoId || stateLc.markedVideoId === currentYoutubeVideoId()) return;
     stateLc.markedVideoId = '';
+    clearTimeout(stateLc.autoSeekTimer);
+    stateLc.autoSeekTimer = 0;
+    stateLc.suppressedSeek = null;
     stateLc.status = '動画が切り替わったため同期対象を解除しました';
     youtubeLiveClockAnnounce();
   }
@@ -6315,6 +6326,7 @@
     if (sync) {
       sync.disabled = !stateLc.channel || !marked || !streamReady || !clockReady;
       sync.textContent = '🕒 このタブを基準に同期を実行';
+      sync.title = '手動同期。同期対象ONのタブはタイムスタンプ・シークバー操作後も自動同期します';
     }
     if (note) {
       note.textContent = !stateLc.channel ? 'タブ間通信に非対応のブラウザです'
@@ -6331,6 +6343,8 @@
     if (!stateLc.channel) return toast('このブラウザではタブ間通信が利用できません');
     if (youtubeLiveClockIsMarked()) {
       stateLc.markedVideoId = '';
+      clearTimeout(stateLc.autoSeekTimer);
+      stateLc.autoSeekTimer = 0;
       youtubeLiveClockStatus('同期対象を解除しました');
     } else {
       syncYoutubeBroadcastClockFeature();
@@ -6347,14 +6361,18 @@
     youtubeLiveClockRefresh();
   }
 
-  function youtubeLiveClockSyncFromThisTab() {
-    if (!youtubeLiveClockIsMarked()) return toast('先にこのタブを同期対象にしてください');
+  function youtubeLiveClockSyncFromThisTab({automatic=false}={}) {
+    if (!youtubeLiveClockIsMarked()) {
+      if (!automatic) toast('先にこのタブを同期対象にしてください');
+      return false;
+    }
     syncYoutubeBroadcastClockFeature();
     const video = youtubeVideoElement();
     const clock = youtubeBroadcastClock;
     if (!video || !Number.isFinite(video.currentTime) ||
         clock.videoId !== currentYoutubeVideoId() || !Number.isFinite(clock.startMs)) {
-      return toast('配信開始時刻を取得できていません。動画を再読み込みして確認してください');
+      if (!automatic) toast('配信開始時刻を取得できていません。動画を再読み込みして確認してください');
+      return false;
     }
     const wallMs = clock.startMs + video.currentTime * 1000;
     const peers = [...youtubeLiveClockTabs.peers.values()].filter(
@@ -6364,13 +6382,55 @@
       // Broadcast anyway: background tabs can have throttled timers.
       youtubeLiveClockStatus('他タブの反応を確認中です。各タブで同期対象をマークしてください');
     } else {
-      youtubeLiveClockStatus('他の同期対象 ' + peers + 'タブに時刻を送信しました');
+      youtubeLiveClockStatus((automatic?'再生位置の変更を自動同期しました：':'他の同期対象へ同期を送信しました：') +
+        peers + 'タブ');
     }
     youtubeLiveClockEmit('sync', {
-      token: youtubeLiveClockTabs.tabId + '-' + Date.now(),
+      token: youtubeLiveClockTabs.tabId + '-' + Date.now() + '-' + Math.random().toString(36).slice(2,8),
       wallMs, sourcePlaying: !video.paused,
       sourceRate: Number.isFinite(video.playbackRate) ? video.playbackRate : 1,
     });
+    return true;
+  }
+
+  // A remote sync also fires HTMLMediaElement.seeked. Do not echo that
+  // programmatic seek back to peers, or two marked tabs could oscillate.
+  function youtubeLiveClockSuppressSeek(video,target) {
+    youtubeLiveClockTabs.suppressedSeek={
+      video,target,until:Date.now()+2400,
+    };
+  }
+
+  function youtubeLiveClockIsSuppressedSeek(video) {
+    const suppress=youtubeLiveClockTabs.suppressedSeek;
+    return !!(suppress && suppress.video===video &&
+      Date.now()<suppress.until &&
+      Number.isFinite(video?.currentTime) &&
+      Math.abs(video.currentTime-suppress.target)<1.5);
+  }
+
+  function youtubeLiveClockOnSeeked(event) {
+    const video=event?.currentTarget;
+    const stateLc=youtubeLiveClockTabs;
+    if(!stateLc.channel || !youtubeLiveClockIsMarked() ||
+       document.hidden || video!==youtubeVideoElement() ||
+       youtubeLiveClockIsSuppressedSeek(video))return;
+    const videoId=currentYoutubeVideoId();
+    // Debounce short bursts of timestamp clicks / timeline scrubs. Ordinary
+    // timeupdate playback does not trigger a sync.
+    clearTimeout(stateLc.autoSeekTimer);
+    let attempts=0;
+    const send=()=>{
+      stateLc.autoSeekTimer=0;
+      if(!stateLc.channel || !youtubeLiveClockIsMarked() ||
+         currentYoutubeVideoId()!==videoId || youtubeVideoElement()!==video ||
+         document.hidden || youtubeLiveClockIsSuppressedSeek(video))return;
+      if(youtubeLiveClockSyncFromThisTab({automatic:true}))return;
+      // Real broadcast start metadata can arrive just after the seek. Retry
+      // briefly, never continuously, and only for this same marked video.
+      if(++attempts<7)stateLc.autoSeekTimer=setTimeout(send,550);
+    };
+    stateLc.autoSeekTimer=setTimeout(send,130);
   }
 
   function youtubeLiveClockReceiveSync(message) {
@@ -6399,7 +6459,11 @@
       youtubeLiveClockStatus('同期範囲外：基準の時刻がこのアーカイブにありません');
       return;
     }
-    // Prevent the helper's earlier URL/watch-history seek guard from reverting a manual sync.
+    // A received sync is not a user seek. Prevent echo and protect the target
+    // from the helper's older URL/watch-history guard.
+    youtubeLiveClockSuppressSeek(video,target);
+    clearTimeout(stateLc.autoSeekTimer);
+    stateLc.autoSeekTimer=0;
     ++youtubeSeekHandoffRun;
     document.dispatchEvent(new CustomEvent('nrh-liveclock-manual-seek'));
     try {
@@ -6447,6 +6511,9 @@
         });
         window.addEventListener('pagehide', () => {
           stateLc.markedVideoId = '';
+          clearTimeout(stateLc.autoSeekTimer);
+          stateLc.autoSeekTimer = 0;
+          stateLc.suppressedSeek = null;
           youtubeLiveClockAnnounce();
           stateLc.channel?.close();
           stateLc.channel = null;
@@ -6531,7 +6598,7 @@
     }
     if(sync){
       sync.disabled=!youtubeLiveClockTabs.channel||!marked||!readyVideo||!clockReady;
-      sync.title=clockReady?'このアーカイブの実配信時刻に他のタブを合わせる':'実配信開始時刻の取得待ち';
+      sync.title=clockReady?'手動同期（タイムスタンプ・シークバー移動後は自動同期）':'実配信開始時刻の取得待ち';
     }
     if(time){
       if(clockReady&&video&&Number.isFinite(video.currentTime)){
@@ -6555,6 +6622,13 @@
     if(!youtubeVideoElement())return;
     // Calibration shifts this archive only; the next sync uses its new
     // real broadcast instant as the common reference.
+    // This control is a local-only drift calibration, not a new master seek.
+    // Keep the selected tabs in their positions until the next intentional
+    // timestamp/timeline seek or explicit Sync click.
+    const video=youtubeVideoElement();
+    const next=Math.max(0,Math.min(video.duration||Infinity,
+      video.currentTime+sign*youtubeLiveClockMini.step));
+    youtubeLiveClockSuppressSeek(video,next);
     ++youtubeSeekHandoffRun;
     document.dispatchEvent(new CustomEvent('nrh-liveclock-manual-seek'));
     seekYoutube(sign*youtubeLiveClockMini.step);
