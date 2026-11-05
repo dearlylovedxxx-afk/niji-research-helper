@@ -50,10 +50,10 @@ function instance({videoId='ABCabc12345',marked=true,ready=true,seconds=100,hidd
   };
 }
 
-test('v1.0.125 parses and attaches seek listener on each current video',()=>{
+test('v1.0.126 parses and attaches seek listener on each current video',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+1\.0\.125/);
-  assert.match(metadata,/@version\s+1\.0\.125/);
+  assert.match(script,/@version\s+1\.0\.126/);
+  assert.match(metadata,/@version\s+1\.0\.126/);
   assert.match(script,/video\?\.addEventListener\('seeked',youtubeLiveClockOnSeeked/);
   assert.match(script,/removeEventListener\('seeked',youtubeLiveClockOnSeeked\)/);
 });
