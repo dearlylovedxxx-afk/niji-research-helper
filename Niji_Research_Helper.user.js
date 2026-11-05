@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.125
+// @version      1.0.126
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -6254,6 +6254,89 @@
     suppressedSeek: null,
   };
 
+  // The per-archive correction is a persistent position bias in seconds.
+  // It applies to both sides of the wall-clock conversion:
+  //   source reference = actual start + currentTime - local correction
+  //   receiver position = reference - actual start + receiver correction.
+  // This avoids passing the source tab's drift on to every other archive.
+  const YT_LC_CORRECTIONS_KEY='nrh-liveclock-video-corrections-v1';
+  const YT_LC_CORRECTIONS_LIMIT=120;
+  const YT_LC_MAX_CORRECTION_SEC=3600;
+  const youtubeLiveClockMemoryCorrections=new Map();
+
+  function youtubeLiveClockCorrection(videoId=currentYoutubeVideoId()) {
+    if(!/^[A-Za-z0-9_-]{11}$/.test(String(videoId||'')))
+      return {offset:0,enabled:true};
+    let row=youtubeLiveClockMemoryCorrections.get(videoId);
+    try {
+      const values=JSON.parse(localStorage.getItem(YT_LC_CORRECTIONS_KEY)||'{}');
+      if(values && typeof values==='object' && !Array.isArray(values))
+        row=values[videoId]||row;
+    }catch{}
+    const offset=Number(row?.offset);
+    return {
+      offset:Number.isFinite(offset) && Math.abs(offset)<=YT_LC_MAX_CORRECTION_SEC
+        ? Math.round(offset*1000)/1000 : 0,
+      enabled:row?.enabled!==false,
+    };
+  }
+
+  function youtubeLiveClockEffectiveCorrection(videoId=currentYoutubeVideoId()) {
+    const correction=youtubeLiveClockCorrection(videoId);
+    return correction.enabled?correction.offset:0;
+  }
+
+  function youtubeLiveClockSaveCorrection(videoId,correction) {
+    if(!/^[A-Za-z0-9_-]{11}$/.test(String(videoId||'')))return false;
+    const offset=Math.max(-YT_LC_MAX_CORRECTION_SEC,
+      Math.min(YT_LC_MAX_CORRECTION_SEC,Math.round(Number(correction.offset||0)*1000)/1000));
+    if(!Number.isFinite(offset))return false;
+    const row={offset,enabled:correction.enabled!==false,updatedAt:Date.now()};
+    youtubeLiveClockMemoryCorrections.set(videoId,row);
+    try {
+      const current=JSON.parse(localStorage.getItem(YT_LC_CORRECTIONS_KEY)||'{}');
+      const values=(current && typeof current==='object' && !Array.isArray(current))
+        ?current:{};
+      values[videoId]=row;
+      const ordered=Object.entries(values)
+        .filter(([id,value])=>/^[A-Za-z0-9_-]{11}$/.test(id) && Number.isFinite(Number(value?.offset)))
+        .sort((a,b)=>Number(b[1]?.updatedAt||0)-Number(a[1]?.updatedAt||0))
+        .slice(0,YT_LC_CORRECTIONS_LIMIT);
+      localStorage.setItem(YT_LC_CORRECTIONS_KEY,JSON.stringify(Object.fromEntries(ordered)));
+    }catch(error){
+      console.debug('[NRH][LiveClock correction storage]',String(error?.message||error));
+    }
+    return true;
+  }
+
+  function youtubeLiveClockAdjustCorrection({delta=0,enable,reset=false}={}) {
+    const videoId=currentYoutubeVideoId();
+    const video=youtubeVideoElement();
+    if(!videoId || !video || !Number.isFinite(video.currentTime))return;
+    const old=youtubeLiveClockCorrection(videoId);
+    const next={
+      offset:reset?0:Math.max(-YT_LC_MAX_CORRECTION_SEC,
+        Math.min(YT_LC_MAX_CORRECTION_SEC,old.offset+delta)),
+      enabled:typeof enable==='boolean'?enable:old.enabled,
+    };
+    if(!youtubeLiveClockSaveCorrection(videoId,next))return;
+    const change=(next.enabled?next.offset:0)-(old.enabled?old.offset:0);
+    if(Math.abs(change)>0.0001){
+      const target=Math.max(0,Math.min(Number.isFinite(video.duration)?video.duration:Infinity,
+        video.currentTime+change));
+      youtubeLiveClockSuppressSeek(video,target);
+      clearTimeout(youtubeLiveClockTabs.autoSeekTimer);
+      youtubeLiveClockTabs.autoSeekTimer=0;
+      ++youtubeSeekHandoffRun;
+      document.dispatchEvent(new CustomEvent('nrh-liveclock-manual-seek'));
+      try{video.currentTime=target;}catch(error){
+        console.debug('[NRH][LiveClock correction seek]',String(error?.message||error));
+      }
+    }
+    youtubeLiveClockMiniRefresh();
+    youtubeLiveClockRefresh();
+  }
+
   function youtubeLiveClockEmit(kind, fields = {}) {
     const channel = youtubeLiveClockTabs.channel;
     if (!channel) return;
@@ -6333,6 +6416,9 @@
         : (marked ? 'このタブは同期対象' : 'このタブは未選択') +
           ' ／ 他の同期対象 ' + peerCount + 'タブ' +
           (!clockReady ? ' ／ 配信開始時刻の取得待ち' : '') +
+          (()=>{const correction=youtubeLiveClockCorrection();
+            return ' ／ 補正 '+(correction.offset>=0?'+':'')+correction.offset+
+              '秒 '+(correction.enabled?'ON':'OFF');})()+
           (stateLc.status ? ' ／ ' + stateLc.status : '');
     }
     youtubeLiveClockMiniRefresh();
@@ -6374,7 +6460,8 @@
       if (!automatic) toast('配信開始時刻を取得できていません。動画を再読み込みして確認してください');
       return false;
     }
-    const wallMs = clock.startMs + video.currentTime * 1000;
+    const wallMs = clock.startMs +
+      (video.currentTime - youtubeLiveClockEffectiveCorrection()) * 1000;
     const peers = [...youtubeLiveClockTabs.peers.values()].filter(
       p => p.marked && Date.now() - p.at < 12000
     ).length;
@@ -6454,7 +6541,8 @@
       ? Math.max(0, Math.min(2000, now - Number(message.at))) *
         (Number.isFinite(message.sourceRate) ? Math.max(0.25, Math.min(4, message.sourceRate)) : 1)
       : 0;
-    const target = (wallMs + elapsedMs - clock.startMs) / 1000;
+    const target = (wallMs + elapsedMs - clock.startMs) / 1000 +
+      youtubeLiveClockEffectiveCorrection();
     if (!Number.isFinite(target) || target < 0 || target > video.duration) {
       youtubeLiveClockStatus('同期範囲外：基準の時刻がこのアーカイブにありません');
       return;
@@ -6590,6 +6678,10 @@
     const sync=$('#npf-liveclock-mini-sync',m.root);
     const time=$('#npf-liveclock-mini-time',m.root);
     const peers=$('#npf-liveclock-mini-peers',m.root);
+    const correctionButton=$('#npf-liveclock-mini-correction',m.root);
+    const offsetLabel=$('#npf-liveclock-mini-offset',m.root);
+    const correctionReset=$('#npf-liveclock-mini-reset',m.root);
+    const correction=youtubeLiveClockCorrection(id);
     if(power){
       power.disabled=!youtubeLiveClockTabs.channel||!readyVideo;
       power.setAttribute('aria-pressed',String(marked));
@@ -6610,6 +6702,20 @@
         time.textContent='時刻取得待ち';time.title='実配信開始時刻が未取得です';
       }
     }
+    if(correctionButton){
+      correctionButton.textContent=correction.enabled?'補正 ON':'補正 OFF';
+      correctionButton.setAttribute('aria-pressed',String(correction.enabled));
+      correctionButton.style.setProperty('color',
+        correction.enabled?'#6ce9ff':'#c0c4cb','important');
+      correctionButton.title=correction.enabled
+        ? '補正を一時OFF（値は保持）。クリックで無効化'
+        : '保存済みの補正値を再適用してON';
+    }
+    if(offsetLabel){
+      offsetLabel.textContent='補正 '+(correction.offset>=0?'+':'')+correction.offset+'秒';
+      offsetLabel.title='この動画IDに保存したズレ補正値。OFF中も値は保持';
+    }
+    if(correctionReset)correctionReset.disabled=correction.offset===0;
     if(peers){
       let count=0;const now=Date.now();
       for(const p of youtubeLiveClockTabs.peers.values())if(p.marked&&now-p.at<12000)count++;
@@ -6619,20 +6725,10 @@
   }
 
   function youtubeLiveClockMiniCalibrate(sign) {
-    if(!youtubeVideoElement())return;
-    // Calibration shifts this archive only; the next sync uses its new
-    // real broadcast instant as the common reference.
-    // This control is a local-only drift calibration, not a new master seek.
-    // Keep the selected tabs in their positions until the next intentional
-    // timestamp/timeline seek or explicit Sync click.
-    const video=youtubeVideoElement();
-    const next=Math.max(0,Math.min(video.duration||Infinity,
-      video.currentTime+sign*youtubeLiveClockMini.step));
-    youtubeLiveClockSuppressSeek(video,next);
-    ++youtubeSeekHandoffRun;
-    document.dispatchEvent(new CustomEvent('nrh-liveclock-manual-seek'));
-    seekYoutube(sign*youtubeLiveClockMini.step);
-    youtubeLiveClockMiniRefresh();
+    // Record the video-specific offset, not just a temporary one-time seek.
+    // When correction is OFF, its stored value can be edited without moving
+    // this video. ON reapplies it to both automatic and manual sync.
+    youtubeLiveClockAdjustCorrection({delta:sign*youtubeLiveClockMini.step});
   }
 
   function ensureYoutubeLiveClockMini() {
@@ -6709,6 +6805,16 @@
     const peers=document.createElement('span');peers.id='npf-liveclock-mini-peers';
     peers.style.cssText='flex:1;white-space:nowrap;text-align:right;opacity:.8;font-size:10px;';
     bottom.append(back,step,unit,ahead,peers);root.appendChild(bottom);
+    const correctionRow=row();correctionRow.style.marginTop='4px';
+    const correctionToggle=btn('npf-liveclock-mini-correction','補正 ON','この動画のズレ補正をON/OFF');
+    correctionToggle.style.cssText+=';min-width:65px!important;font-size:10px!important;';
+    const correctionAmount=document.createElement('span');
+    correctionAmount.id='npf-liveclock-mini-offset';
+    correctionAmount.style.cssText='flex:1;white-space:nowrap;font-size:11px;text-align:center;';
+    const correctionClear=btn('npf-liveclock-mini-reset','0に戻す','この動画の保存補正を0秒に戻す');
+    correctionClear.style.cssText+=';font-size:10px!important;min-width:56px!important;';
+    correctionRow.append(correctionToggle,correctionAmount,correctionClear);
+    root.appendChild(correctionRow);
     for(const kind of ['pointerdown','mousedown','mouseup','click','dblclick','keydown','keyup']){
       step.addEventListener(kind,event=>event.stopPropagation());
     }
@@ -6723,6 +6829,11 @@
     sync.addEventListener('click',()=>{youtubeLiveClockSyncFromThisTab();youtubeLiveClockMiniRefresh()});
     back.addEventListener('click',()=>youtubeLiveClockMiniCalibrate(-1));
     ahead.addEventListener('click',()=>youtubeLiveClockMiniCalibrate(1));
+    correctionToggle.addEventListener('click',()=>{
+      const correction=youtubeLiveClockCorrection();
+      youtubeLiveClockAdjustCorrection({enable:!correction.enabled});
+    });
+    correctionClear.addEventListener('click',()=>youtubeLiveClockAdjustCorrection({reset:true}));
     host.appendChild(root);
     m.root=root;m.host=host;m.videoId=id;m.visible=false;
 
