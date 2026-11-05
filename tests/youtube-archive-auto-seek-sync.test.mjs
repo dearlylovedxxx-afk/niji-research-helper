@@ -125,7 +125,8 @@ test('the separate small drift-correction control does not auto-sync',()=>{
   a.video.currentTime=107;
   a.flush();
   assert.equal(a.sent.length,0);
-  assert.match(script,/youtubeLiveClockSuppressSeek\(video,next\)/);
+  assert.match(script,/youtubeLiveClockAdjustCorrection\(\{delta:sign\*youtubeLiveClockMini\.step\}\)/);
+  assert.match(script,/youtubeLiveClockSuppressSeek\(video,target\)/);
 });
 test('remote sync suppression does not block a different manual timestamp',()=>{
   const a=instance({seconds:200});
