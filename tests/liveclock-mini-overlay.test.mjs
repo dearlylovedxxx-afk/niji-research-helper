@@ -5,10 +5,10 @@ import {readFileSync} from 'node:fs';
 const script=readFileSync(new URL('../Niji_Research_Helper.user.js',import.meta.url),'utf8');
 const meta=readFileSync(new URL('../Niji_Research_Helper.meta.js',import.meta.url),'utf8');
 
-test('v1.0.125 integrates a compact video player hover overlay',()=>{
+test('v1.0.126 integrates a compact video player hover overlay',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+1\.0\.125/);
-  assert.match(meta,/@version\s+1\.0\.125/);
+  assert.match(script,/@version\s+1\.0\.126/);
+  assert.match(meta,/@version\s+1\.0\.126/);
   assert.match(script,/root\.id='npf-liveclock-mini'/);
   assert.match(script,/width:205px!important/);
   assert.match(script,/youtubeLiveClockMiniNear\(event,host\)/);
@@ -33,7 +33,7 @@ test('power and cycle buttons reuse the existing real-time BroadcastChannel engi
 test('one-to-sixty-second manual calibration adjusts only this archive',()=>{
   assert.match(script,/step\.min='1';step\.max='60'/);
   assert.match(script,/m\.step=Number\.isFinite\(v\)\?Math\.min\(60,Math\.max\(1,v\)\):1/);
-  assert.match(script,/seekYoutube\(sign\*youtubeLiveClockMini\.step\)/);
+  assert.match(script,/youtubeLiveClockAdjustCorrection\(\{delta:sign\*youtubeLiveClockMini\.step\}\)/);
   assert.match(script,/nrh-liveclock-manual-seek/);
   assert.match(script,/sync\.disabled=!youtubeLiveClockTabs\.channel\|\|!marked\|\|!readyVideo\|\|!clockReady/);
 });
