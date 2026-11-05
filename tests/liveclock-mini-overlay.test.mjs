@@ -25,7 +25,8 @@ test('power and cycle buttons reuse the existing real-time BroadcastChannel engi
   assert.match(script,/youtubeLiveClockMarkToggle\(\)/);
   assert.match(script,/youtubeLiveClockSyncFromThisTab\(\)/);
   assert.match(script,/new BroadcastChannel\('niji-research-helper-liveclock-v1'\)/);
-  assert.match(script,/const wallMs = clock\.startMs \+ video\.currentTime \* 1000/);
+  assert.match(script,/const wallMs = clock\.startMs \+/);
+  assert.match(script,/video\.currentTime - youtubeLiveClockEffectiveCorrection\(\)/);
   assert.match(script,/const target = \(wallMs \+ elapsedMs - clock\.startMs\) \/ 1000/);
   assert.match(script,/date\.toLocaleTimeString\('ja-JP'/);
 });
