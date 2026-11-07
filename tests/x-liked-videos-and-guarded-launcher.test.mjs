@@ -13,7 +13,7 @@ assert.ok(guardStart>0&&guardEnd>guardStart&&earlyStart>=0&&earlyEnd>earlyStart&
 const guards=script.slice(guardStart,guardEnd);
 const earlySource=script.slice(earlyStart,earlyEnd).replace("  'use strict';", "  'use strict';\n  const history = { pushState(){}, replaceState(){} };");
 const coreSource=script.slice(coreStart,coreEnd).replace('  function syncLayout(){',
-    '  const bodyClasses=[]; const style={disabled:false};\\n  function syncLayout(){');
+    '  const bodyClasses=[]; const style={disabled:false};\n  function syncLayout(){');
 
 function guard(path,settings={enabled:true}){
   const location={pathname:path};
