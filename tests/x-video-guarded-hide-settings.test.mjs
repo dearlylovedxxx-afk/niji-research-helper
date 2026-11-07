@@ -14,7 +14,8 @@ const layoutTo=source.indexOf('  let interval=setInterval(syncLayout',layoutFrom
 assert.ok(earlyFrom>=0&&earlyTo>earlyFrom&&selectorsTo>selectorsFrom&&cssTo>cssFrom&&layoutTo>layoutFrom);
 const earlySource=source.slice(earlyFrom,earlyTo).replace("  'use strict';", "  'use strict';\n  const history = { pushState(){}, replaceState(){} };");
 const cssSource=source.slice(selectorsFrom,selectorsTo)+source.slice(cssFrom,cssTo);
-const layoutSource=source.slice(layoutFrom,layoutTo);
+const layoutSource=source.slice(layoutFrom,layoutTo).replace('  function syncLayout(){',
+    '  const bodyClasses=[]; const style={disabled:false};\\n  function syncLayout(){');
 
 function classes() {
   const values=new Set();
@@ -60,13 +61,13 @@ const active={
   hideSubscriptions:true,hideMoney:true,hideJobs:true,hideAnalytics:true,
   hideMessageDrawer:true,hideWhoToFollow:true,hideForYou:true
 };
-test('XSF v1.3.14 parses, preserves data and integrates a guarded chrome layer',()=>{
+test('XSF v1.3.15 parses, preserves data and integrates a guarded chrome layer',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.3\.14/);
-  assert.match(source,/const VERSION='1\.3\.14'/);
+  assert.match(source,/@version\s+1\.3\.15/);
+  assert.match(source,/const VERSION='1\.3\.15'/);
   assert.match(source,/KEY='xsf_userscript_v1'/);
   assert.match(source,/const KEY='xsf_display_settings_v1'/);
-  assert.match(source,/root\.classList\.toggle\('xsf-guarded-ui', opts\.enabled===true && guarded\)/);
+  assert.match(source,/root\.classList\.toggle\('xsf-guarded-ui', opts\.enabled===true && guarded && !nativeLikes\)/);
 });
 test('guarded post still hides native menus even though full display CSS is disabled',()=>{
   const first=firstPaint('/alice/status/12345',active);
@@ -89,11 +90,11 @@ test('guarded post still hides native menus even though full display CSS is disa
   }
   assert.ok(css.includes('html.xsf-guarded-ui [data-testid="chat-drawer-root"]'));
 });
-test('safe menu hiding works on TL, search, likes and post routes',()=>{
-  for(const path of ['/home','/i/lists/987','/search','/explore','/alice/likes','/alice/status/45']){
+test('safe menu hiding works on TL, search and post routes; Likes is fully native',()=>{
+  for(const path of ['/home','/i/lists/987','/search','/explore','/alice/status/45']){
     assert.ok(firstPaint(path,active).html.contains('xsf-guarded-ui'),path);
   }
-  for(const path of ['/alice','/alice/media','/settings']){
+  for(const path of ['/alice','/alice/media','/alice/likes','/settings']){
     assert.ok(!firstPaint(path,active).html.contains('xsf-guarded-ui'),path);
   }
 });
