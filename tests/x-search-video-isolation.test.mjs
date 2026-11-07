@@ -9,7 +9,8 @@ const coreStart=source.indexOf('  function syncLayout(){');
 const coreEnd=source.indexOf('  let interval=setInterval(syncLayout',coreStart);
 assert.ok(earlyStart>=0&&earlyEnd>earlyStart&&coreStart>=0&&coreEnd>coreStart);
 const earlySource=source.slice(earlyStart,earlyEnd).replace("  'use strict';", "  'use strict';\n  const history = { pushState(){}, replaceState(){} };");
-const coreSource=source.slice(coreStart,coreEnd);
+const coreSource=source.slice(coreStart,coreEnd).replace('  function syncLayout(){',
+    '  const bodyClasses=[]; const style={disabled:false};\\n  function syncLayout(){');
 
 function classList(){
   const values=new Set();
@@ -52,10 +53,10 @@ const settings={enabled:true,wideTimeline:true,wideTweet:true,videoGuard:true,
   videoSafeTweet:true,tlVideoIsolation:true,searchVideoIsolation:true,
   hideSidebarContent:true,nativeSearch:true,hideGrok:true};
 
-test('v1.3.14 source parses and preserves original storage',()=>{
+test('v1.3.15 source parses and preserves original storage',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.3\.14/);
-  assert.match(source,/const VERSION='1\.3\.14'/);
+  assert.match(source,/@version\s+1\.3\.15/);
+  assert.match(source,/const VERSION='1\.3\.15'/);
   assert.match(source,/KEY='xsf_userscript_v1'/);
   assert.match(source,/xsf_display_settings_v1/);
 });
