@@ -81,7 +81,8 @@ test('confirmed same-game and related results remain in their original groups',(
   const same=movie('ABCDEFGHIJQ','same game');same.sameGame=true;
   const unknown=movie('ABCDEFGHIJR','rival');
   const {area}=viewer([confirmed,same,unknown]);
-  assert.equal(area.getElements('div').filter(n=>n.className==='npf-yt-result-card').length,2);
+  assert.equal(area.children.filter(n=>n.className==='npf-yt-result-card').length,2);
+  assert.equal(area.getElements('div').filter(n=>n.className==='npf-yt-result-card').length,3);
   assert.equal(area.getElements('details').length,1);
   assert.equal(area.getElements('details')[0].open,false);
 });
