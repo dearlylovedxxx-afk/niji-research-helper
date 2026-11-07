@@ -11,7 +11,7 @@ const coreStart=script.indexOf('  function syncLayout(){');
 const coreEnd=script.indexOf('  let interval=setInterval(syncLayout',coreStart);
 assert.ok(guardStart>0&&guardEnd>guardStart&&earlyStart>=0&&earlyEnd>earlyStart&&coreStart>0&&coreEnd>coreStart);
 const guards=script.slice(guardStart,guardEnd);
-const earlySource=script.slice(earlyStart,earlyEnd).replace("  'use strict';", "  'use strict';\\n  const history = { pushState(){}, replaceState(){} };");
+const earlySource=script.slice(earlyStart,earlyEnd).replace("  'use strict';", "  'use strict';\n  const history = { pushState(){}, replaceState(){} };");
 const coreSource=script.slice(coreStart,coreEnd);
 
 function guard(path,settings={enabled:true}){
