@@ -28,6 +28,7 @@ class Node {
   }
   appendChild(n){this.children.push(n);n.parentElement=this;return n;}
   replaceChildren(...children){this.children=[];children.forEach(n=>this.appendChild(n));}
+  setAttribute(name,value){this[name]=value;}
   addEventListener(name,fn){this.listeners.set(name,fn);}
   dispatch(name){this.listeners.get(name)?.();}
   getElements(tag){return [
@@ -103,16 +104,24 @@ test('unclassified candidate list is paged instead of rendering hundreds of card
 });
 test('initial Holodex POV search paginates beyond the 50-item first page',async()=>{
   const requests=[];
-  const getter=new Function('startOf','endOf','state','apiGet',fastCode+
+  class Params {
+    constructor(values){this.values={...values};}
+    set(key,value){this.values[key]=String(value);}
+    toString(){return Object.entries(this.values)
+      .map(([key,value])=>encodeURIComponent(key)+'='+encodeURIComponent(value)).join('&');}
+  }
+  const getter=new Function('startOf','endOf','state','apiGet','URLSearchParams',fastCode+
     '\nreturn fetchYoutubePovFastCandidates;')(
     v=>new Date(v.start_actual),v=>new Date(v.end_actual),
     {settings:{}},
     async path=>{
-      const url=new URL(path,'https://holodex.net/api/v2');
-      const offset=Number(url.searchParams.get('offset'));
-      requests.push({offset,org:url.searchParams.get('org'),topic:url.searchParams.get('topic')});
+      const query=Object.fromEntries(path.split('?')[1].split('&')
+        .map(part=>part.split('=').map(decodeURIComponent)));
+      const offset=Number(query.offset);
+      requests.push({offset,org:query.org||null,topic:query.topic||null});
       return Array.from({length:offset<100?50:12},(_,i)=>({id:String(offset+i)}));
-    }
+    },
+    Params
   );
   const result=await getter({start_actual:'2026-11-07T10:00:00Z',
     end_actual:'2026-11-07T14:00:00Z',topic_id:'splatoon'},3600);
