@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.13
+// @version      1.3.14
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -61,6 +61,9 @@
     root.classList.toggle('xsf-guard-tl',guardedTL && opts.wideTimeline!==false);
     root.classList.toggle('xsf-guard-search',guardedSearch && opts.wideTimeline!==false);
     root.classList.toggle('xsf-guard-likes',guardedLikes);
+    // Do not let Home-only navigation cleanup hide the first PROFILE tab.
+    // The Likes tab is a native media feed: keep its own tab row untouched.
+    root.classList.toggle('xsf-guard-home',guardedTL && path==='/home');
     root.classList.toggle('xsf-guard-tl-grok',(guardedTL || guardedSearch) && opts.hideGrok!==false);
     root.classList.toggle('xsf-guard-tl-chat',(guardedTL || guardedSearch) && opts.hideMessageDrawer!==false);
     root.classList.toggle('xsf-guard-tl-premium',(guardedTL || guardedSearch) && opts.hidePremium!==false);
@@ -208,6 +211,24 @@
     if(location.pathname===lastPath)return;
     lastPath=location.pathname;update();
   },200);
+  // X navigates through history.pushState/replaceState. Polling alone
+  // leaves up to 200ms where a new Likes feed mounts with old full-width
+  // CSS still active. Clear those classes immediately on route transitions.
+  // This only updates our root/body layout flags; never mutates media nodes.
+  for(const key of ['pushState','replaceState']){
+    const original=history[key];
+    if(typeof original!=='function')continue;
+    history[key]=function(...args){
+      const result=original.apply(this,args);
+      if(location.pathname!==lastPath){
+        lastPath=location.pathname;
+        update();
+        // Late layout module may be present; only re-check safe classes.
+        window.__xsfLayoutSync?.();
+      }
+      return result;
+    };
+  }
   addEventListener('popstate',update);
   addEventListener('pageshow',update);
   addEventListener('pagehide',()=>clearInterval(routePoll),{once:true});
@@ -219,7 +240,7 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.13', KEY='xsf_userscript_v1';
+const VERSION='1.3.14', KEY='xsf_userscript_v1';
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -919,7 +940,7 @@ load();currentFields=blank();
     }
     // Hide the For You tab only; this selector never addresses video nodes.
     if(options.enabled && options.hideForYou) rules.push(
-      'html.xsf-guarded-ui [data-testid="primaryColumn"] nav[role="navigation"] [role="tablist"] > div:first-child {display:none!important}'
+      'html.xsf-guard-home [data-testid="primaryColumn"] nav[role="navigation"] [role="tablist"] > div:first-child {display:none!important}'
     );
     style.textContent=rules.join('\n');
   }
@@ -1007,7 +1028,7 @@ load();currentFields=blank();
     // player ancestors after React mounts the search-result feed.
     body.classList.toggle('xsf-display-active',options.enabled&&!guardedPage);
     body.classList.toggle('xsf-hide-side-items',false);
-    body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou&&!guardedPage);
+    body.classList.toggle('xsf-hide-for-you',options.enabled&&options.hideForYou&&!guardedPage&&path==='/home');
     body.classList.toggle('xsf-monochrome-buttons',options.enabled&&options.monochromeButtons&&!guardedPage);
     // Reuse the same native X search form on guarded posts as guarded TL.
     // No additional search UI or DOM-wide observation is introduced.
@@ -1015,6 +1036,7 @@ load();currentFields=blank();
     else syncSearch();
     window.__xsfUpdateEarly?.();
   }
+  window.__xsfLayoutSync=syncLayout;
   let interval=setInterval(syncLayout,1200);
   const api={
     get(){return {...options}},
@@ -1033,6 +1055,7 @@ load();currentFields=blank();
     for(const name of bodyClasses)document.body?.classList.remove(name);
     style.remove();
     if(window.__xsfLayoutAPI===api)delete window.__xsfLayoutAPI;
+    if(window.__xsfLayoutSync===syncLayout)delete window.__xsfLayoutSync;
     if(window.__xsfLayoutCleanup===cleanup)delete window.__xsfLayoutCleanup;
   };
   window.__xsfLayoutCleanup=cleanup;
