@@ -9289,10 +9289,10 @@
     return matches.filter(m => !m.related && !m.sameGame && povGroupPass(m.v,groupFilter))
       .sort((a,b) =>
         Number(b.priorityFavorite)-Number(a.priorityFavorite) ||
-        Math.abs((a.cs||0)-(a.hasSync ? (a.overlapStart||0) : (a.overlapStart||0))) -
-          Math.abs((b.cs||0)-(b.overlapStart||0)) ||
         b.overlapRatio-a.overlapRatio ||
-        b.score-a.score);
+        b.score-a.score ||
+        Math.abs(Number(a.candidateStartOffset||0)) -
+          Math.abs(Number(b.candidateStartOffset||0)));
   }
 
   function renderYoutubeMatches(source, matches, syncOffset, povOrgFilter = 'all') {
