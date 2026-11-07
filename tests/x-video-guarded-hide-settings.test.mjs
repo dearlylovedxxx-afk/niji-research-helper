@@ -12,7 +12,7 @@ const cssTo=source.indexOf('  function markSearch(',cssFrom);
 const layoutFrom=source.indexOf('  function syncLayout(){');
 const layoutTo=source.indexOf('  let interval=setInterval(syncLayout',layoutFrom);
 assert.ok(earlyFrom>=0&&earlyTo>earlyFrom&&selectorsTo>selectorsFrom&&cssTo>cssFrom&&layoutTo>layoutFrom);
-const earlySource=source.slice(earlyFrom,earlyTo);
+const earlySource=source.slice(earlyFrom,earlyTo).replace("  'use strict';", "  'use strict';\\n  const history = { pushState(){}, replaceState(){} };");
 const cssSource=source.slice(selectorsFrom,selectorsTo)+source.slice(cssFrom,cssTo);
 const layoutSource=source.slice(layoutFrom,layoutTo);
 
