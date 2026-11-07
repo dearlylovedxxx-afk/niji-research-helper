@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Search Favorites
 // @namespace    x-search-favorites-userscript
-// @version      1.3.14
+// @version      1.3.15
 // @description  X高度検索・保存検索・履歴・いいね順。全幅タイムライン・個別ポストと画面整理の切替設定を追加。Niji Cloud対応。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -49,7 +49,14 @@
     const guarded=guardedPost || guardedTL || guardedSearch || guardedLikes;
     // Independent, video-safe navigation cleanup: never rely on
     // body.xsf-display-active, which is deliberately removed for media safety.
-    root.classList.toggle('xsf-guarded-ui', opts.enabled===true && guarded);
+    // Profile Likes is special: X can decode video audio yet show a blank
+    // GPU surface when even apparently unrelated XSF CSS/overlays are active.
+    // For the opted-in native Likes mode disable ALL XSF styles on this route.
+    // The original layout was already used here (no wide/feed CSS), so the
+    // timeline width stays the same, while X owns its own media composition.
+    const nativeLikes=guardedLikes;
+    root.classList.toggle('xsf-guarded-ui', opts.enabled===true && guarded && !nativeLikes);
+    style.disabled=nativeLikes;
     const wide=opts.enabled===true && supported && !guarded &&
       (tweet?(opts.wideTweet!==false && opts.videoSafeTweet===false):opts.wideTimeline!==false);
     // This class deliberately does NOT activate the main XSF UI, native
@@ -240,7 +247,14 @@ function xsfStartWhenDomReady() {
 (() => {
 'use strict';
 if (!/^(?:x|twitter)\.com$/i.test(location.hostname) || window.top!==window.self) return;
-const VERSION='1.3.14', KEY='xsf_userscript_v1';
+const VERSION='1.3.15', KEY='xsf_userscript_v1';
+const isNativeLikesRoute=()=>{
+  if(!/^\/[a-zA-Z0-9_]{1,15}\/likes\/?$/.test(location.pathname))return false;
+  try{
+    const opts=JSON.parse(localStorage.getItem('xsf_display_settings_v1')||'{}')||{};
+    return opts.enabled===true && opts.likesVideoIsolation!==false;
+  }catch{return false;}
+};
 const isGuardedVideoPage=()=>{
   const path=location.pathname;
   const post=/\/status\/\d+(?:\/|$)/.test(path);
@@ -661,6 +675,15 @@ function syncCoreObserver(){
     if(!scanBar.hidden)scanBar.hidden=true;
     if(!sorted.hidden)sorted.hidden=true;
     if(filterOn){filterOn=false;restore();}
+    // Unlike Home and post details, Likes runs as a pure native media feed.
+    // Detach BOTH overlay roots even if the user has the floating launcher ON.
+    // No XSF fixed/shadow element is allowed to create an extra compositor
+    // layer above an inline Likes video.
+    if(isNativeLikesRoute()){
+      host.remove();
+      protectedLauncherHost.remove();
+      return false;
+    }
     if(isProtectedLaunchRoute() && tlLauncherEnabled()){
       // Only a tiny launcher remains while playing video. The original
       // complete search panel mounts solely while the user opens it.
@@ -1019,6 +1042,18 @@ load();currentFields=blank();
     const guardedLikes=options.enabled && options.likesVideoIsolation &&
       /^\/[a-zA-Z0-9_]{1,15}\/likes\/?$/.test(path);
     const guardedPage=guardedPost || guardedTL || guardedSearch || guardedLikes;
+    // Native Likes is an opt-in preservation mode, not a content restyle.
+    // Don't run or leave behind any XSF layout/search CSS on Likes. This
+    // matches the known-working XSF-OFF media surface without changing
+    // the profile/timeline width, and restores all other routes on exit.
+    if(guardedLikes){
+      for(const name of bodyClasses)body.classList.remove(name);
+      resetSearch();
+      style.disabled=true;
+      window.__xsfUpdateEarly?.();
+      return;
+    }
+    style.disabled=false;
     const videoSafePage=options.enabled && options.videoSafeTweet && isTweet;
     const full=options.enabled && !guardedPage && !videoSafePage && (isTweet ? options.wideTweet : (options.wideTimeline && isTimeline));
     body.classList.toggle('xsf-layout-full',full);
