@@ -15,7 +15,7 @@ assert.ok(earlyFrom>=0&&earlyTo>earlyFrom&&selectorsTo>selectorsFrom&&cssTo>cssF
 const earlySource=source.slice(earlyFrom,earlyTo).replace("  'use strict';", "  'use strict';\n  const history = { pushState(){}, replaceState(){} };");
 const cssSource=source.slice(selectorsFrom,selectorsTo)+source.slice(cssFrom,cssTo);
 const layoutSource=source.slice(layoutFrom,layoutTo).replace('  function syncLayout(){',
-    '  const bodyClasses=[]; const style={disabled:false};\\n  function syncLayout(){');
+    '  const bodyClasses=[]; const style={disabled:false};\n  function syncLayout(){');
 
 function classes() {
   const values=new Set();
