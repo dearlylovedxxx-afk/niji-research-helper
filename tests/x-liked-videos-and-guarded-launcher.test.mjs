@@ -12,7 +12,8 @@ const coreEnd=script.indexOf('  let interval=setInterval(syncLayout',coreStart);
 assert.ok(guardStart>0&&guardEnd>guardStart&&earlyStart>=0&&earlyEnd>earlyStart&&coreStart>0&&coreEnd>coreStart);
 const guards=script.slice(guardStart,guardEnd);
 const earlySource=script.slice(earlyStart,earlyEnd).replace("  'use strict';", "  'use strict';\n  const history = { pushState(){}, replaceState(){} };");
-const coreSource=script.slice(coreStart,coreEnd);
+const coreSource=script.slice(coreStart,coreEnd).replace('  function syncLayout(){',
+    '  const bodyClasses=[]; const style={disabled:false};\\n  function syncLayout(){');
 
 function guard(path,settings={enabled:true}){
   const location={pathname:path};
@@ -57,10 +58,10 @@ const defaults={enabled:true,wideTimeline:true,wideTweet:true,tlVideoIsolation:t
   searchVideoIsolation:true,likesVideoIsolation:true,videoGuard:true,videoSafeTweet:true,
   hideSidebarContent:true,hideForYou:false,monochromeButtons:false,nativeSearch:true};
 
-test('v1.3.14 scripts parse and preserve the same saved-data keys',()=>{
+test('v1.3.15 scripts parse and preserve the same saved-data keys',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+1\.3\.14/);
-  assert.match(script,/const VERSION='1\.3\.14'/);
+  assert.match(script,/@version\s+1\.3\.15/);
+  assert.match(script,/const VERSION='1\.3\.15'/);
   assert.match(script,/KEY='xsf_userscript_v1'/);
   assert.match(script,/const KEY='xsf_display_settings_v1'/);
 });
