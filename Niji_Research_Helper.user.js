@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.126
+// @version      1.0.127
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -4392,21 +4392,30 @@
     ].filter(x => x.org || x.topic);
 
     const jobs = defs.map(async query => {
-      const q = new URLSearchParams({
-        type:'stream',
-        status:'past',
-        include:'live_info,mentions',
-        sort:'available_at',
-        order:'asc',
-        limit:'50',
-        offset:'0',
-        from:from.toISOString(),
-        to:to.toISOString(),
-      });
-      if (query.org) q.set('org', query.org);
-      if (query.topic) q.set('topic', query.topic);
-      const arr = await apiGet('/videos?' + q.toString());
-      return Array.isArray(arr) ? arr : [];
+      // A single first page silently dropped streams 51+ in busy Nijisanji
+      // periods. Fetch a small bounded set of pages quickly; the broader
+      // background pass still fills the remainder.
+      const found=[];
+      for(let offset=0, page=0;page<3;page++,offset+=50){
+        const q = new URLSearchParams({
+          type:'stream',
+          status:'past',
+          include:'live_info,mentions',
+          sort:'available_at',
+          order:'asc',
+          limit:'50',
+          offset:String(offset),
+          from:from.toISOString(),
+          to:to.toISOString(),
+        });
+        if (query.org) q.set('org', query.org);
+        if (query.topic) q.set('topic', query.topic);
+        const arr = await apiGet('/videos?' + q.toString());
+        if(!Array.isArray(arr))break;
+        found.push(...arr);
+        if(arr.length<50)break;
+      }
+      return found;
     });
 
     const settled = await Promise.allSettled(jobs);
@@ -9271,6 +9280,21 @@
     }
   }
 
+  // Retain the unverified same-time bucket across background fetch refreshes.
+  // A Nijisanji opponent can have a completely different title/game tag, so
+  // hiding all !sameGame matches makes a retrieved archive seem nonexistent.
+  const youtubePovUnknownUi={sourceId:'',expanded:false,query:'',limit:40};
+
+  function youtubePovUnknownCandidates(matches, groupFilter='all') {
+    return matches.filter(m => !m.related && !m.sameGame && povGroupPass(m.v,groupFilter))
+      .sort((a,b) =>
+        Number(b.priorityFavorite)-Number(a.priorityFavorite) ||
+        Math.abs((a.cs||0)-(a.hasSync ? (a.overlapStart||0) : (a.overlapStart||0))) -
+          Math.abs((b.cs||0)-(b.overlapStart||0)) ||
+        b.overlapRatio-a.overlapRatio ||
+        b.score-a.score);
+  }
+
   function renderYoutubeMatches(source, matches, syncOffset, povOrgFilter = 'all') {
     const area = $('#npf-yt-results');
     if (!area) return;
@@ -9278,18 +9302,25 @@
     area.replaceChildren();
     povAttachFilter(area, povOrgFilter, mode => renderYoutubeMatches(source, matches, syncOffset, mode));
 
+    if(youtubePovUnknownUi.sourceId!==source.id){
+      youtubePovUnknownUi.sourceId=source.id;
+      youtubePovUnknownUi.expanded=false;
+      youtubePovUnknownUi.query='';
+      youtubePovUnknownUi.limit=40;
+    }
     const related = matches.filter(m => m.related && povGroupPass(m.v, povOrgFilter));
     const others = matches.filter(m => !m.related && m.sameGame && povGroupPass(m.v,povOrgFilter)).slice(0,40);
+    const unclassified=youtubePovUnknownCandidates(matches,povOrgFilter);
     const list = related;
 
     const summary = document.createElement('div');
     summary.className = 'npf-yt-result-summary';
     summary.textContent = related.length
-      ? `関連候補 ${related.length}件${others.length ? ` ／ その他 ${others.length}件` : ''}`
-      : `関連候補なし${others.length ? ` ／ 同時刻のその他 ${others.length}件` : ''}`;
+      ? `関連候補 ${related.length}件${others.length ? ` ／ 同ゲーム未確認 ${others.length}件` : ''}${unclassified.length ? ` ／ 時間一致・ゲーム未判定 ${unclassified.length}件` : ''}`
+      : `関連候補なし${others.length ? ` ／ 同ゲーム未確認 ${others.length}件` : ''}${unclassified.length ? ` ／ 時間一致・ゲーム未判定 ${unclassified.length}件` : ''}`;
     area.appendChild(summary);
 
-    if (!list.length && !others.length) {
+    if (!list.length && !others.length && !unclassified.length) {
       const empty = document.createElement('div');
       empty.className = 'npf-yt-result-empty';
       empty.textContent = others.length
@@ -9315,7 +9346,7 @@
       const meta = document.createElement('div');
       meta.className = 'npf-yt-result-meta';
       const reasons = m.reasons?.length ? `・${m.reasons.join(' / ')}` : '';
-      meta.textContent = `対応位置 ${formatClock(correctedCandidateOffset(source, m))}（再生は5秒前から）${m.related ? reasons : '・同時刻・同ゲーム／参加者未確認'}`;
+      meta.textContent = `対応位置 ${formatClock(correctedCandidateOffset(source, m))}（再生は5秒前から）${m.related ? reasons : m.sameGame ? '・同時刻・同ゲーム／参加者未確認' : '・同時刻／ゲーム・参加者未判定'}`;
       card.appendChild(meta);
 
       const buttons = document.createElement('div');
@@ -9373,6 +9404,55 @@
         card.style.borderStyle = 'dashed';
         area.appendChild(card);
       }
+    }
+    if(unclassified.length){
+      const details=document.createElement('details');
+      details.className='npf-yt-pov-time-only';
+      details.open=youtubePovUnknownUi.expanded || (!related.length && !others.length);
+      const heading=document.createElement('summary');
+      heading.textContent='🕒 同時刻の未判定アーカイブ '+unclassified.length+'件（対戦相手が含まれる可能性）';
+      heading.style.cssText='cursor:pointer;font-weight:750;margin:8px 0;padding:8px 0;';
+      details.appendChild(heading);
+      const explanation=document.createElement('p');
+      explanation.textContent='Holodexが同時刻と判定した候補です。タイトルやゲーム情報が違うだけで隠さず表示します。実際に対戦した相手かどうかは未確認です。';
+      explanation.style.cssText='font-size:12px;line-height:1.5;opacity:.8;';
+      details.appendChild(explanation);
+      const filter=document.createElement('input');
+      filter.type='search';filter.className='npf-input';
+      filter.placeholder='配信者名・タイトルで絞り込む';
+      filter.setAttribute('aria-label','同時刻の未判定候補を検索');
+      filter.value=youtubePovUnknownUi.query;
+      details.appendChild(filter);
+      const cards=document.createElement('div');details.appendChild(cards);
+      const more=document.createElement('button');more.type='button';
+      more.className='npf-yt-btn';more.textContent='さらに40件表示';
+      details.appendChild(more);
+      const drawUnknown=()=>{
+        cards.replaceChildren();
+        const q=youtubePovUnknownUi.query.trim().normalize('NFKC').toLocaleLowerCase();
+        const candidates=q
+          ? unclassified.filter(m=>(channelName(m.v)+' '+(m.v.title||'')).normalize('NFKC').toLocaleLowerCase().includes(q))
+          : unclassified;
+        for(const m of candidates.slice(0,youtubePovUnknownUi.limit)){
+          const card=drawOne(m);card.style.borderStyle='dashed';
+          cards.appendChild(card);
+        }
+        more.hidden=candidates.length<=youtubePovUnknownUi.limit;
+        if(!candidates.length){
+          const empty=document.createElement('p');
+          empty.textContent='この検索語に一致する候補はありません';
+          cards.appendChild(empty);
+        }
+      };
+      filter.addEventListener('input',()=>{
+        youtubePovUnknownUi.query=filter.value;
+        youtubePovUnknownUi.limit=40;
+        drawUnknown();
+      });
+      more.addEventListener('click',()=>{youtubePovUnknownUi.limit+=40;drawUnknown()});
+      details.addEventListener('toggle',()=>{youtubePovUnknownUi.expanded=details.open});
+      drawUnknown();
+      area.appendChild(details);
     }
     renderYoutubePovDiagnostics();
     if (isMobileYoutubeUi()) styleMobileYoutubePanel($('#npf-yt-panel'));
