@@ -64,10 +64,10 @@ function harness({id=firstId,position=600,storage=new Map(),enabledSync=true}={}
     get refreshes(){return refreshes}
   };
 }
-test('v1.0.126 parses, metadata matches, and UI exposes toggle plus reset',()=>{
+test('v1.0.127 parses, metadata matches, and UI exposes toggle plus reset',()=>{
   assert.doesNotThrow(()=>new Function(script));
-  assert.match(script,/@version\s+1\.0\.126/);
-  assert.match(metadata,/@version\s+1\.0\.126/);
+  assert.match(script,/@version\s+1\.0\.127/);
+  assert.match(metadata,/@version\s+1\.0\.127/);
   for(const label of ['npf-liveclock-mini-correction','npf-liveclock-mini-offset','npf-liveclock-mini-reset'])
     assert.ok(script.includes(label));
 });
