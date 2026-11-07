@@ -4373,7 +4373,7 @@
     return [...found.values()];
   }
 
-  async function fetchYoutubePovFastCandidates(source, syncOffset = null) {
+  async function fetchYoutubePovFastCandidates(source, syncOffset = null, onBatch = null) {
     const ss = startOf(source), se = endOf(source);
     if (!ss || !se || Number.isNaN(+ss) || Number.isNaN(+se))
       throw new Error('元アーカイブの開始・終了時刻を取得できませんでした');
@@ -4413,6 +4413,9 @@
         const arr = await apiGet('/videos?' + q.toString());
         if(!Array.isArray(arr))break;
         found.push(...arr);
+        // Deliver page one without waiting for later pages. A busy day can
+        // require more pages, but the first visible results must remain fast.
+        if(typeof onBatch==='function' && arr.length)onBatch(arr);
         if(arr.length<50)break;
       }
       return found;
@@ -9235,9 +9238,8 @@
 
       // Run the focused first-page Holodex search at the same time. When it
       // returns, merge it into anything favorites may already have displayed.
-      void fetchYoutubePovFastCandidates(source, sec).then(fastCandidates => {
+      void fetchYoutubePovFastCandidates(source, sec, batch=>mergeAndRender(batch)).then(() => {
         if (searchToken !== searchOtherPovsFromYoutube._runToken) return;
-        mergeAndRender(fastCandidates);
         attachPovSupplement(source, matches, sec, true, currentCandidates);
 
         if (isMobileYoutubeUi()) {
