@@ -10,7 +10,7 @@ const coreEnd=source.indexOf('  let interval=setInterval(syncLayout',coreStart);
 assert.ok(earlyStart>=0&&earlyEnd>earlyStart&&coreStart>=0&&coreEnd>coreStart);
 const earlySource=source.slice(earlyStart,earlyEnd).replace("  'use strict';", "  'use strict';\n  const history = { pushState(){}, replaceState(){} };");
 const coreSource=source.slice(coreStart,coreEnd).replace('  function syncLayout(){',
-    '  const bodyClasses=[]; const style={disabled:false};\\n  function syncLayout(){');
+    '  const bodyClasses=[]; const style={disabled:false};\n  function syncLayout(){');
 
 function classList(){
   const values=new Set();
