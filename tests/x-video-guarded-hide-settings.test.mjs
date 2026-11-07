@@ -60,10 +60,10 @@ const active={
   hideSubscriptions:true,hideMoney:true,hideJobs:true,hideAnalytics:true,
   hideMessageDrawer:true,hideWhoToFollow:true,hideForYou:true
 };
-test('XSF v1.3.13 parses, preserves data and integrates a guarded chrome layer',()=>{
+test('XSF v1.3.14 parses, preserves data and integrates a guarded chrome layer',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.3\.13/);
-  assert.match(source,/const VERSION='1\.3\.13'/);
+  assert.match(source,/@version\s+1\.3\.14/);
+  assert.match(source,/const VERSION='1\.3\.14'/);
   assert.match(source,/KEY='xsf_userscript_v1'/);
   assert.match(source,/const KEY='xsf_display_settings_v1'/);
   assert.match(source,/root\.classList\.toggle\('xsf-guarded-ui', opts\.enabled===true && guarded\)/);
@@ -118,7 +118,7 @@ test('only safe navigation/side chrome is targeted within guarded CSS',()=>{
 });
 test('For You tab hiding is independent of the video guard',()=>{
   const yes=buildCss(active),no=buildCss({...active,hideForYou:false});
-  const rule='html.xsf-guarded-ui [data-testid="primaryColumn"] nav[role="navigation"] [role="tablist"] > div:first-child';
+  const rule='html.xsf-guard-home [data-testid="primaryColumn"] nav[role="navigation"] [role="tablist"] > div:first-child';
   assert.ok(yes.includes(rule));
   assert.ok(!no.includes(rule));
 });
