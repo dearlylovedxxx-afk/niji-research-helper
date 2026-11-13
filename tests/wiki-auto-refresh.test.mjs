@@ -48,5 +48,5 @@ test('auto-refresh scans mounted cards on both visibility and minute timer, only
  assert.match(script,/setInterval\(\(\) => \{[\s\S]{0,100}refreshVisibleResearchWiki\(\)/);
  assert.match(script,/if \(!force && !wikiEntryNeedsRefresh\(entry\)\) return/);
  assert.match(script,/wikiFetchedAt: Number\(fetchedAt\) > 0/);
- assert.match(script,/\/\/ @version\s+1\.0\.128/);
+ assert.match(script,/\/\/ @version\s+1\.0\.129/);
 });
