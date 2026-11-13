@@ -97,5 +97,5 @@ test('comment panel can collapse without changing the video overlay state',()=>{
   assert.match(script,/appendYoutubePriorityReplies\(card, \{type:'dom',root\}\)/);
   assert.match(script,/appendYoutubePriorityReplies\(block, entry, true\)/);
   assert.match(script,/const replyRoots = root\.querySelectorAll\(/);
-  assert.match(script,/@version\s+1\.0\.117/);
+  assert.match(script,/@version\s+1\.0\.129/);
 });
