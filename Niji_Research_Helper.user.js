@@ -465,7 +465,6 @@
     preferenceCloudTimer: null,
     preferenceCloudSuppress: 0,
     wikiCache: {},
-    apiSecretCrypto: null,
     apiSecretBusy: false,
     apiSecretReady: false,
     apiSecretStatus: 'Niji Cloudに接続するとAPIキーも自動同期します。',
@@ -1267,15 +1266,21 @@
         const lt=Number(a.updatedAt||0),rt=Number(b.updatedAt||0);
         const label=kind==='holodex'?'Holodex':'YouTube';
         let chosen;
-        if(lv===rv)chosen={value:lv,updatedAt:Math.max(lt,rt)};
+        // These two overrides are only reachable after explicit user
+        // confirmation in Advanced settings. Unlike the old logic, they
+        // reliably apply to every mismatch, not just unresolved timestamp
+        // conflicts.
+        if(lv!==rv && resolve==='local')
+          chosen={value:lv,updatedAt:Math.max(Date.now(),lt,rt+1)};
+        else if(lv!==rv && resolve==='cloud')
+          chosen={value:rv,updatedAt:rt};
+        else if(lv===rv)chosen={value:lv,updatedAt:Math.max(lt,rt)};
         else if(!rv && rt===0 && lv)chosen={value:lv,updatedAt:Math.max(lt,Date.now())};
         else if(!lv && lt===0 && rv)chosen={value:rv,updatedAt:rt};
         else if ((lv && rv && (!lt || !rt || lt===rt)) ||
                  (lv && !rv && rt>0 && !lt)) {
-          if (resolve==='local') chosen={value:lv,updatedAt:Math.max(Date.now(),lt,rt+1)};
-          else if (resolve==='cloud') chosen={value:rv,updatedAt:rt};
-          else { conflicts.push(label);chosen={value:rv,updatedAt:rt}; }
-        } else chosen=lt>rt?a:b;
+          conflicts.push(label);chosen={value:rv,updatedAt:rt};
+        }else chosen=lt>rt?a:b;
         merged[kind]={value:String(chosen.value||''),updatedAt:Number(chosen.updatedAt||0)};
         if(merged[kind].value!==rv || merged[kind].updatedAt!==rt)changes=true;
         // Do not overwrite existing, conflicting local credentials automatically.
