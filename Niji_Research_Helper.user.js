@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.128
+// @version      1.0.129
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.128';
+  const VERSION = '1.0.129';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM local cache; Niji Cloud shares only the separately encrypted v2 credentials
@@ -7970,6 +7970,9 @@
     x: null,
     y: null,
     scrollTop: 0,
+    // Priority comments use popover's browser TOP LAYER, which outranks any
+    // z-index on the NIJI settings panel. Temporarily suspend that layer.
+    panelSuspended: false,
   };
 
   function youtubePriorityOverlayWidthBounds(host = youtubeTimestampPlayerHost()) {
@@ -8101,6 +8104,11 @@
 
   function styleYoutubePriorityOverlay(root) {
     if (!root) return;
+    // A late player position refresh must not reveal comments over the panel.
+    if (youtubePriorityOverlayUi.panelSuspended) {
+      root.style.setProperty('display', 'none', 'important');
+      return;
+    }
     const host = youtubeTimestampPlayerHost();
     if (!host) { root.style.display = 'none'; return; }
 
@@ -8184,6 +8192,34 @@
     return !!(videoId && state.youtubeTimestampPins?.[videoId]?.items?.length);
   }
 
+  function syncYoutubePriorityOverlayPanelVisibility(open) {
+    const wasSuspended=youtubePriorityOverlayUi.panelSuspended;
+    youtubePriorityOverlayUi.panelSuspended=!!open;
+    const root=$('#npf-yt-priority-overlay');
+    if(open) {
+      if(!root)return;
+      // popover="manual" is in the browser top layer, above ANY CSS z-index.
+      // Removing it from that layer, not merely raising the settings z-index,
+      // is required on iPhone/iPad Safari.
+      try {
+        if(root.matches?.(':popover-open')) root.hidePopover?.();
+      }catch(error) {
+        console.debug('[NRH][priority panel suspend]',String(error?.message||error));
+      }
+      root.style.setProperty('display','none','important');
+      root.style.setProperty('pointer-events','none','important');
+      return;
+    }
+    if(!wasSuspended)return;
+    // Restore the existing overlay, scroll state, pin logic and popover only
+    // after closing the NIJI panel. No data or saved positions are changed.
+    if(root) {
+      root.style.removeProperty('display');
+      root.style.removeProperty('pointer-events');
+    }
+    ensureYoutubePriorityOverlay();
+  }
+
   function ensureYoutubePriorityOverlay(force = false) {
     const videoId = currentYoutubeVideoId();
     const existing = $('#npf-yt-priority-overlay');
@@ -8204,6 +8240,16 @@
       existing?.remove();
       youtubePriorityOverlayUi.stamp = '';
       return null;
+    }
+
+    // Even if comment scanning updates while settings are open, do not
+    // recreate the top-layer popover above the settings sheet.
+    if (youtubePriorityOverlayUi.panelSuspended) {
+      if(existing) {
+        try { if(existing.matches?.(':popover-open')) existing.hidePopover?.(); } catch {}
+        existing.style.setProperty('display','none','important');
+      }
+      return existing || null;
     }
 
     const host = youtubeTimestampPlayerHost();
@@ -10153,6 +10199,7 @@
     panel.style.setProperty('opacity', open ? '1' : '0', 'important');
     panel.style.setProperty('pointer-events', open ? 'auto' : 'none', 'important');
     if (mobileFab) mobileFab.style.setProperty('display', open ? 'none' : 'flex', 'important');
+    syncYoutubePriorityOverlayPanelVisibility(open);
   }
 
   function updateYoutubePanel() {
