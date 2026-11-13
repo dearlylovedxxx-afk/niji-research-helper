@@ -76,8 +76,8 @@ test('all research read, restore and verification paths share the validated deco
  assert.match(script,/cloud\.status='☁️ 圧縮バックアップを読み戻して検証中/);
  assert.match(script,/const RESEARCH_CLOUD_COMPRESSED_VERSION = NRH_DB_VERSION \+ 1000/);
  assert.match(script,/\/v1\/backups/);
- assert.match(script,/\/\/ @version\s+1\.0\.128/);
- assert.match(meta,/\/\/ @version\s+1\.0\.128/);
+ assert.match(script,/\/\/ @version\s+1\.0\.129/);
+ assert.match(meta,/\/\/ @version\s+1\.0\.129/);
 });
 
 test('safe complete-merged global backup subsumes only older device backups',()=>{
@@ -101,6 +101,6 @@ test('the previously silent merge now reports steps and never drops newer device
  assert.match(script,/researchCloudCanUseMergedGlobal\(latestByDevice,cachedGlobal\)/);
  assert.match(script,/const required=useGlobalOnly\?\[globalItem\]:candidates/);
  assert.match(script,/await new Promise\(resolve=>setTimeout\(resolve,0\)\)/);
- assert.match(script,/\/\/ @version\s+1\.0\.128/);
- assert.match(meta,/\/\/ @version\s+1\.0\.128/);
+ assert.match(script,/\/\/ @version\s+1\.0\.129/);
+ assert.match(meta,/\/\/ @version\s+1\.0\.129/);
 });
