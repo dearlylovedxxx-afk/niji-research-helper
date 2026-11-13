@@ -1,3 +1,10 @@
+## Niji Research Helper v1.0.129：優先コメントとNIJI設定パネルの重なりを修正
+
+- iPhone・iPadのYouTubeで「⭐ 優先コメント」が総合設定パネルより前面に出る原因は、優先コメントが `popover="manual"` のブラウザ最前面（top layer）を利用していたこと。CSSの `z-index` では前後関係を逆転できない。
+- NIJIのパネルを開くと `hidePopover()` で優先コメントをtop layerから外して非表示にし、操作をブロックしない。パネルを閉じると元のプレーヤー上の位置・幅・表示状態を再開。
+- パネル表示中に優先コメントが再走査されてもPopoverを再生成しない。パネル以外の画面では以前と同じポップオーバーを利用し、優先コメントのデータや時刻リンクには触れない。
+- Macaque / Safari実機では未検証。
+
 ## Niji Research Helper v1.0.128：Niji Cloud接続だけでAPIキーも自動共有
 
 - HolodexとYouTube Data APIキーは、Niji Cloud接続トークンからHKDF-SHA256で派生させた別用途のAES-256-GCM鍵で暗号化し、既存の専用ストリーム `nrh-api-secrets-global` に保存。追加の合言葉・別端末への合言葉入力は不要。
