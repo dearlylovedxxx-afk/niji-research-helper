@@ -134,6 +134,25 @@ test('editing one API key syncs automatically without deleting the other',async(
   assert.equal(phone.store.get(HOLO),'hd-old');
   assert.equal(cloud.rows.length,2);
 });
+test('unresolved existing keys are protected until user chooses which device wins',async()=>{
+  const cloud=new FakeCloud();
+  await client(cloud,{keys:{holodex:'cloud-hd',youtube:'cloud-yt'}}).api.initialize();
+  const other=client(cloud,{keys:{holodex:'different-local-hd'}});
+  await other.api.initialize();
+  assert.equal(other.store.get(HOLO),'different-local-hd');
+  assert.equal(cloud.rows.length,1);
+  assert.match(other.state.apiSecretStatus,/不一致/);
+  await other.api.sync({manual:true,resolve:'cloud'});
+  assert.equal(other.store.get(HOLO),'cloud-hd');
+  assert.equal(other.store.get(YT),'cloud-yt');
+  assert.equal(cloud.rows.length,1);
+  await other.GM.setValue(HOLO,'my-new-local-hd');
+  await other.api.sync({manual:true,resolve:'local'});
+  assert.equal(cloud.rows.length,2);
+  const fresh=client(cloud);await fresh.api.initialize();
+  assert.equal(fresh.store.get(HOLO),'my-new-local-hd');
+  assert.equal(fresh.store.get(YT),'cloud-yt');
+});
 test('unconnected client remains local; connected client with zero keys does not upload empty data',async()=>{
   const cloud=new FakeCloud();
   const offline=client(cloud,{connected:false,keys:{youtube:'stay-local'}});
