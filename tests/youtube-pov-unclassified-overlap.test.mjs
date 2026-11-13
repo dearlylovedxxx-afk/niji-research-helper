@@ -61,10 +61,10 @@ function viewer(matches){
   return {area,run};
 }
 
-test('v1.0.127 source and metadata parse',()=>{
+test('v1.0.128 source and metadata parse',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.0\.127/);
-  assert.match(meta,/@version\s+1\.0\.127/);
+  assert.match(source,/@version\s+1\.0\.128/);
+  assert.match(meta,/@version\s+1\.0\.128/);
 });
 test('same-time opponent without recognizable game is no longer silently hidden',()=>{
   const {area}=viewer([movie('LMNOPQRSTUV','rival game title missing')]);
