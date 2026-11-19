@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.7
+// @version      0.1.8
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -40,6 +40,22 @@
     ...Array.from({length:7},(_,i)=>(2020+i)+'年デビュー')
   ];
   const GROUP_ORDER=new Map(GROUPS.map((name,index)=>[name,index]));
+
+  // The Wiki's YouTube page marks former JP members with a gray background.
+  // Some rendered skins discard this background in HTML text extraction.
+  // Keep this source-verified snapshot as a fallback, then honor newer
+  // status markers/official roster when available. Do not mark returning
+  // members such as 鈴原るる as graduates merely because of old reports.
+  const WIKI_FORMER_JP_FALLBACK=new Set([
+    '勇気ちひろ','鈴谷アキ','鈴鹿詩子','闇夜乃モルル','雪汝',
+    '海夜叉神','名伽尾アズマ','出雲霞','安土桃','八朔ゆず',
+    '鳴門こがね','月見しずく','遠北千南','成瀬鳴',
+    '童田明治','久遠千歳','郡道美玲','小野町春香','瀬戸美夜子',
+    '御伽原江良','黛灰','相羽ういは','グウェル・オス・ガール',
+    '奈羅花','メリッサ・キンレンカ','金魚坂めいろ','朝日南アカネ',
+    'アクシア・クローネ'
+  ].map(normalize));
+
   function headerGroup(title) {
     const value=text(title).replace(/[〜～~]/g,'～');
     for(const key of GROUPS.slice(0,5)) {
@@ -96,12 +112,12 @@
   function readCache() {
     try {
       const value = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
-      if (!value || value.schema!==2 || !Array.isArray(value.items) || value.items.length < 10) return null;
+      if (!value || value.schema!==3 || !Array.isArray(value.items) || value.items.length < 10) return null;
       return value;
     } catch { return null; }
   }
   function saveCache(items) {
-    const value = {schema:2,at:Date.now(),items};
+    const value = {schema:3,at:Date.now(),items};
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(value)); } catch {}
     roster = value;
     tellCloud();
@@ -320,12 +336,11 @@
       if(header) {
         const title=text(header[1]);
         const g=headerGroup(title);
-        if(g) {
-          group=g;year=g.includes('2019')?2019:GROUP_ORDER.has(g)?(GROUP_ORDER.get(g)<5?2018:Number(g.slice(0,4))):2018;
-          enabled=true;
-        }else if(/NIJISANJI\s*(?:ID|KR|EN|IN)|VirtuaReal|海外|公式チャンネル|個別チャンネルを持つユニット/i.test(title)){
-          enabled=false;group='';
-        }
+        // Treat the Wiki's headings as whitelist boundaries. The group/units
+        // section comes right after the 2026 livers; never inherit 2026.
+        enabled=!!g;
+        group=g||'';
+        if(g)year=g.includes('2019')?2019:GROUP_ORDER.has(g)?(GROUP_ORDER.get(g)<5?2018:Number(g.slice(0,4))):2018;
       }
       if(!enabled||!raw.startsWith('-'))continue;
       const link=raw.match(/https?:\/\/(?:www\.)?youtube\.com\/(?:@[^\s\],>};]+|channel\/UC[a-zA-Z0-9_-]{22})/i);
@@ -340,7 +355,8 @@
       const key=normalize(label);
       if(found.has(key))continue;
       found.add(key);
-      const graduated=/&color\(,\s*#(?:ddd|dddddd)\)/i.test(raw);
+      const graduated=/&color\(,\s*#(?:ddd|dddddd)\)/i.test(raw) ||
+        WIKI_FORMER_JP_FALLBACK.has(normalize(label));
       records.push({name:label,year,group,url,graduated,order:ordinal++,date:'',avatar:'',
         archived:null,archiveCheckedAt:0});
     }
@@ -360,6 +376,10 @@
         if (/NIJISANJI\s*(?:ID|KR|EN|IN)|VirtuaReal/i.test(title)) enabled=false;
         else if (/^(?:1期生出身|2期生出身|ゲーマーズ出身|SEEDs[12１２]期生出身)|20(?:1[8-9]|2\d)年.*デビュー/.test(title)) {
           enabled=true;former=false;date='';cohortDate='';
+        } else if(/^元メンバー/.test(title)) {
+          former=true;date=cohortDate;
+        } else if(/^メンバー/.test(title)) {
+          former=false;date=cohortDate;
         }
       }
       if (!enabled) continue;
@@ -401,7 +421,7 @@
         (year===2018?row.group:year+'年デビュー');
       const old=previous.get(row.url);
       return {...row,year,date,group,
-        graduated:matched?.graduated??row.graduated,
+        graduated:row.graduated===true || matched?.graduated===true,
         avatar:old?.avatar||'',archived:old?.archived===true?true:old?.archived===false?false:null,
         archiveCheckedAt:Number(old?.archiveCheckedAt||0),
         officialOrder:matched?.order??row.order};
@@ -680,7 +700,7 @@
       const toggle=el('button','nj-former-group');
       toggle.type='button';toggle.setAttribute('aria-expanded',String(showFormer));
       toggle.append(el('span','', '卒業済'),el('span','nj-chevron',
-        (showFormer?'▾':'▸')+' '+saved.length+'件'));
+        (showFormer?'▾':'▸')+' '+saved.length+'/'+retired.length+'名'));
       toggle.addEventListener('click',()=>{
         state.years[formerKey]=!showFormer;
         persistState();
