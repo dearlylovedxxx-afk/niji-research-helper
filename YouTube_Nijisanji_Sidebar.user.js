@@ -1239,11 +1239,12 @@
   }
 
   function liveHubRawPreviewUrl(html,videoId) {
-    // Some responses contain an_webp as an escaped JSON string without
-    // the movingThumbnailRenderer wrapper.
-    const raw=String(html||'');
-    const regex=new RegExp('https?:\\\\/\\\\/(?:i|i\\\\d+)\\\\.ytimg\\\\.com\\\\/an_webp\\\\/'+videoId+'\\\\/[^"\\\\s<>]+?\\\\.webp(?:\\\\?[^"\\\\s<>]*)?','g');
-    for(const match of raw.matchAll(regex)) {
+    // YouTube can escape slashes and ampersands inside JSON blobs.
+    const text=String(html||'').replace(/\\\//g,'/').replace(/\\u0026/gi,'&')
+      .replace(/&amp;/g,'&');
+    const matches=text.matchAll(/https?:\/\/(?:i|i\d+)\.ytimg\.com\/an_webp\/([A-Za-z0-9_-]{11})\/[^"'\s<>]+?\.webp(?:\?[^"'\s<>]*)?/g);
+    for(const match of matches) {
+      if(match[1]!==videoId)continue;
       const url=liveHubAnimatedUrl(match[0],videoId);
       if(url)return url;
     }
@@ -1252,7 +1253,7 @@
 
   async function liveHubFindAnimatedPreview(videoId) {
     const existing=liveHubPreviewCache.get(videoId);
-    if(existing && Date.now()-existing.at<LIVE_HUB_PREVIEW_CACHE_MS)return existing.url;
+    if(existing && Date.now()-existing.at<(existing.url?LIVE_HUB_PREVIEW_CACHE_MS:3*60*1000))return existing.url;
     // Search returns the signed URL YouTube issues for eligible videos.
     const target='https://www.youtube.com/results?search_query='+encodeURIComponent(videoId);
     try {
