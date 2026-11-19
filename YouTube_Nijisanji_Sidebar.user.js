@@ -845,7 +845,91 @@
     }finally{clearTimeout(timeout);}
   }
 
-  function isLiveNow(channelUrl) {
+
+  // First use the very same live badge that YouTube paints next to a
+  // subscribed channel in its native sidebar. This can reflect live status
+  // without scraping a second page, and works when /live redirects differ.
+  const nativeLiveChannels=new Set();
+  const nativeLiveNames=new Set();
+  let nativeRefreshPending=false;
+
+  function nativeChannelPath(raw) {
+    try {
+      const u=new URL(raw,location.origin);
+      if(!['youtube.com','www.youtube.com','m.youtube.com'].includes(u.hostname))return '';
+      const path=decodeURIComponent(u.pathname).replace(/\/+$/,'').toLowerCase();
+      return /^(?:\/@[^/]+|\/channel\/uc[a-z0-9_-]{22})$/.test(path)?path:'';
+    }catch{return '';}
+  }
+
+  function nativeLiveEntry(entry) {
+    if(!entry)return false;
+    if(entry.matches?.('[is-live],[live]'))return true;
+    const markers=entry.querySelectorAll(
+      '.ytSpecAvatarShapeLiveBadgeText,.yt-spec-avatar-shape__live-badge-text,'+
+      '.ytSpecAvatarShapeLiveBadge,.yt-spec-avatar-shape--live,'+
+      '.badge-style-type-live-now-alternate,'+
+      '[class*="AvatarShapeLive"],[class*="badge-style-type-live-now"],'+
+      '[icon="LIVE"],[icon="yt-icons:live"],'+
+      '[aria-label*="ライブ配信中"],[aria-label*="配信中"],'+
+      '[aria-label*="Live now"]'
+    );
+    for(const mark of markers){
+      if(mark.getAttribute('aria-hidden')==='true')continue;
+      if(mark.matches?.('.ytSpecAvatarShapeLiveBadgeText') && mark.textContent?.trim().toUpperCase()!=='LIVE')continue;
+      return true;
+    }
+    // Some YouTube sidebar variants indicate live status on the entry
+    // itself instead of drawing an avatar ring in DOM.
+    return entry.getAttribute('line-end-style')==='badge'
+      && !!entry.querySelector('[class*="badge"],[class*="Badge"],yt-icon');
+  }
+
+  function nativeName(entry) {
+    const label=entry.querySelector('#text,yt-formatted-string,#title')?.textContent||
+      entry.querySelector('a[title]')?.getAttribute('title')||'';
+    return normalize(String(label).split(/[\/｜|]/)[0]);
+  }
+
+  function refreshNativeLiveSignals() {
+    const section=findSubscriptions();
+    if(!section)return false;
+    const nextChannels=new Set(),nextNames=new Set();
+    for(const entry of section.querySelectorAll('ytd-guide-entry-renderer,ytd-guide-collapsible-entry-renderer')){
+      if(!nativeLiveEntry(entry))continue;
+      const link=entry.querySelector('a[href]');
+      const path=link?nativeChannelPath(link.getAttribute('href')):'';
+      const name=nativeName(entry);
+      if(path)nextChannels.add(path);
+      if(name)nextNames.add(name);
+    }
+    const oldKey=[...nativeLiveChannels].sort().join('|')+'/'+[...nativeLiveNames].sort().join('|');
+    const newKey=[...nextChannels].sort().join('|')+'/'+[...nextNames].sort().join('|');
+    if(newKey===oldKey)return false;
+    nativeLiveChannels.clear();nativeLiveNames.clear();
+    for(const key of nextChannels)nativeLiveChannels.add(key);
+    for(const name of nextNames)nativeLiveNames.add(name);
+    return true;
+  }
+
+  function scheduleNativeLiveRefresh() {
+    if(nativeRefreshPending)return;
+    nativeRefreshPending=true;
+    setTimeout(()=>{
+      nativeRefreshPending=false;
+      if(refreshNativeLiveSignals() && state.open)render();
+    },500);
+  }
+
+  function nativeIsLive(row) {
+    if(!row)return false;
+    const paths=[row.url,...(row.alternates||[])].map(nativeChannelPath).filter(Boolean);
+    if(paths.some(path=>nativeLiveChannels.has(path)))return true;
+    return nativeLiveNames.has(normalize(row.name));
+  }
+
+  function isLiveNow(channelUrl,row=null) {
+    if(row && nativeIsLive(row))return true;
     const result=liveChecks.get(channelUrl);
     return !!(result?.live===true && Date.now()-result.checkedAt<LIVE_DISPLAY_TTL_MS);
   }
@@ -864,6 +948,7 @@
 
   function queueVisibleLiveChecks() {
     if(!roster || !state.open || document.visibilityState==='hidden')return;
+    scheduleNativeLiveRefresh();
     for(const row of roster.items){
       if(!row.graduated && state.years[row.group]===true)enqueueLive(row);
     }
@@ -943,7 +1028,7 @@
     return node;
   }
   function personLink(row) {
-    const activeLive=!row.graduated && isLiveNow(row.url);
+    const activeLive=!row.graduated && isLiveNow(row.url,row);
     const a=el('a','nj-person'+(row.graduated?' nj-former':'')+(activeLive?' nj-live':''));
     a.href=row.url;
     a.title=row.name+(row.date?'（'+row.date+'デビュー）':'')+
@@ -1118,7 +1203,10 @@
     pendingMount=true;
     queueMicrotask(mount);
   }
-  const observer=new MutationObserver(scheduleMount);
+  const observer=new MutationObserver(()=>{
+    scheduleMount();
+    if(state.open)scheduleNativeLiveRefresh();
+  });
   observer.observe(document.documentElement,{childList:true,subtree:true});
   document.addEventListener('yt-navigate-finish',scheduleMount);
   document.addEventListener('yt-page-data-updated',()=>{
@@ -1126,12 +1214,16 @@
     queueVisibleLiveChecks();
   });
   document.addEventListener('visibilitychange',()=>{
-    if(document.visibilityState==='visible')queueVisibleLiveChecks();
+    if(document.visibilityState==='visible'){
+      scheduleNativeLiveRefresh();
+      queueVisibleLiveChecks();
+    }
   });
   setInterval(()=>{
     queueVisibleLiveChecks();
     if(state.open && [...liveChecks.values()].some(x=>x.live && Date.now()-x.checkedAt>=LIVE_DISPLAY_TTL_MS))render();
   },60*1000);
   scheduleMount();
+  scheduleNativeLiveRefresh();
   void updateRoster();
 })();
