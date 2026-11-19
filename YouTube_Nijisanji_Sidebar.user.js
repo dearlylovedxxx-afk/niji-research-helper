@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.6
+// @version      0.1.7
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -662,6 +662,8 @@
       });
       host.append(button);
       if(!open)continue;
+      // On reload, restore avatars/archive checks for already-open groups.
+      loadGroupMedia(group,state.years['former:'+group]===true);
       const active=rows.filter(row=>!row.graduated);
       const retired=rows.filter(row=>row.graduated);
       const currentList=el('div','nj-rows');
