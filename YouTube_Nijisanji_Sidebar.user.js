@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.2.1
+// @version      0.2.2
 // @description  にじさんじをデビュー期別に表示。公開配信中は赤リングとLIVE印、卒業済はアーカイブ確認後に表示。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -1017,6 +1017,8 @@
   let liveHubCards=[],liveHubError='',liveHubMatched=0,liveHubSourceCount=0;
   let liveHubHoverTimer=null,liveHubActivePreview=null;
   let liveHubPreviewGeneration=0;
+  let liveHubFrameTimer=null;
+  let liveHubPreviewStatus=null;
   const liveHubPreviewCache=new Map();
   const LIVE_HUB_PREVIEW_CACHE_MS=60*60*1000;
 
@@ -1163,6 +1165,8 @@
       '#'+LIVE_HUB_ID+' .nh-thumb{position:relative;display:block;width:100%;aspect-ratio:16/9;background:#111;overflow:hidden;border-radius:12px;text-decoration:none;color:#fff}',
       '#'+LIVE_HUB_ID+' .nh-thumb>img{display:block;width:100%;height:100%;object-fit:cover}',
       '#'+LIVE_HUB_ID+' .nh-moving-preview{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover;pointer-events:none}',
+      '#'+LIVE_HUB_ID+' .nh-preview-status{position:absolute;z-index:4;bottom:37px;left:8px;right:8px;padding:6px 9px;border-radius:6px;font-size:12px;font-weight:600;line-height:1.35;color:#fff;background:rgba(0,0,0,.75);pointer-events:none;text-align:center}',
+      '#'+LIVE_HUB_ID+' .nh-preview-unavailable{background:rgba(40,40,40,.85)}',
       '#'+LIVE_HUB_ID+' .nh-badge{position:absolute;left:10px;top:10px;z-index:2;background:#e21b38;color:#fff;font-size:12px;font-weight:700;border-radius:4px;padding:4px 6px}',
       '#'+LIVE_HUB_ID+' .nh-viewers{position:absolute;right:8px;bottom:8px;z-index:2;background:rgba(0,0,0,.8);font-size:12px;border-radius:4px;padding:4px 7px}',
       '#'+LIVE_HUB_ID+' .nh-info{display:flex;gap:10px;padding:12px 2px 0}',
@@ -1268,13 +1272,103 @@
     }
   }
 
+  function liveHubPreviewStillActive(thumb,generation) {
+    return generation===liveHubPreviewGeneration && thumb.isConnected &&
+      thumb.matches(':hover') && liveHubActive() && document.visibilityState!=='hidden';
+  }
+
+  function liveHubPreviewStatusOn(thumb,message,kind='note') {
+    if(liveHubPreviewStatus)liveHubPreviewStatus.remove();
+    const status=el('span','nh-preview-status nh-preview-'+kind,message);
+    status.setAttribute('aria-live','polite');
+    thumb.append(status);
+    liveHubPreviewStatus=status;
+  }
+
+  function liveHubPreviewImage(url) {
+    return new Promise(resolve=>{
+      const img=new Image();
+      let completed=false;
+      const complete=value=>{
+        if(completed)return;
+        completed=true;
+        clearTimeout(timeout);
+        img.onload=null;
+        img.onerror=null;
+        resolve(value);
+      };
+      const timeout=setTimeout(()=>complete(null),2200);
+      img.onload=()=>{
+        // YouTube returns a 120x90 "image unavailable" placeholder
+        // with HTTP 200; don't treat it as a valid video frame.
+        if(img.naturalWidth<240||img.naturalHeight<130)complete(null);
+        else complete(url);
+      };
+      img.onerror=()=>complete(null);
+      img.src=url;
+    });
+  }
+
+  async function liveHubFrameFallback(thumb,item,generation) {
+    if(!liveHubPreviewStillActive(thumb,generation))return;
+    liveHubPreviewStatusOn(thumb,'場面画像を確認中…');
+    const options=['hq1.jpg','hq2.jpg','hq3.jpg']
+      .map(name=>'https://i.ytimg.com/vi/'+item.id+'/'+name);
+    const frames=(await Promise.all(options.map(liveHubPreviewImage))).filter(Boolean);
+    if(!liveHubPreviewStillActive(thumb,generation))return;
+    if(frames.length<2) {
+      liveHubPreviewStatusOn(thumb,'プレビュー画像なし・クリックして配信を見る','unavailable');
+      return;
+    }
+    const image=el('img','nh-moving-preview');
+    image.alt='';
+    image.decoding='async';
+    image.referrerPolicy='strict-origin-when-cross-origin';
+    image.src=frames[0];
+    thumb.append(image);
+    liveHubActivePreview=thumb;
+    liveHubPreviewStatusOn(thumb,'場面画像の切替（リアルタイム映像ではありません）','frames');
+    let index=0;
+    liveHubFrameTimer=setInterval(()=>{
+      if(!liveHubPreviewStillActive(thumb,generation)){
+        liveHubStopPreview();
+        return;
+      }
+      index=(index+1)%frames.length;
+      image.src=frames[index];
+    },600);
+  }
+
+  async function liveHubApplyMovingPreview(thumb,item,url,generation) {
+    // A missing/corrupt animated webp must not swallow the fallback.
+    // Cache a valid result only after checking its dimensions.
+    const valid=await liveHubPreviewImage(url);
+    if(!liveHubPreviewStillActive(thumb,generation))return;
+    if(!valid){
+      const cache=liveHubPreviewCache.get(item.id);
+      if(cache?.url===url)liveHubPreviewCache.delete(item.id);
+      await liveHubFrameFallback(thumb,item,generation);
+      return;
+    }
+    const moving=el('img','nh-moving-preview');
+    moving.alt='';
+    moving.decoding='async';
+    moving.referrerPolicy='strict-origin-when-cross-origin';
+    moving.src=valid;
+    thumb.append(moving);
+    liveHubActivePreview=thumb;
+    liveHubPreviewStatusOn(thumb,'YouTubeプレビュー（リアルタイム映像ではありません）','animated');
+  }
+
   function liveHubStopPreview() {
     liveHubPreviewGeneration++;
     if(liveHubHoverTimer){clearTimeout(liveHubHoverTimer);liveHubHoverTimer=null;}
-    if(liveHubActivePreview){
+    if(liveHubFrameTimer){clearInterval(liveHubFrameTimer);liveHubFrameTimer=null;}
+    if(liveHubActivePreview) {
       liveHubActivePreview.querySelector('.nh-moving-preview')?.remove();
       liveHubActivePreview=null;
     }
+    if(liveHubPreviewStatus){liveHubPreviewStatus.remove();liveHubPreviewStatus=null;}
   }
 
   function liveHubCard(item) {
@@ -1293,30 +1387,21 @@
       const generation=liveHubPreviewGeneration;
       liveHubHoverTimer=setTimeout(async()=>{
         liveHubHoverTimer=null;
-        if(!thumb.isConnected||!liveHubActive()||document.visibilityState==='hidden')return;
+        if(!liveHubPreviewStillActive(thumb,generation))return;
+        liveHubPreviewStatusOn(thumb,'プレビューを確認中…');
+        // Search for a signed YouTube moving-thumbnail URL first.
+        // It is normally unavailable for active livestreams.
         const url=await liveHubFindAnimatedPreview(item.id);
-        if(!url || generation!==liveHubPreviewGeneration ||
-          !thumb.matches(':hover') || !thumb.isConnected || !liveHubActive())return;
-        // Preload the animation; failures keep the original static image.
-        const moving=el('img','nh-moving-preview');
-        moving.alt='';
-        moving.decoding='async';
-        moving.referrerPolicy='strict-origin-when-cross-origin';
-        moving.onload=()=>{
-          if(generation!==liveHubPreviewGeneration||!thumb.isConnected||
-            !thumb.matches(':hover'))return;
-          thumb.append(moving);
-          liveHubActivePreview=thumb;
-        };
-        moving.onerror=()=>{
-          const cache=liveHubPreviewCache.get(item.id);
-          if(cache?.url===url)liveHubPreviewCache.delete(item.id);
-        };
-        moving.src=url;
+        if(!liveHubPreviewStillActive(thumb,generation))return;
+        if(url)await liveHubApplyMovingPreview(thumb,item,url,generation);
+        else await liveHubFrameFallback(thumb,item,generation);
       },420);
     };
     thumb.addEventListener('mouseenter',start);
-    thumb.addEventListener('mouseleave',liveHubStopPreview);
+    thumb.addEventListener('mouseleave',()=>{
+      // The last status also disappears when leaving the tile.
+      liveHubStopPreview();
+    });
     thumb.addEventListener('focus',()=>{});
     card.append(thumb);
     const details=el('div','nh-info');
@@ -1349,7 +1434,7 @@
     close.addEventListener('click',()=>location.assign('https://www.youtube.com/'));
     top.append(refresh,close);wrap.append(top);
     const meta=el('div','nh-meta',
-      '同時視聴者数の多い順 ・ 約3分ごとに自動更新'+
+      '同時視聴者数の多い順 ・ 約3分ごとに自動更新 ・ ホバー時は利用可能なプレビュー／場面画像を表示（リアルタイム映像ではありません）'+
       (liveHubLastAt?' ・ 取得候補 '+liveHubSourceCount+'件／JP一致 '+liveHubMatched+'件':'')+
       (liveHubLastAt?' ・ 取得 '+new Date(liveHubLastAt).toLocaleTimeString('ja-JP'):'')+
       ' ・ 取得元：');
