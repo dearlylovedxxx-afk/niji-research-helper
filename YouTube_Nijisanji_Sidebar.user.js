@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.2.2
+// @version      0.2.3
 // @description  にじさんじをデビュー期別に表示。公開配信中は赤リングとLIVE印、卒業済はアーカイブ確認後に表示。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -1020,6 +1020,7 @@
   let liveHubFrameTimer=null;
   let liveHubPreviewStatus=null;
   const liveHubPreviewCache=new Map();
+  const liveHubPreviewPending=new Map();
   const LIVE_HUB_PREVIEW_CACHE_MS=60*60*1000;
 
   function liveHubActive() {
@@ -1257,19 +1258,37 @@
 
   async function liveHubFindAnimatedPreview(videoId) {
     const existing=liveHubPreviewCache.get(videoId);
-    if(existing && Date.now()-existing.at<(existing.url?LIVE_HUB_PREVIEW_CACHE_MS:3*60*1000))return existing.url;
-    // Search returns the signed URL YouTube issues for eligible videos.
+    if(existing && Date.now()-existing.at<(existing.url?LIVE_HUB_PREVIEW_CACHE_MS:3*60*1000))
+      return existing.url;
+    if(liveHubPreviewPending.has(videoId))
+      return liveHubPreviewPending.get(videoId);
+    // Search is best-effort: streams normally do not have an animated WebP.
     const target='https://www.youtube.com/results?search_query='+encodeURIComponent(videoId);
-    try {
-      const html=await mediaGet(target,1000);
-      const url=liveHubVideoRendererPreview(html,videoId)
-        || liveHubRawPreviewUrl(html,videoId);
-      liveHubPreviewCache.set(videoId,{url,at:Date.now()});
-      return url;
-    }catch(error) {
-      console.debug('[Nijisanji live hub][preview]',videoId,String(error?.message||error));
-      return '';
-    }
+    const pending=(async()=>{
+      try{
+        const html=await mediaGet(target,1000);
+        const url=liveHubVideoRendererPreview(html,videoId)||liveHubRawPreviewUrl(html,videoId);
+        liveHubPreviewCache.set(videoId,{url,at:Date.now()});
+        return url;
+      }catch(error){
+        console.debug('[Nijisanji live hub][preview]',videoId,String(error?.message||error));
+        // Don't permanently cache a transient network failure.
+        return '';
+      }finally{
+        liveHubPreviewPending.delete(videoId);
+      }
+    })();
+    liveHubPreviewPending.set(videoId,pending);
+    return pending;
+  }
+
+  function liveHubPreviewQuickly(videoId,waitMs=1400) {
+    // Search requests sometimes hang while YouTube is loading or limiting
+    // requests; do not delay the visible hover fallback indefinitely.
+    return Promise.race([
+      liveHubFindAnimatedPreview(videoId),
+      new Promise(resolve=>setTimeout(()=>resolve(''),waitMs))
+    ]);
   }
 
   function liveHubPreviewStillActive(thumb,generation) {
@@ -1391,7 +1410,7 @@
         liveHubPreviewStatusOn(thumb,'プレビューを確認中…');
         // Search for a signed YouTube moving-thumbnail URL first.
         // It is normally unavailable for active livestreams.
-        const url=await liveHubFindAnimatedPreview(item.id);
+        const url=await liveHubPreviewQuickly(item.id);
         if(!liveHubPreviewStillActive(thumb,generation))return;
         if(url)await liveHubApplyMovingPreview(thumb,item,url,generation);
         else await liveHubFrameFallback(thumb,item,generation);
