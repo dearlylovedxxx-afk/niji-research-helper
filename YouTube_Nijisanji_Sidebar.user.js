@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.2
+// @version      0.1.3
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -37,8 +37,19 @@
   let roster = readCache();
   let loading = false;
   let lastError = '';
+  let cloudStatus = '☁️ Niji Cloud同期を確認中';
   let host = null;
   let pendingMount = false;
+  window.addEventListener('nijisanji-sidebar:cloud-applied',()=>{
+    state=loadState();
+    const fresh=readCache();
+    if(fresh) roster=fresh;
+    render();
+  });
+  window.addEventListener('nijisanji-sidebar:cloud-status',event=>{
+    cloudStatus=String(event.detail?.message||'☁️ Niji Cloud状態不明');
+    render();
+  });
 
   function loadState() {
     try {
@@ -46,8 +57,12 @@
       return {open:data.open === true, years:data.years && typeof data.years === 'object' ? data.years : {}};
     } catch { return {...defaultState}; }
   }
+  function tellCloud() {
+    try { window.dispatchEvent(new CustomEvent('nijisanji-sidebar:changed',{detail:{schema:1}})); } catch {}
+  }
   function persistState() {
     try { localStorage.setItem(STATE_KEY, JSON.stringify(state)); } catch {}
+    tellCloud();
   }
   function readCache() {
     try {
@@ -60,6 +75,7 @@
     const value = {at:Date.now(),items};
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(value)); } catch {}
     roster = value;
+    tellCloud();
   }
   function validYouTubeUrl(raw) {
     try {
@@ -87,9 +103,10 @@
             if (res.status < 200 || res.status >= 300) {
               reject(new Error('Wiki HTTP ' + res.status)); return;
             }
-            const html = String(res.responseText ?? res.response ?? '');
-            if (!html.trim()) {reject(new Error('Wikiから空の応答がありました'));return;}
-            resolve(html);
+            const documentResponse=res.response?.nodeType===9 ? res.response : null;
+            const html = String(res.responseText ?? (typeof res.response==='string'?res.response:''));
+            if (!documentResponse && !html.trim()) {reject(new Error('Wikiから空の応答がありました'));return;}
+            resolve(documentResponse || html);
           },
           onerror:() => reject(new Error('Wikiに接続できませんでした')),
           ontimeout:() => reject(new Error('Wikiの応答がタイムアウトしました'))
@@ -103,8 +120,25 @@
 
   // Convert both Wiki-rendered HTML and raw Wiki-style text into a
   // line-oriented representation. This intentionally ignores nav/sidebar lists.
+  function parseWikiDocument(html) {
+    // YouTube requires TrustedHTML for DOMParser on Chromium/Edge.
+    if (html?.nodeType === 9 && html.documentElement) return html;
+    const raw = String(html || '');
+    let trusted = raw;
+    const tt = globalThis.trustedTypes;
+    if (tt?.createPolicy) {
+      try {
+        const name = 'marina-niji-wiki-parser';
+        const policy = tt.getPolicy?.(name) || tt.createPolicy(name,{createHTML:value=>value});
+        trusted = policy.createHTML(raw);
+      } catch (error) {
+        throw new Error('YouTubeのTrusted Types制限でWikiを解析できません：'+String(error?.message||error));
+      }
+    }
+    return new DOMParser().parseFromString(trusted, 'text/html');
+  }
   function wikiLines(html, type) {
-    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const doc = parseWikiDocument(html);
     const rawSources = [
       doc.querySelector('#content')?.textContent || '',
       doc.querySelector('main')?.textContent || '',
@@ -377,6 +411,7 @@
     if (!state.open) return;
     if (loading && !roster) host.append(el('div','nj-message','ライバー一覧を読み込んでいます…'));
     if (lastError) host.append(el('div','nj-message','データ取得：'+lastError));
+    host.append(el('div','nj-message',cloudStatus));
     if (!roster) {
       const retry=el('button','nj-refresh','🔄 一覧を読み込む');
       retry.addEventListener('click',()=>void updateRoster(true));
