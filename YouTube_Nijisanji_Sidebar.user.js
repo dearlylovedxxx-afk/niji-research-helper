@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.10
-// @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
+// @version      0.1.11
+// @description  にじさんじをデビュー期別に表示。公開配信中は赤リングとLIVE印、卒業済はアーカイブ確認後に表示。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
 // @run-at       document-idle
@@ -695,6 +695,135 @@
     }
   }
 
+
+  // Live badges use short-lived memory only. They must never become roster
+  // data or be uploaded to Niji Cloud. Only expanded current-member groups
+  // are checked to avoid hundreds of YouTube requests in the background.
+  const LIVE_CHECK_INTERVAL_MS = 3*60*1000;
+  const LIVE_DISPLAY_TTL_MS = 7*60*1000;
+  const LIVE_RETRY_MS = 90*1000;
+  const LIVE_MAX_PARALLEL = 2;
+  const LIVE_TIMEOUT_MS = 12000;
+  const liveChecks = new Map();
+  const liveQueued = new Set();
+  const liveJobs = [];
+  let liveRunning = 0;
+  let lastLiveNetworkAt = 0;
+
+  function playerResponseFromHtml(html) {
+    const raw=String(html||'');
+    const match=/(?:var\s+)?ytInitialPlayerResponse\s*=\s*/.exec(raw);
+    if(!match)return null;
+    const begin=raw.indexOf('{',match.index+match[0].length);
+    if(begin<0)return null;
+    let depth=0,inString=false,escaped=false;
+    for(let i=begin;i<raw.length&&i<begin+2000000;i++){
+      const c=raw[i];
+      if(inString){
+        if(escaped)escaped=false;
+        else if(c==='\\')escaped=true;
+        else if(c==='"')inString=false;
+        continue;
+      }
+      if(c==='"')inString=true;
+      else if(c==='{')depth++;
+      else if(c==='}' && --depth===0){
+        try{return JSON.parse(raw.slice(begin,i+1));}catch{return null;}
+      }
+    }
+    return null;
+  }
+
+  function liveStatusFromWatchHtml(html,finalUrl) {
+    let url;
+    try{url=new URL(finalUrl,location.origin);}catch{return {live:false,known:false};}
+    if(!/(?:^|\.)youtube\.com$/.test(url.hostname) ||
+      url.pathname!=='/watch' || !url.searchParams.get('v'))
+      return {live:false,known:false};
+    const data=playerResponseFromHtml(html);
+    if(!data)return {live:false,known:false};
+    const details=data.videoDetails||{};
+    const broadcast=data.microformat?.playerMicroformatRenderer?.liveBroadcastDetails||{};
+    const offline=data.playabilityStatus?.status==='LIVE_STREAM_OFFLINE';
+    const ended=!!broadcast.endTimestamp;
+    const upcoming=details.isUpcoming===true;
+    const explicitlyNow=broadcast.isLiveNow===true||details.isLive===true;
+    const explicitlyNot=broadcast.isLiveNow===false;
+    return {live:!offline&&!ended&&!upcoming&&!explicitlyNot&&explicitlyNow,known:true};
+  }
+
+  async function probeChannelLive(channelUrl) {
+    const target=channelUrl.replace(/\/+$/,'')+'/live';
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),LIVE_TIMEOUT_MS);
+    try{
+      const response=await fetch(target,{credentials:'include',redirect:'follow',
+        cache:'no-store',signal:controller.signal});
+      if(!response.ok)throw new Error('YouTube HTTP '+response.status);
+      const html=await response.text();
+      const status=liveStatusFromWatchHtml(html,response.url||target);
+      // YouTube normally redirects /live to /watch?v=... for current or
+      // scheduled broadcasts. If it stays on /live, there is no active stream.
+      if(status.known)return status.live;
+      const resolved=new URL(response.url||target,location.origin);
+      if(resolved.pathname==='/watch')
+        throw new Error('YouTubeの配信状態を解析できません');
+      return false;
+    }finally{clearTimeout(timeout);}
+  }
+
+  function isLiveNow(channelUrl) {
+    const result=liveChecks.get(channelUrl);
+    return !!(result?.live===true && Date.now()-result.checkedAt<LIVE_DISPLAY_TTL_MS);
+  }
+
+  function enqueueLive(row) {
+    if(!row?.url || row.graduated || !state.open || document.visibilityState==='hidden')return;
+    const key=row.url,entry=liveChecks.get(key);
+    const now=Date.now();
+    if(entry && now-entry.checkedAt<(entry.failed?LIVE_RETRY_MS:LIVE_CHECK_INTERVAL_MS))return;
+    if(liveQueued.has(key))return;
+    liveQueued.add(key);
+    liveJobs.push({key});
+    void drainLive();
+  }
+
+  function queueVisibleLiveChecks() {
+    if(!roster || !state.open || document.visibilityState==='hidden')return;
+    for(const row of roster.items){
+      if(!row.graduated && state.years[row.group]===true)enqueueLive(row);
+    }
+  }
+
+  async function drainLive() {
+    while(liveRunning<LIVE_MAX_PARALLEL && liveJobs.length){
+      const job=liveJobs.shift();
+      liveRunning++;
+      void (async()=>{
+        try{
+          const gap=Math.max(0,lastLiveNetworkAt+650-Date.now());
+          if(gap)await new Promise(resolve=>setTimeout(resolve,gap));
+          lastLiveNetworkAt=Date.now();
+          const wasLive=isLiveNow(job.key);
+          const currentlyLive=await probeChannelLive(job.key);
+          liveChecks.set(job.key,{live:currentlyLive,checkedAt:Date.now(),failed:false});
+          if(wasLive!==currentlyLive)render();
+        }catch(error){
+          // Failure is unknown, not evidence that a livestream ended.
+          // Hide stale badges after the display TTL rather than guessing.
+          const previous=liveChecks.get(job.key);
+          liveChecks.set(job.key,{live:previous?.live===true,
+            checkedAt:previous?.checkedAt||0,failed:true,attemptAt:Date.now()});
+          console.debug('[Nijisanji sidebar][LIVE]',job.key,String(error?.message||error));
+        }finally{
+          liveQueued.delete(job.key);
+          liveRunning--;
+          void drainLive();
+        }
+      })();
+    }
+  }
+
   function styles() {
     if (document.getElementById(CSS_ID)) return;
     const st=document.createElement('style');
@@ -714,6 +843,8 @@
       '#'+ROOT_ID+' .nj-person{min-height:40px;margin:1px 4px;padding:5px 7px;border-radius:10px;display:flex;align-items:center;gap:10px;color:inherit;text-decoration:none;font-size:13px;white-space:nowrap;overflow:hidden}',
       '#'+ROOT_ID+' .nj-person.nj-former{background:rgba(128,128,128,.15);color:var(--yt-spec-text-secondary,#777)}',
       '#'+ROOT_ID+' .nj-person.nj-former:hover{background:rgba(128,128,128,.26)}',
+      '#'+ROOT_ID+' .nj-person.nj-live .nj-face{outline:2px solid #f02838;outline-offset:2px}',
+      '#'+ROOT_ID+' .nj-live-badge{font-size:10px;line-height:1;color:#e31937;white-space:nowrap;font-weight:700;letter-spacing:.1px;flex-shrink:0}',
       '#'+ROOT_ID+' .nj-face{width:27px;height:27px;border-radius:50%;object-fit:cover;flex-shrink:0;background:var(--yt-spec-10-percent-layer,#eee)}',
       '#'+ROOT_ID+' .nj-fallback{display:grid;place-items:center;font-size:12px;font-weight:700}',
       '#'+ROOT_ID+' .nj-name{overflow:hidden;text-overflow:ellipsis;flex:1}',
@@ -735,7 +866,8 @@
     return node;
   }
   function personLink(row) {
-    const a=el('a','nj-person'+(row.graduated?' nj-former':''));
+    const activeLive=!row.graduated && isLiveNow(row.url);
+    const a=el('a','nj-person'+(row.graduated?' nj-former':'')+(activeLive?' nj-live':''));
     a.href=row.url;
     a.title=row.name+(row.date?'（'+row.date+'デビュー）':'')+
       (row.graduated?'・卒業／活動終了（公開アーカイブ確認済み）':'');
@@ -750,6 +882,10 @@
       a.append(img);
     } else a.append(el('span','nj-face nj-fallback',row.name.slice(0,1)));
     a.append(el('span','nj-name',row.name));
+    if(activeLive){
+      a.title+='・現在配信中';
+      a.append(el('span','nj-live-badge','● LIVE'));
+    }
     if(row.graduated)a.append(el('span','nj-tag','卒業'));
     return a;
   }
@@ -788,7 +924,10 @@
       button.addEventListener('click',()=>{
         state.years[group]=!open;
         persistState();
-        if(!open)loadGroupMedia(group,false);
+        if(!open){
+          loadGroupMedia(group,false);
+          queueVisibleLiveChecks();
+        }
         render();
       });
       host.append(button);
@@ -898,7 +1037,17 @@
   const observer=new MutationObserver(scheduleMount);
   observer.observe(document.documentElement,{childList:true,subtree:true});
   document.addEventListener('yt-navigate-finish',scheduleMount);
-  document.addEventListener('yt-page-data-updated',scheduleMount);
+  document.addEventListener('yt-page-data-updated',()=>{
+    scheduleMount();
+    queueVisibleLiveChecks();
+  });
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible')queueVisibleLiveChecks();
+  });
+  setInterval(()=>{
+    queueVisibleLiveChecks();
+    if(state.open && [...liveChecks.values()].some(x=>x.live && Date.now()-x.checkedAt>=LIVE_DISPLAY_TTL_MS))render();
+  },60*1000);
   scheduleMount();
   void updateRoster();
 })();
