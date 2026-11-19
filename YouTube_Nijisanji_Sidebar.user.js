@@ -1018,6 +1018,7 @@
   let liveHubHoverTimer=null,liveHubActivePreview=null;
   let liveHubPreviewGeneration=0;
   let liveHubPreviewStatus=null;
+  let liveHubPreviewFailure='';
   let liveHubActiveCleanup=null;
   const liveHubNativeCache=new Map();
   const liveHubNativePending=new Map();
@@ -1353,14 +1354,21 @@
         new Promise(done=>setTimeout(()=>done(null),3200))
       ]);
       if(!liveHubSessionValid(thumb,token)){resolve(false);return;}
+      if(!renderer)liveHubPreviewFailure='標準カードの動画データを取得できません';
       const native=liveHubCreateNativeCard(thumb,renderer);
-      if(!native){resolve(false);return;}
+      if(!native){
+        if(renderer)liveHubPreviewFailure='標準カードの再生要素を生成できません';
+        resolve(false);return;
+      }
       let finished=false,probe=null;
       const finish=success=>{
         if(finished)return;
         finished=true;
         clearInterval(probe);
-        if(!success)native.mount.remove();
+        if(!success){
+          liveHubPreviewFailure='標準カードの再生開始を確認できません';
+          native.mount.remove();
+        }
         resolve(success);
       };
       liveHubActiveCleanup=()=>{
@@ -1430,9 +1438,8 @@
           liveHubActivePreview=thumb;
           liveHubPreviewStatusOn(thumb,'ライブ映像再生中（無音）','playing');
           finish(true);
-        }else if(payload.event==='onError' ||
-          (payload.event==='onStateChange' && Number(payload.info)===-1 &&
-           payload.info?.errorCode)){
+        }else if(payload.event==='onError'){
+          liveHubPreviewFailure='埋め込みエラー：'+String(payload.info?.errorCode||payload.info||'不明');
           finish(false);
         }else if(payload.event==='onReady') {
           try {
@@ -1467,7 +1474,10 @@
       },{once:true});
       thumb.append(frame);
       frame.src=frameUrl;
-      timeout=setTimeout(()=>finish(false),LIVE_HUB_EMBED_WAIT_MS);
+      timeout=setTimeout(()=>{
+        liveHubPreviewFailure='通常プレーヤーの再生開始を確認できません';
+        finish(false);
+      },LIVE_HUB_EMBED_WAIT_MS);
     });
   }
 
@@ -1485,7 +1495,7 @@
     liveHubActiveCleanup?.();
     liveHubActiveCleanup=null;
     liveHubPreviewStatusOn(thumb,
-      'この配信はインライン再生できませんでした。クリックして視聴','unavailable');
+      'ホバー再生不可：'+(liveHubPreviewFailure||'利用不可')+'。クリックで視聴','unavailable');
   }
 
 
@@ -1502,6 +1512,7 @@
       item.viewers===null?'同接 —':item.viewers.toLocaleString('ja-JP')+' 人が視聴中'));
     const start=()=>{
       liveHubStopPreview();
+      liveHubPreviewFailure='';
       const token=liveHubPreviewGeneration;
       liveHubHoverTimer=setTimeout(()=>{
         liveHubHoverTimer=null;
