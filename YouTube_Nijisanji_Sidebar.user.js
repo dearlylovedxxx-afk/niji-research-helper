@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.4
+// @version      0.1.5
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -31,6 +31,35 @@
   const normalize = s => String(s || '').normalize('NFKC').replace(/\s+/g, '').replace(/Ⅲ/g, 'III')
     .replace(/[・･·]/g, '・').trim();
   const text = s => String(s || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+
+
+  const GROUPS = [
+    '1期生出身','2期生出身','ゲーマーズ出身','SEEDs1期生出身','SEEDs2期生出身',
+    '2019年1～3月デビュー','2019年4～6月デビュー',
+    '2019年7～9月デビュー','2019年10～12月デビュー',
+    ...Array.from({length:7},(_,i)=>(2020+i)+'年デビュー')
+  ];
+  const GROUP_ORDER=new Map(GROUPS.map((name,index)=>[name,index]));
+  function headerGroup(title) {
+    const value=text(title).replace(/[〜～~]/g,'～');
+    for(const key of GROUPS.slice(0,5)) {
+      if(value.toLowerCase().startsWith(key.toLowerCase()))return key;
+    }
+    const y=value.match(/^(20(?:1[89]|2\d))年(?:デビュー|(\d{1,2})～(\d{1,2})月デビュー)/);
+    if(y)return Number(y[1])===2019?'2019年デビュー':(y[1]+'年デビュー');
+    return '';
+  }
+  function periodGroupFor2019(date,sourceOrder) {
+    const month=Number(String(date||'').slice(5,7));
+    if(month>=1&&month<=12) {
+      const q=Math.floor((month-1)/3);
+      return ['2019年1～3月デビュー','2019年4～6月デビュー',
+        '2019年7～9月デビュー','2019年10～12月デビュー'][q];
+    }
+    // Unverified dates must not be assigned a fabricated quarter.
+    // Keep them in an explicit unclassified section until Wiki has the date.
+    return '2019年（デビュー月未確認）';
+  }
 
   const defaultState = {open:false, years:{}};
   let state = loadState();
@@ -67,12 +96,12 @@
   function readCache() {
     try {
       const value = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
-      if (!value || !Array.isArray(value.items) || value.items.length < 10) return null;
+      if (!value || value.schema!==2 || !Array.isArray(value.items) || value.items.length < 10) return null;
       return value;
     } catch { return null; }
   }
   function saveCache(items) {
-    const value = {at:Date.now(),items};
+    const value = {schema:2,at:Date.now(),items};
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(value)); } catch {}
     roster = value;
     tellCloud();
@@ -282,41 +311,38 @@
   }
 
   function parseChannelLines(lines) {
-    let year = 2018, enabled = false, ordinal = 0;
-    const records = [];
-    const found = new Set();
-    for (let raw of lines) {
-      raw = String(raw || '').trim();
-      if (!raw || raw.startsWith('//')) continue;
-      const header = raw.match(/^\*\*?\s*([^[]+)/);
-      if (header) {
-        const title = text(header[1]);
-        const y = title.match(/(20(?:1[8-9]|2\d))年デビュー/);
-        if (y) {year=Number(y[1]);enabled=true;}
-        else if (/^(?:1期生出身|2期生出身|ゲーマーズ出身|SEEDs[12１２]期生出身)/i.test(title)) {
-          year=2018;enabled=true;
-        } else if (/NIJISANJI\s*(?:ID|KR|EN|IN)|VirtuaReal|海外|公式チャンネル/i.test(title)) {
-          enabled=false;
+    let year=2018, group='', enabled=false, ordinal=0;
+    const records=[],found=new Set();
+    for(let raw of lines) {
+      raw=String(raw||'').trim();
+      if(!raw||raw.startsWith('//'))continue;
+      const header=raw.match(/^\*\*?\s*([^[]+)/);
+      if(header) {
+        const title=text(header[1]);
+        const g=headerGroup(title);
+        if(g) {
+          group=g;year=g.includes('2019')?2019:GROUP_ORDER.has(g)?(GROUP_ORDER.get(g)<5?2018:Number(g.slice(0,4))):2018;
+          enabled=true;
+        }else if(/NIJISANJI\s*(?:ID|KR|EN|IN)|VirtuaReal|海外|公式チャンネル|個別チャンネルを持つユニット/i.test(title)){
+          enabled=false;group='';
         }
       }
-      if (!enabled || !raw.startsWith('-')) continue;
-      const urlMatch = raw.match(/https?:\/\/(?:www\.)?youtube\.com\/(?:@[^\s\],>};]+|channel\/UC[a-zA-Z0-9_-]{22})/i);
-      if (!urlMatch) continue;
-      const url = validYouTubeUrl(urlMatch[0]);
-      if (!url) continue;
-      const graduated = /&color\(,\s*#d{3,6}\)/i.test(raw);
-      let label = raw.split(/[：:]/)[0]
-        .replace(/^-\s*/, '')
-        .replace(/&color\([^)]*\)\{/g,'')
-        .replace(/&ref\([^)]*\);/g,'')
-        .replace(/&icon\([^)]*\);/g,'')
-        .replace(/[{}]/g,'').trim();
-      label = label.replace(/&[^;]+;/g,'').trim();
-      if (!label || label.length > 45) continue;
-      const key = normalize(label);
-      if (found.has(key)) continue;
+      if(!enabled||!raw.startsWith('-'))continue;
+      const link=raw.match(/https?:\/\/(?:www\.)?youtube\.com\/(?:@[^\s\],>};]+|channel\/UC[a-zA-Z0-9_-]{22})/i);
+      if(!link)continue;
+      const url=validYouTubeUrl(link[0]);
+      if(!url)continue;
+      let label=raw.split(/[：:]/)[0].replace(/^-\s*/,'')
+        .replace(/&color\([^)]*\)\{/g,'').replace(/&ref\([^)]*\);/g,'')
+        .replace(/&icon\([^)]*\);/g,'').replace(/[{}]/g,'').trim()
+        .replace(/&[^;]+;/g,'').trim();
+      if(!label||label.length>45)continue;
+      const key=normalize(label);
+      if(found.has(key))continue;
       found.add(key);
-      records.push({name:label, year, url, graduated, order:ordinal++, date:'', avatar:''});
+      const graduated=/&color\(,\s*#(?:ddd|dddddd)\)/i.test(raw);
+      records.push({name:label,year,group,url,graduated,order:ordinal++,date:'',avatar:'',
+        archived:null,archiveCheckedAt:0});
     }
     return records;
   }
@@ -364,16 +390,25 @@
     return map;
   }
 
-  function mergeRoster(channels,official,icons) {
-    const merged=channels.map(row => {
-      const match=official.get(normalize(row.name));
-      const date=match?.date || '';
-      const y=date ? Number(date.slice(0,4)) : row.year;
-      return {...row,year:y,date,graduated:match?.graduated ?? row.graduated,avatar:icons[normalize(row.name)] || ''};
-    }).filter(row => row.year>=2018 && row.year<=2099 && !!row.url);
-    merged.sort((a,b)=> a.year-b.year ||
-      (a.date && b.date ? a.date.localeCompare(b.date) : a.date ? -1 : b.date ? 1 : 0) ||
-      a.order-b.order);
+  function mergeRoster(channels,official) {
+    const previous=new Map((roster?.items||[]).map(row=>[row.url,row]));
+    const merged=channels.map(row=>{
+      const matched=official.get(normalize(row.name));
+      const date=matched?.date || '';
+      const year=date?Number(date.slice(0,4)):row.year;
+      const group=year===2019?periodGroupFor2019(date,row.order):
+        (year===2018?row.group:year+'年デビュー');
+      const old=previous.get(row.url);
+      return {...row,year,date,group,
+        graduated:matched?.graduated??row.graduated,
+        avatar:old?.avatar||'',archived:old?.archived===true?true:old?.archived===false?false:null,
+        archiveCheckedAt:Number(old?.archiveCheckedAt||0),
+        officialOrder:matched?.order??row.order};
+    }).filter(row=>row.year>=2018 && row.year<=2026 && !!row.url
+      && (GROUP_ORDER.has(row.group)||row.group==='2019年（デビュー月未確認）'));
+    merged.sort((a,b)=>(GROUP_ORDER.get(a.group)??16)-(GROUP_ORDER.get(b.group)??16) ||
+      (a.date&&b.date?a.date.localeCompare(b.date):a.date?-1:b.date?1:0)||
+      a.officialOrder-b.officialOrder||a.order-b.order);
     return merged;
   }
 
@@ -387,13 +422,12 @@
       const c=fetched[0].value;
       const channels=parseChannelLines(c.lines);
       if (channels.length < 90) throw new Error('チャンネル一覧の解析件数が少なすぎます（'+channels.length+'件）。旧データを保持します。');
-      let official=new Map(),icons={};
+      let official=new Map();
       if (fetched[1].status==='fulfilled') {
         const r=fetched[1].value;
         official=parseOfficialLines(r.lines);
-        icons=r.icons;
       }
-      const items=mergeRoster(channels,official,icons);
+      const items=mergeRoster(channels,official);
       if (items.length < 90) throw new Error('保存できるライバー情報が不足しています');
       saveCache(items);
     } catch(e) {
