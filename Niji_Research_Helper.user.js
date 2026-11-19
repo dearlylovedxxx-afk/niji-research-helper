@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.131
+// @version      1.0.132
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -949,6 +949,7 @@
     if(verify.revision!==revision)throw new Error('設定同期の保存後照合に失敗しました');
     state.preferenceCloudBackupId=String(item.id||'');
     state.preferenceCloudReady=true;
+    if(state.settings?.[NIJI_SIDEBAR_PREF]) nijiSidebarStatus('☁️ Niji Cloudへの保存・照合完了');
     return {item,data:verify};
   }
 
@@ -969,9 +970,110 @@
       if(isYoutubeHost())try{updateYoutubePanel();}catch{}
       else{try{bindCommentTimestamps();}catch{}}
       console.info('[NRH] Niji Cloud preferences '+note, state.preferenceRevision);
+      nijiSidebarApplyFromCloud();
     } finally {
       state.preferenceCloudSuppress=Math.max(0,state.preferenceCloudSuppress-1);
     }
+  }
+
+  // Niji Cloud integration for the YouTube Nijisanji sidebar. Keep the
+  // existing authenticated NRH preference stream; never expose its token.
+  const NIJI_SIDEBAR_PREF = 'nijisanjiSidebarV1';
+  const NIJI_SIDEBAR_STATE_LS = 'marina-niji-yt-open-v1';
+  const NIJI_SIDEBAR_ROSTER_LS = 'marina-niji-yt-roster-v1';
+  let nijiSidebarBridgeBound = false;
+  let nijiSidebarWriting = false;
+
+  function nijiSidebarStatus(message) {
+    if(!isYoutubeHost())return;
+    try{window.dispatchEvent(new CustomEvent('nijisanji-sidebar:cloud-status',
+      {detail:{message:String(message)}}));}catch{}
+  }
+
+  function nijiSidebarValid(value) {
+    return value?.schema === 1 && value.state && typeof value.state==='object' &&
+      !Array.isArray(value.state) ? value : null;
+  }
+
+  function nijiSidebarSnapshotFromLocal(previous=null) {
+    let localState=null,localRoster=null;
+    try {
+      const raw=localStorage.getItem(NIJI_SIDEBAR_STATE_LS);
+      const row=raw?JSON.parse(raw):null;
+      if(row && typeof row==='object' && !Array.isArray(row))
+        localState={open:row.open===true,
+          years:row.years&&typeof row.years==='object'&&!Array.isArray(row.years)?row.years:{}};
+    } catch {}
+    try {
+      const raw=localStorage.getItem(NIJI_SIDEBAR_ROSTER_LS);
+      const row=raw?JSON.parse(raw):null;
+      if(row && Array.isArray(row.items) && row.items.length>=90 && row.items.length<=600) {
+        const items=row.items.map(x=>({
+          name:String(x.name||'').slice(0,90),year:Number(x.year||0),
+          date:String(x.date||'').slice(0,12),
+          url:String(x.url||'').slice(0,250),
+          avatar:String(x.avatar||'').slice(0,250),
+          graduated:x.graduated===true,order:Number(x.order||0)
+        })).filter(x=>x.name && /^https:\/\/www\.youtube\.com\//.test(x.url) && x.year>=2018 && x.year<=2099);
+        if(items.length>=90) localRoster={at:Math.max(0,Number(row.at||0)),items};
+      }
+    } catch {}
+    const old=nijiSidebarValid(previous);
+    if(!localState && !localRoster && !old)return null;
+    return {schema:1,updatedAt:Date.now(),state:localState||old?.state||{open:false,years:{}},
+      roster:localRoster||old?.roster||null};
+  }
+
+  function nijiSidebarApplyFromCloud() {
+    if(!isYoutubeHost())return false;
+    const data=nijiSidebarValid(state.settings?.[NIJI_SIDEBAR_PREF]);
+    if(!data)return false;
+    try {
+      localStorage.setItem(NIJI_SIDEBAR_STATE_LS,JSON.stringify(data.state));
+      if(data.roster?.items?.length>=90)
+        localStorage.setItem(NIJI_SIDEBAR_ROSTER_LS,JSON.stringify(data.roster));
+      window.dispatchEvent(new Event('nijisanji-sidebar:cloud-applied'));
+      nijiSidebarStatus('☁️ Niji Cloudと同期済み');
+      return true;
+    }catch(e){
+      nijiSidebarStatus('⚠️ Niji Cloudデータの適用失敗：'+String(e?.message||e).slice(0,65));
+      return false;
+    }
+  }
+
+  async function nijiSidebarStoreLocal() {
+    if(!isYoutubeHost() || nijiSidebarWriting)return;
+    if(!state.preferenceCloudToken) {
+      nijiSidebarStatus('☁️ Niji Cloud未接続（端末内に保存）');return;
+    }
+    if(!state.preferenceCloudReady){
+      nijiSidebarStatus('⚠️ Niji Cloud接続待ち（端末内に保存）');return;
+    }
+    const next=nijiSidebarSnapshotFromLocal(state.settings?.[NIJI_SIDEBAR_PREF]);
+    if(!next)return;
+    nijiSidebarWriting=true;
+    try{
+      state.settings={...state.settings,[NIJI_SIDEBAR_PREF]:next};
+      await gmSet(KEY_SETTINGS,state.settings);
+      nijiSidebarStatus('☁️ Niji Cloudへの保存待ち…');
+    }catch(e){
+      nijiSidebarStatus('⚠️ Niji Cloud保存処理失敗（端末データ保持）：'+String(e?.message||e).slice(0,65));
+    }finally{nijiSidebarWriting=false;}
+  }
+
+  function nijiSidebarBridgeStart() {
+    if(!isYoutubeHost())return;
+    if(!nijiSidebarBridgeBound){
+      nijiSidebarBridgeBound=true;
+      window.addEventListener('nijisanji-sidebar:changed',()=>void nijiSidebarStoreLocal());
+    }
+    if(!state.preferenceCloudToken){
+      nijiSidebarStatus('☁️ Niji Cloud未接続（端末内に保存）');return;
+    }
+    if(!state.preferenceCloudReady){
+      nijiSidebarStatus('⚠️ Niji Cloud接続未確認（端末データ保持）');return;
+    }
+    if(!nijiSidebarApplyFromCloud())void nijiSidebarStoreLocal();
   }
 
   function preferenceCloudSchedule(delay=1200) {
@@ -1028,6 +1130,7 @@
       if(!token){state.preferenceCloudReady=false;return;}
       await preferenceCloudSync({force:true,initial:true});
     }catch(e){console.warn('[NRH][preference cloud init]',e);}
+    finally{nijiSidebarBridgeStart();}
   }
 
 
