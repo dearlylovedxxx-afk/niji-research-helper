@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.3
+// @version      0.1.4
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -116,6 +116,42 @@
         }
       } catch (err) { reject(err); }
     });
+  }
+
+
+  // Fallback for strict YouTube Trusted Types CSP: let the privileged
+  // userscript network layer produce an already-parsed Document.
+  function requestWikiDocument(url) {
+    return new Promise((resolve,reject)=>{
+      const modern=typeof GM!=='undefined'?(GM.xmlHttpRequest||GM.xmlhttpRequest):null;
+      const legacy=typeof GM_xmlhttpRequest==='function'?GM_xmlhttpRequest:null;
+      const fn=typeof modern==='function'?modern.bind(GM):legacy;
+      if(!fn){reject(new Error('WikiのDocument取得権限がありません'));return;}
+      const completed=r=>{
+        if(Number(r?.status||0)<200||Number(r?.status||0)>=300) {
+          reject(new Error('Wiki Document HTTP '+String(r?.status||0)));return;
+        }
+        const doc=r?.response?.nodeType===9?r.response:r?.responseXML?.nodeType===9?r.responseXML:null;
+        if(doc) resolve(doc);
+        else reject(new Error('ユーザースクリプトがHTML Documentを返しませんでした'));
+      };
+      try {
+        const req=fn({method:'GET',url,timeout:20000,responseType:'document',
+          onload:completed,onerror:()=>reject(new Error('Wiki Document通信エラー')),
+          ontimeout:()=>reject(new Error('Wiki Documentタイムアウト'))});
+        if(req&&typeof req.then==='function')req.then(completed).catch(reject);
+      }catch(e){reject(e);}
+    });
+  }
+
+  async function loadWikiLines(url,type) {
+    const received=await requestWiki(url);
+    try {return wikiLines(received,type);}
+    catch(error) {
+      if(!/TrustedHTML|Trusted Types|trustedTypes/i.test(String(error?.message||error)))throw error;
+      const documentResponse=await requestWikiDocument(url);
+      return wikiLines(documentResponse,type);
+    }
   }
 
   // Convert both Wiki-rendered HTML and raw Wiki-style text into a
@@ -345,15 +381,15 @@
     if (loading) return;
     if (!force && roster && Date.now()-roster.at < CACHE_MS) return;
     loading=true;lastError='';render();
-    const fetched=await Promise.allSettled([requestWiki(CHANNEL_PAGE),requestWiki(ROSTER_PAGE)]);
+    const fetched=await Promise.allSettled([loadWikiLines(CHANNEL_PAGE,'channels'),loadWikiLines(ROSTER_PAGE,'official')]);
     try {
       if (fetched[0].status!=='fulfilled') throw fetched[0].reason;
-      const c=wikiLines(fetched[0].value,'channels');
+      const c=fetched[0].value;
       const channels=parseChannelLines(c.lines);
       if (channels.length < 90) throw new Error('チャンネル一覧の解析件数が少なすぎます（'+channels.length+'件）。旧データを保持します。');
       let official=new Map(),icons={};
       if (fetched[1].status==='fulfilled') {
-        const r=wikiLines(fetched[1].value,'official');
+        const r=fetched[1].value;
         official=parseOfficialLines(r.lines);
         icons=r.icons;
       }
