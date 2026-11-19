@@ -816,35 +816,42 @@
   }
 
   async function probeChannelLive(channelUrl) {
-    // The old version depended solely on /live redirecting to /watch.
-    // YouTube may render /live as a channel page without such a redirect.
-    // The channel's own /streams tab and its explicit LIVE badges are the
-    // primary signal; /live is now only a fallback.
-    const streamsUrl=channelUrl.replace(/\/+$/,'')+'/streams';
-    let firstError='';
-    try {
-      const streamsHtml=await mediaGet(streamsUrl,1000);
-      const status=liveStatusFromStreamsHtml(streamsHtml);
-      if(status.known)return status.live;
-      firstError='ライブ一覧を解析できませんでした';
+    // Important: a normal video card on /streams is NOT enough to claim a
+    // channel is offline. Probe /live even when the tab reports no red badge.
+    const base=channelUrl.replace(/\/+$/,'');
+    let status={live:false,known:false},firstError='';
+    try{
+      const streamsHtml=await mediaGet(base+'/streams',1000);
+      status=liveStatusFromStreamsHtml(streamsHtml);
+      if(status.known && status.live)return true;
+      if(!status.known)firstError='ライブタブのHTML構造が未対応';
     }catch(error){firstError=String(error?.message||error);}
-    const target=channelUrl.replace(/\/+$/,'')+'/live';
+    const target=base+'/live';
     const controller=new AbortController();
     const timeout=setTimeout(()=>controller.abort(),LIVE_TIMEOUT_MS);
-    try {
-      const response=await fetch(target,{credentials:'include',redirect:'follow',
-        cache:'no-store',signal:controller.signal});
+    try{
+      const response=await fetch(target,{credentials:'include',
+        redirect:'follow',cache:'no-store',signal:controller.signal});
       if(!response.ok)throw new Error('YouTube HTTP '+response.status);
       const html=await response.text();
       const watch=liveStatusFromWatchHtml(html,response.url||target);
       if(watch.known)return watch.live;
-      const streams=liveStatusFromStreamsHtml(html);
-      if(streams.known)return streams.live;
-      // No reliable signal is not "offline": report it for diagnosis.
-      throw new Error('配信情報を判定できません。ライブ欄：'+firstError);
+      const embedded=youtubeEmbeddedData(html,'ytInitialPlayerResponse');
+      if(embedded?.videoDetails?.isLive===true &&
+         embedded?.videoDetails?.isUpcoming!==true &&
+         embedded?.microformat?.playerMicroformatRenderer?.liveBroadcastDetails?.isLiveNow===true &&
+         !embedded?.microformat?.playerMicroformatRenderer?.liveBroadcastDetails?.endTimestamp)return true;
+      const page=liveStatusFromStreamsHtml(html);
+      if(page.known)return page.live;
+      if(status.known)return status.live;
+      throw new Error('配信状況を判定できません：'+(firstError||'YouTubeが必要な情報を返していません'));
+    }catch(error){
+      // A failed /live probe must not overturn a positive streams result.
+      if(status.known)return status.live;
+      throw new Error('ライブページ確認失敗：'+String(error?.message||error)+
+        (firstError?' ／ ライブ欄：'+firstError:''));
     }finally{clearTimeout(timeout);}
   }
-
 
   // First use the very same live badge that YouTube paints next to a
   // subscribed channel in its native sidebar. This can reflect live status
@@ -967,7 +974,8 @@
           const currentlyLive=await probeChannelLive(job.key);
           liveChecks.set(job.key,{live:currentlyLive,checkedAt:Date.now(),failed:false});
           liveErrors.delete(job.key);
-          if(wasLive!==currentlyLive)render();
+          // Update the visible diagnostic counters even when status is offline.
+          render();
         }catch(error){
           // Failure is unknown, not evidence that a livestream ended.
           // Hide stale badges after the display TTL rather than guessing.
@@ -1072,6 +1080,49 @@
       note.title=visibleLiveErrors.slice(0,8).map(([url,reason])=>url+'：'+reason).join('\n');
       host.append(note);
     }
+    if(roster){
+      const visible=roster.items.filter(row=>!row.graduated && state.years[row.group]===true);
+      if(visible.length){
+        const current=visible.filter(row=>nativeIsLive(row) || isLiveNow(row.url));
+        const checked=visible.filter(row=>liveChecks.has(row.url) &&
+          !liveChecks.get(row.url)?.failed).length;
+        const working=visible.filter(row=>liveQueued.has(row.url)).length;
+        const errors=visible.filter(row=>liveErrors.has(row.url)).length;
+        const progress=el('div','nj-message',
+          '🔴 LIVE確認：'+checked+'/'+visible.length+'件'+
+          ' ・配信中 '+current.length+'件'+
+          (working?' ・確認中 '+working+'件':'')+
+          (errors?' ・エラー '+errors+'件':''));
+        progress.title='YouTube標準の登録チャンネル欄と、各チャンネルのライブ情報を照合しています';
+        host.append(progress);
+        const diag=el('button','nj-refresh','📋 LIVE診断をコピー');
+        diag.type='button';
+        diag.addEventListener('click',()=>{
+          const details=[
+            'にじさんじサイドバー LIVE 診断',
+            '版：0.1.13',
+            '確認対象：'+visible.length+'件',
+            'YouTube標準LIVE：'+visible.filter(nativeIsLive).map(x=>x.name).join('、'),
+            '確認中：'+working+'件',
+            ...visible.map(row=>{
+              const r=liveChecks.get(row.url),err=liveErrors.get(row.url)||'';
+              return [row.name,row.url,
+                nativeIsLive(row)?'ネイティブLIVE':'',
+                r ? (r.failed?'チェック失敗':r.live?'配信中':'非配信'):'未実行',
+                r?.checkedAt?new Date(r.checkedAt).toLocaleString('ja-JP'):'',
+                err].filter(Boolean).join(' | ');
+            })
+          ].join('\n');
+          try{
+            const result=navigator.clipboard.writeText(details);
+            Promise.resolve(result).then(()=>{diag.textContent='✅ 診断をコピーしました';})
+              .catch(()=>{window.prompt('診断情報をコピーしてください',details);});
+          }catch{window.prompt('診断情報をコピーしてください',details);}
+        });
+        host.append(diag);
+      }
+    }
+
     if(!roster) {
       const retry=el('button','nj-refresh','🔄 一覧を読み込む');
       retry.addEventListener('click',()=>void updateRoster(true));
