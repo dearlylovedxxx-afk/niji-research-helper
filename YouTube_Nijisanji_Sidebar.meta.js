@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.2.2
+// @version      0.2.3
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
