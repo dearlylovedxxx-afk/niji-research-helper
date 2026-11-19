@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.3.1
+// @version      0.4.0
 // @description  にじさんじをデビュー期別に表示。公開配信中は赤リングとLIVE印、卒業済はアーカイブ確認後に表示。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -1018,13 +1018,9 @@
   let liveHubHoverTimer=null,liveHubActivePreview=null;
   let liveHubPreviewGeneration=0;
   let liveHubPreviewStatus=null;
-  let liveHubPreviewFailure='';
   let liveHubActiveCleanup=null;
-  const liveHubNativeCache=new Map();
-  const liveHubNativePending=new Map();
-  const LIVE_HUB_NATIVE_CACHE_MS=20*60*1000;
-  const LIVE_HUB_NATIVE_WAIT_MS=4200;
-  const LIVE_HUB_EMBED_WAIT_MS=9000;
+  const LIVE_HUB_WATCH_TIMEOUT_MS=18000;
+  const LIVE_HUB_WATCH_CHECK_MS=200;
 
   function liveHubActive() {
     return location.pathname==='/' && location.hash===LIVE_HUB_HASH;
@@ -1167,11 +1163,7 @@
       '#'+LIVE_HUB_ID+' .nh-card{min-width:0}',
       '#'+LIVE_HUB_ID+' .nh-thumb{position:relative;display:block;width:100%;aspect-ratio:16/9;background:#111;overflow:hidden;border-radius:12px;text-decoration:none;color:#fff}',
       '#'+LIVE_HUB_ID+' .nh-thumb>img{display:block;width:100%;height:100%;object-fit:cover}',
-      '#'+LIVE_HUB_ID+' .nh-native-host,#'+LIVE_HUB_ID+' .nh-real-player{position:absolute;inset:0;width:100%;height:100%;z-index:3;overflow:hidden;border:0;background:transparent}',
-      '#'+LIVE_HUB_ID+' .nh-native-host ytd-video-renderer,#'+LIVE_HUB_ID+' .nh-native-host ytd-rich-grid-media,#'+LIVE_HUB_ID+' .nh-native-host yt-lockup-view-model{display:block!important;width:100%;height:100%}',
-      '#'+LIVE_HUB_ID+' .nh-native-host #details,#'+LIVE_HUB_ID+' .nh-native-host #metadata,#'+LIVE_HUB_ID+' .nh-native-host #meta{display:none!important}',
-      '#'+LIVE_HUB_ID+' .nh-native-host ytd-thumbnail,#'+LIVE_HUB_ID+' .nh-native-host #thumbnail{display:block!important;width:100%!important;height:100%!important}',
-      '#'+LIVE_HUB_ID+' .nh-real-player{pointer-events:none!important;transition:opacity .16s ease}',
+      '#'+LIVE_HUB_ID+' .nh-watch-preview{position:absolute;inset:0;display:block;width:100%;height:100%;z-index:3;overflow:hidden;border:0;background:#000;transition:opacity .15s ease;pointer-events:none}',
       '#'+LIVE_HUB_ID+' .nh-preview-status{position:absolute;z-index:4;bottom:37px;left:8px;right:8px;padding:6px 9px;border-radius:6px;font-size:12px;font-weight:600;line-height:1.35;color:#fff;background:rgba(0,0,0,.75);pointer-events:none;text-align:center}',
       '#'+LIVE_HUB_ID+' .nh-preview-unavailable{background:rgba(40,40,40,.85)}',
       '#'+LIVE_HUB_ID+' .nh-badge{position:absolute;left:10px;top:10px;z-index:2;background:#e21b38;color:#fff;font-size:12px;font-weight:700;border-radius:4px;padding:4px 6px}',
@@ -1204,62 +1196,29 @@
   // YouTube's home page uses signed animated thumbnails, not the embedded
   // player. An embedded iframe may be blocked by the uploader (error 152).
   // Only use YouTube-issued preview URLs for the exact video.
-  // Reconstruct a real YouTube video card from YouTube's own renderer data.
-  // Homepage inline previews are driven by Polymer/YouTube components, not
-  // animated WebP files. This is experimental and not a public YouTube API.
-  function liveHubNativeRendererFromHtml(html,videoId) {
-    const root=youtubeEmbeddedData(html,'ytInitialData');
-    if(!root)return null;
-    const queue=[root],seen=new WeakSet();
-    let count=0;
-    while(queue.length && count++<16000){
-      const node=queue.pop();
-      if(!node || typeof node!=='object'||seen.has(node))continue;
-      seen.add(node);
-      const candidates=[
-        ['yt-lockup-view-model',node.lockupViewModel],
-        ['ytd-video-renderer',node.videoRenderer],
-        ['ytd-rich-grid-media',node.richGridMedia]
-      ];
-      for(const [tag,record] of candidates){
-        if(!record||typeof record!=='object')continue;
-        const id=tag==='yt-lockup-view-model'?record.contentId:record.videoId;
-        if(id===videoId){
-          if(tag==='yt-lockup-view-model'&&record.contentType&&record.contentType!=='VIDEO')continue;
-          return {tag,record};
-        }
-      }
-      if(Array.isArray(node)){
-        for(let i=node.length-1;i>=0;i--)queue.push(node[i]);
-      }else{
-        for(const [key,value] of Object.entries(node)){
-          if(/responseContext|frameworkUpdates|adSlot|playerOverlays|continuationCommand/i.test(key))continue;
-          if(value&&typeof value==='object')queue.push(value);
-        }
-      }
-    }
-    return null;
-  }
-
-  async function liveHubGetNativeRenderer(videoId) {
-    const cached=liveHubNativeCache.get(videoId);
-    if(cached && Date.now()-cached.at<LIVE_HUB_NATIVE_CACHE_MS)return cached.record;
-    if(liveHubNativePending.has(videoId))return liveHubNativePending.get(videoId);
-    const job=(async()=>{
-      try{
-        const url='https://www.youtube.com/results?search_query='+encodeURIComponent(videoId);
-        const html=await mediaGet(url,1000);
-        const record=liveHubNativeRendererFromHtml(html,videoId);
-        liveHubNativeCache.set(videoId,{record,at:Date.now()});
-        return record;
-      }catch(error){
-        console.debug('[Niji LIVE][native renderer]',videoId,String(error?.message||error));
-        return null;
-      }finally{liveHubNativePending.delete(videoId);}
-    })();
-    liveHubNativePending.set(videoId,job);
-    return job;
-  }
+  // Real playback on the same YouTube origin. A normal /watch page is
+  // intentionally used, not /embed: some lives reject embeds (152-4) even
+  // though the signed-in viewer can watch the full stream on youtube.com.
+  // The page is loaded only while hovering one card, without sound.
+  const LIVE_HUB_WATCH_CSS = [
+    'html,body{overflow:hidden!important;background:#000!important;margin:0!important}',
+    '#masthead,#masthead-container,ytd-mini-guide-renderer,',
+    'tp-yt-app-drawer,#secondary,#below,ytd-comments,#chat,',
+    '#chat-container,ytd-live-chat-frame,iframe#chatframe,#playlist,',
+    '#panels,#merch-shelf,#related,#description,#comments{display:none!important}',
+    'ytd-app #page-manager{margin-top:0!important;padding-top:0!important}',
+    'ytd-watch-flexy,#full-bleed-container,#columns,#primary,#primary-inner,',
+    '#player,#player-container-outer,#player-container-inner{',
+    'width:100vw!important;height:100vh!important;min-height:0!important;',
+    'max-width:none!important;margin:0!important;padding:0!important}',
+    '#movie_player{position:fixed!important;inset:0!important;',
+    'width:100vw!important;height:100vh!important;z-index:2147483647!important;',
+    'background:#000!important}',
+    '#movie_player .html5-video-container{width:100%!important;height:100%!important}',
+    '#movie_player video{position:absolute!important;inset:0!important;',
+    'width:100%!important;height:100%!important;object-fit:contain!important}',
+    '::-webkit-scrollbar{width:0!important;height:0!important}'
+  ].join('\n');
 
   function liveHubSessionValid(thumb,token) {
     return token===liveHubPreviewGeneration && thumb.isConnected &&
@@ -1278,225 +1237,123 @@
   function liveHubStopPreview() {
     liveHubPreviewGeneration++;
     if(liveHubHoverTimer){clearTimeout(liveHubHoverTimer);liveHubHoverTimer=null;}
-    if(liveHubActiveCleanup){
-      try{liveHubActiveCleanup();}catch(error){
-        console.debug('[Niji LIVE][cleanup]',String(error?.message||error));
-      }
+    if(liveHubActiveCleanup) {
+      const close=liveHubActiveCleanup;
       liveHubActiveCleanup=null;
+      try{close();}catch(error){console.debug('[Niji LIVE][preview close]',error);}
     }
     liveHubActivePreview=null;
     liveHubPreviewStatus?.remove();
     liveHubPreviewStatus=null;
   }
 
-  function liveHubCreateNativeCard(thumb,renderer) {
-    if(!renderer || typeof document.createElement!=='function')return null;
-    const tags=renderer.tag==='yt-lockup-view-model'
-      ? ['yt-lockup-view-model']
-      : ['ytd-video-renderer','ytd-rich-grid-media'];
-    const chosen=tags.find(tag=>customElements.get(tag));
-    if(!chosen)return null;
-    const mount=el('div','nh-native-host');
-    mount.dataset.previewType='youtube-native';
-    const element=document.createElement(chosen);
-    mount.append(element);
-    thumb.append(mount);
-    try {
-      // YouTube Polymer exposes the same renderer data as element.data
-      // and, in some releases, via element.polymerController.data.
-      element.data=renderer.record;
-      if(element.polymerController && element.polymerController!==element)
-        element.polymerController.data=renderer.record;
-      if(typeof element.notifyPath==='function')element.notifyPath('data',renderer.record);
-    }catch(error){
-      mount.remove();
-      console.debug('[Niji LIVE][native data]',String(error?.message||error));
-      return null;
-    }
-    return {mount,element};
+  function liveHubWatchUrl(videoId) {
+    if(!/^[A-Za-z0-9_-]{11}$/.test(videoId))return '';
+    const url=new URL('/watch','https://www.youtube.com');
+    url.searchParams.set('v',videoId);
+    url.searchParams.set('autoplay','1');
+    url.searchParams.set('playsinline','1');
+    url.searchParams.set('mute','1');
+    return url.toString();
   }
 
-  function liveHubNativeVideoPlaying(mount,videoId) {
-    const candidates=[
-      ...mount.querySelectorAll('video'),
-      ...document.querySelectorAll('ytd-video-preview video,#inline-preview-player video')
-    ];
-    if(mount.shadowRoot)candidates.push(...mount.shadowRoot.querySelectorAll('video'));
-    for(const video of candidates){
-      if(!video.paused && !video.ended && video.readyState>=2){
-        video.muted=true;
-        return true;
-      }
-    }
-    const globalPreview=document.querySelector('ytd-video-preview[playing]');
-    const previewVideoId=globalPreview?.videoPreviewData?.navigationEndpoint?.watchEndpoint?.videoId
-      ||globalPreview?.data?.navigationEndpoint?.watchEndpoint?.videoId;
-    return previewVideoId===videoId;
-  }
-
-  function liveHubDispatchNativeHover(element) {
-    for(const type of ['pointerover','mouseover','mouseenter']){
+  function liveHubStartRealPreview(thumb,item,token) {
+    if(!liveHubSessionValid(thumb,token))return;
+    const watchUrl=liveHubWatchUrl(item.id);
+    if(!watchUrl)return;
+    const frame=el('iframe','nh-watch-preview');
+    frame.setAttribute('allow','autoplay; encrypted-media; picture-in-picture');
+    frame.setAttribute('referrerpolicy','strict-origin-when-cross-origin');
+    frame.setAttribute('aria-label','無音でライブ映像をプレビュー');
+    frame.setAttribute('tabindex','-1');
+    frame.style.opacity='0';
+    frame.style.pointerEvents='none';
+    let checkTimer=null,deadlineTimer=null,video=null;
+    let lastPlayAttempt=0,reason='再生開始を確認できませんでした';
+    let finished=false,ready=false;
+    const stop=()=>{
+      if(finished)return;
+      finished=true;
+      if(checkTimer!==null)clearInterval(checkTimer);
+      if(deadlineTimer!==null)clearTimeout(deadlineTimer);
+      frame.removeEventListener('load',inspect);
       try{
-        const Ctor=type.startsWith('pointer')?(window.PointerEvent||MouseEvent):MouseEvent;
-        element.dispatchEvent(new Ctor(type,{bubbles:type!=='mouseenter',
-          composed:true,cancelable:true,view:window}));
+        const child=frame.contentDocument?.querySelector('#movie_player video,video');
+        child?.pause?.();
       }catch{}
-    }
-  }
-
-  function liveHubTryNative(thumb,videoId,token) {
-    return new Promise(async resolve=>{
-      if(!liveHubSessionValid(thumb,token)){resolve(false);return;}
-      liveHubPreviewStatusOn(thumb,'YouTube標準のインライン再生を準備中…');
-      const renderer=await Promise.race([
-        liveHubGetNativeRenderer(videoId),
-        new Promise(done=>setTimeout(()=>done(null),3200))
-      ]);
-      if(!liveHubSessionValid(thumb,token)){resolve(false);return;}
-      if(!renderer)liveHubPreviewFailure='標準カードの動画データを取得できません';
-      const native=liveHubCreateNativeCard(thumb,renderer);
-      if(!native){
-        if(renderer)liveHubPreviewFailure='標準カードの再生要素を生成できません';
-        resolve(false);return;
+      frame.src='about:blank';
+      frame.remove();
+      if(liveHubActivePreview===thumb)liveHubActivePreview=null;
+    };
+    const fail=message=>{
+      if(finished || !liveHubSessionValid(thumb,token))return;
+      reason=message||reason;
+      stop();
+      liveHubActiveCleanup=null;
+      liveHubPreviewStatusOn(thumb,
+        'このライブのプレビューは再生できません：'+reason,'unavailable');
+    };
+    const show=()=>{
+      if(ready||finished||!liveHubSessionValid(thumb,token))return;
+      ready=true;
+      liveHubActivePreview=thumb;
+      frame.style.opacity='1';
+      liveHubPreviewStatusOn(thumb,'🔴 ライブ映像を再生中（無音）','playing');
+      // Continue polling to enforce mute while YouTube restores its saved
+      // audio preference; leaving the card removes the entire frame.
+    };
+    const inspect=()=>{
+      if(finished)return;
+      if(!liveHubSessionValid(thumb,token)){stop();return;}
+      let child;
+      try{
+        child=frame.contentDocument;
+        if(!child?.head||!child.location||child.location.pathname!=='/watch')return;
+        if(new URLSearchParams(child.location.search).get('v')!==item.id)return;
+        if(!child.getElementById('niji-watch-iframe-css')){
+          const css=child.createElement('style');
+          css.id='niji-watch-iframe-css';
+          css.textContent=LIVE_HUB_WATCH_CSS;
+          child.head.append(css);
+          child.querySelector('ytd-live-chat-frame')?.setAttribute('collapsed','');
+          try{frame.contentWindow?.dispatchEvent(new Event('resize'));}catch{}
+        }
+        video=child.querySelector('#movie_player video');
+        if(!video)return;
+        // Muting the real HTMLMediaElement works even if the site's
+        // player methods are inaccessible in a userscript isolated world.
+        if(!video.muted)video.muted=true;
+        if(video.volume!==0)video.volume=0;
+        if(!video.paused&&!video.ended&&video.readyState>=2){
+          show();
+          return;
+        }
+        if(video.paused && video.readyState>=2 &&
+          Date.now()-lastPlayAttempt>1300){
+          lastPlayAttempt=Date.now();
+          try{
+            const playing=video.play?.();
+            Promise.resolve(playing).catch(e=>{
+              reason='自動再生が拒否されました（'+String(e?.name||'Error')+'）';
+            });
+          }catch(error){reason='再生開始エラー：'+String(error?.message||error);}
+        }
+      }catch(error) {
+        // Some browser/profile settings deny access to even same-site frames.
+        reason='動画ページにアクセスできません（'+String(error?.name||'Error')+'）';
       }
-      let finished=false,probe=null;
-      const finish=success=>{
-        if(finished)return;
-        finished=true;
-        clearInterval(probe);
-        if(!success){
-          liveHubPreviewFailure='標準カードの再生開始を確認できません';
-          native.mount.remove();
-        }
-        resolve(success);
-      };
-      liveHubActiveCleanup=()=>{
-        clearInterval(probe);
-        native.mount.remove();
-        finish(false);
-      };
-      const check=()=>{
-        if(!liveHubSessionValid(thumb,token)){finish(false);return;}
-        if(liveHubNativeVideoPlaying(native.mount,videoId)){
-          // Native playback stays in the YouTube component and is never
-          // replaced by a fake image or a separate ad-hoc video element.
-          liveHubActivePreview=thumb;
-          liveHubPreviewStatusOn(thumb,'YouTube標準プレビュー再生中','playing');
-          finish(true);
-        }
-      };
-      liveHubDispatchNativeHover(native.element);
-      const trigger=setTimeout(()=>liveHubDispatchNativeHover(native.element),500);
-      probe=setInterval(check,300);
-      const timeout=setTimeout(()=>finish(false),LIVE_HUB_NATIVE_WAIT_MS);
-      // If still hovering, allow Polymer to mount its video preview.
-      const oldCleanup=liveHubActiveCleanup;
-      liveHubActiveCleanup=()=>{
-        clearTimeout(timeout);clearTimeout(trigger);
-        oldCleanup();
-      };
-      // The native player's own runtime owns playback after confirmation;
-      // all outstanding timers are cleared when the card is left.
-    });
+    };
+    liveHubActiveCleanup=stop;
+    liveHubPreviewStatusOn(thumb,'ライブ映像を読み込んでいます…');
+    thumb.append(frame);
+    frame.addEventListener('load',inspect);
+    frame.src=watchUrl;
+    checkTimer=setInterval(inspect,LIVE_HUB_WATCH_CHECK_MS);
+    deadlineTimer=setTimeout(()=>{
+      if(!ready)fail(reason);
+    },LIVE_HUB_WATCH_TIMEOUT_MS);
+    inspect();
   }
-
-  // Fallback uses YouTube's official, same-origin embed API. Unlike the
-  // earlier youtube-nocookie iframe, it is shown ONLY after YouTube itself
-  // reports playerState=PLAYING. Rejected embeds remain hidden/removed.
-  function liveHubTryEmbed(thumb,videoId,token) {
-    return new Promise(resolve=>{
-      if(!liveHubSessionValid(thumb,token)){resolve(false);return;}
-      liveHubPreviewStatusOn(thumb,'通常のYouTubeプレーヤーを試行中…');
-      const frame=el('iframe','nh-real-player');
-      frame.setAttribute('allow','autoplay; encrypted-media; picture-in-picture');
-      frame.setAttribute('referrerpolicy','strict-origin-when-cross-origin');
-      frame.setAttribute('aria-hidden','true');
-      frame.title='無音ライブプレビュー';
-      frame.style.opacity='0';
-      frame.style.pointerEvents='none';
-      const origin=location.origin;
-      const query=new URLSearchParams({
-        autoplay:'1',mute:'1',controls:'0',playsinline:'1',
-        rel:'0',enablejsapi:'1',origin,widget_referrer:origin+'/'
-      });
-      const frameUrl='https://www.youtube.com/embed/'+videoId+'?'+query.toString();
-      let finished=false,timeout=null;
-      const message=event=>{
-        if(event.origin!=='https://www.youtube.com' ||
-          event.source!==frame.contentWindow || finished)return;
-        let payload=event.data;
-        if(typeof payload==='string'){
-          try{payload=JSON.parse(payload);}catch{return;}
-        }
-        if(!payload||typeof payload!=='object')return;
-        if((payload.event==='onStateChange' && Number(payload.info)===1) ||
-          (payload.event==='infoDelivery' && Number(payload.info?.playerState)===1)){
-          if(!liveHubSessionValid(thumb,token)){finish(false);return;}
-          frame.style.opacity='1';
-          frame.setAttribute('aria-hidden','false');
-          liveHubActivePreview=thumb;
-          liveHubPreviewStatusOn(thumb,'ライブ映像再生中（無音）','playing');
-          finish(true);
-        }else if(payload.event==='onError'){
-          liveHubPreviewFailure='埋め込みエラー：'+String(payload.info?.errorCode||payload.info||'不明');
-          finish(false);
-        }else if(payload.event==='onReady') {
-          try {
-            for(const eventName of ['onStateChange','onError']){
-              frame.contentWindow.postMessage(JSON.stringify({
-                event:'command',func:'addEventListener',args:[eventName]
-              }),'https://www.youtube.com');
-            }
-            frame.contentWindow.postMessage(JSON.stringify({
-              event:'command',func:'mute',args:[]
-            }),'https://www.youtube.com');
-            frame.contentWindow.postMessage(JSON.stringify({
-              event:'command',func:'playVideo',args:[]
-            }),'https://www.youtube.com');
-          }catch{}
-        }
-      };
-      const finish=ok=>{
-        if(finished)return;
-        finished=true;
-        clearTimeout(timeout);
-        window.removeEventListener('message',message);
-        if(!ok)frame.remove();
-        resolve(ok);
-      };
-      liveHubActiveCleanup=()=>{finish(false);frame.remove();};
-      window.addEventListener('message',message);
-      frame.addEventListener('load',()=>{
-        try{frame.contentWindow.postMessage(JSON.stringify({
-          event:'listening',id:'niji-live-hover',channel:'widget'
-        }),'https://www.youtube.com');}catch{}
-      },{once:true});
-      thumb.append(frame);
-      frame.src=frameUrl;
-      timeout=setTimeout(()=>{
-        liveHubPreviewFailure='通常プレーヤーの再生開始を確認できません';
-        finish(false);
-      },LIVE_HUB_EMBED_WAIT_MS);
-    });
-  }
-
-  async function liveHubStartRealPreview(thumb,item,token) {
-    if(!liveHubSessionValid(thumb,token))return;
-    const native=await liveHubTryNative(thumb,item.id,token);
-    if(native || !liveHubSessionValid(thumb,token))return;
-    // Native attempt finished and failed. A failed native component must
-    // not leave a listener/overlay behind before the embed attempt.
-    liveHubActiveCleanup?.();
-    liveHubActiveCleanup=null;
-    if(!liveHubSessionValid(thumb,token))return;
-    const embedded=await liveHubTryEmbed(thumb,item.id,token);
-    if(embedded || !liveHubSessionValid(thumb,token))return;
-    liveHubActiveCleanup?.();
-    liveHubActiveCleanup=null;
-    liveHubPreviewStatusOn(thumb,
-      'ホバー再生不可：'+(liveHubPreviewFailure||'利用不可')+'。クリックで視聴','unavailable');
-  }
-
 
   function liveHubCard(item) {
     const card=el('article','nh-card');
@@ -1511,7 +1368,6 @@
       item.viewers===null?'同接 —':item.viewers.toLocaleString('ja-JP')+' 人が視聴中'));
     const start=()=>{
       liveHubStopPreview();
-      liveHubPreviewFailure='';
       const token=liveHubPreviewGeneration;
       liveHubHoverTimer=setTimeout(()=>{
         liveHubHoverTimer=null;
@@ -1552,7 +1408,7 @@
     close.addEventListener('click',()=>location.assign('https://www.youtube.com/'));
     top.append(refresh,close);wrap.append(top);
     const meta=el('div','nh-meta',
-      '同時視聴者数の多い順 ・ 約3分ごとに自動更新 ・ ホバー時はYouTube標準プレーヤーでリアルタイム再生を試行（無音）'+
+      '同時視聴者数の多い順 ・ 約3分ごとに自動更新 ・ ホバー時は同一YouTubeの視聴ページでライブ再生を試行（無音・視聴履歴に残る場合があります）'+
       (liveHubLastAt?' ・ 取得候補 '+liveHubSourceCount+'件／JP一致 '+liveHubMatched+'件':'')+
       (liveHubLastAt?' ・ 取得 '+new Date(liveHubLastAt).toLocaleTimeString('ja-JP'):'')+
       ' ・ 取得元：');
