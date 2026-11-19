@@ -435,6 +435,120 @@
     } finally { loading=false;render(); }
   }
 
+
+  // Channel avatars and surviving archives are verified against YouTube itself.
+  // Do not reuse Wiki's generic &icon thumbnail for every member.
+  const MEDIA_RECHECK_MS=14*24*60*60*1000;
+  const mediaJobs=[],mediaQueued=new Set();
+  let mediaRunning=0,mediaPersistTimer=null,mediaLastRequest=0;
+  let mediaFailures=0;
+
+  function mediaAvatarFromHtml(html) {
+    const og=[...String(html||'').matchAll(/<meta\b[^>]{0,900}>/gi)]
+      .map(match=>match[0])
+      .find(tag=>/\b(?:property|name)=["']og:image["']/i.test(tag));
+    if(og) {
+      const src=og.match(/\bcontent=["']([^"']+)["']/i)?.[1]||'';
+      const clean=src.replace(/&amp;/g,'&').replace(/\\u0026/g,'&');
+      if(/^https:\/\/(?:yt3\.googleusercontent\.com|yt3\.ggpht\.com)\//i.test(clean))return clean;
+    }
+    const avatar=String(html||'').match(/"avatar"\s*:\s*\{\s*"thumbnails"\s*:\s*\[\s*\{\s*"url"\s*:\s*"(https?:[^"]+)"/i)?.[1]
+      || String(html||'').match(/"avatarViewModel"[\s\S]{0,1400}?"url":"(https?:[^"]+)"/i)?.[1] || '';
+    const clean=avatar.replace(/\\u0026/g,'&').replace(/\\\//g,'/');
+    return /^https:\/\/(?:yt3\.googleusercontent\.com|yt3\.ggpht\.com)\//i.test(clean)?clean:'';
+  }
+
+  function mediaHasPublicArchive(html) {
+    // Deliberately exclude Shorts and shelves of recommended channels.
+    // The upload / livestream tabs carry their own videoRenderer IDs.
+    return /"(?:videoRenderer|gridVideoRenderer)"\s*:\s*\{\s*"videoId"\s*:\s*"[A-Za-z0-9_-]{11}"/.test(String(html||''));
+  }
+
+  async function mediaFetchChannel(url,tab) {
+    const target=url.replace(/\/+$/,'')+'/'+tab;
+    const response=await fetch(target,{credentials:'include',redirect:'follow',cache:'default'});
+    if(!response.ok||!new URL(response.url).hostname.endsWith('youtube.com'))
+      throw new Error('YouTube HTTP '+response.status);
+    const html=await response.text();
+    if(html.length<1000||/consent\.youtube\.com|<title>.*(?:404|not found)/i.test(html.slice(0,5000)))
+      throw new Error('公開チャンネルページを取得できません');
+    return html;
+  }
+
+  function mediaSaveSoon() {
+    if(mediaPersistTimer)clearTimeout(mediaPersistTimer);
+    mediaPersistTimer=setTimeout(()=>{
+      mediaPersistTimer=null;
+      if(!roster)return;
+      saveCache(roster.items);
+    },2500);
+  }
+
+  function mediaRefresh() {
+    render();
+    mediaSaveSoon();
+  }
+
+  function mediaEnqueue(row,verifyArchive=false) {
+    if(!row?.url)return;
+    const isDue=Date.now()-Number(row.archiveCheckedAt||0)>MEDIA_RECHECK_MS;
+    if(verifyArchive && row.graduated && row.archived!==true && !isDue)return;
+    if(!verifyArchive && row.avatar && row.avatar.startsWith('https://yt3.'))return;
+    const key=row.url;
+    if(mediaQueued.has(key))return;
+    mediaQueued.add(key);
+    mediaJobs.push({row,verifyArchive});
+    void mediaDrain();
+  }
+
+  async function mediaDrain() {
+    if(mediaRunning>=2)return;
+    while(mediaRunning<2&&mediaJobs.length) {
+      const job=mediaJobs.shift();
+      mediaRunning++;
+      void (async()=>{
+        const row=job.row;
+        try {
+          const spacing=Math.max(0,mediaLastRequest+600-Date.now());
+          if(spacing)await new Promise(r=>setTimeout(r,spacing));
+          mediaLastRequest=Date.now();
+          const videoHtml=await mediaFetchChannel(row.url,'videos');
+          const newAvatar=mediaAvatarFromHtml(videoHtml);
+          if(newAvatar)row.avatar=newAvatar;
+          if(job.verifyArchive && row.graduated){
+            let hasArchive=mediaHasPublicArchive(videoHtml);
+            if(!hasArchive) {
+              await new Promise(r=>setTimeout(r,600));
+              const streamHtml=await mediaFetchChannel(row.url,'streams');
+              hasArchive=mediaHasPublicArchive(streamHtml);
+              if(!row.avatar)row.avatar=mediaAvatarFromHtml(streamHtml);
+            }
+            row.archived=hasArchive;
+            row.archiveCheckedAt=Date.now();
+          }
+          mediaRefresh();
+        }catch(err){
+          mediaFailures++;
+          // Never call a failed request "no archive". Keep it unverified.
+          console.warn('[Nijisanji sidebar][channel]',row.name,String(err?.message||err));
+        }finally{
+          mediaQueued.delete(row.url);
+          mediaRunning--;
+          render();
+          void mediaDrain();
+        }
+      })();
+    }
+  }
+
+  function loadGroupMedia(group,includeFormer=false) {
+    for(const row of roster?.items||[]) {
+      if(row.group!==group)continue;
+      if(!row.graduated)mediaEnqueue(row,false);
+      else if(includeFormer)mediaEnqueue(row,true);
+    }
+  }
+
   function styles() {
     if (document.getElementById(CSS_ID)) return;
     const st=document.createElement('style');
@@ -457,6 +571,9 @@
       '#'+ROOT_ID+' .nj-fallback{display:grid;place-items:center;font-size:12px;font-weight:700}',
       '#'+ROOT_ID+' .nj-name{overflow:hidden;text-overflow:ellipsis;flex:1}',
       '#'+ROOT_ID+' .nj-tag{flex-shrink:0;font-size:9px;opacity:.78}',
+      '#'+ROOT_ID+' .nj-former-group{display:flex;align-items:center;gap:8px;padding:7px 8px;margin:5px 8px 5px 20px;width:calc(100% - 28px);border-radius:9px;font-size:12px;font-weight:500;background:var(--yt-spec-10-percent-layer,rgba(128,128,128,.11))}',
+      '#'+ROOT_ID+' .nj-former-group .nj-chevron{margin-left:auto}',
+      '#'+ROOT_ID+' .nj-empty{padding:8px 12px 8px 27px;font-size:11px;line-height:1.6;color:var(--yt-spec-text-secondary,#777)}',
       '#'+ROOT_ID+' .nj-message{font-size:11px;line-height:1.45;color:var(--yt-spec-text-secondary,#777);padding:8px 18px;white-space:normal}',
       '#'+ROOT_ID+' .nj-refresh{font-size:11px;text-align:center;color:var(--yt-spec-text-secondary,#777);padding:7px 12px;display:block;margin:auto;border-radius:8px}',
       '#'+ROOT_ID+' .nj-refresh:hover{background:var(--yt-spec-10-percent-layer,rgba(127,127,127,.1))}'
@@ -470,60 +587,104 @@
     if (content!==undefined) node.textContent=content;
     return node;
   }
+  function personLink(row) {
+    const a=el('a','nj-person'+(row.graduated?' nj-former':''));
+    a.href=row.url;
+    a.title=row.name+(row.date?'（'+row.date+'デビュー）':'')+
+      (row.graduated?'・卒業／活動終了（公開アーカイブ確認済み）':'');
+    if(row.avatar) {
+      const img=el('img','nj-face');
+      img.loading='lazy';img.alt='';
+      img.src=row.avatar;
+      img.addEventListener('error',()=>{
+        if(!img.isConnected)return;
+        img.replaceWith(el('span','nj-face nj-fallback',row.name.slice(0,1)));
+      },{once:true});
+      a.append(img);
+    } else a.append(el('span','nj-face nj-fallback',row.name.slice(0,1)));
+    a.append(el('span','nj-name',row.name));
+    if(row.graduated)a.append(el('span','nj-tag','卒業'));
+    return a;
+  }
+
   function render() {
-    if (!host) return;
+    if(!host)return;
     host.replaceChildren();
     const head=el('button','nj-head');
     head.type='button';head.setAttribute('aria-expanded',String(state.open));
-    head.append(el('span','nj-symbol','🌈'),el('span','','にじさんじ'),el('span','nj-chevron',state.open?'▾':'▸'));
+    head.append(el('span','nj-symbol','🌈'),el('span','','にじさんじ'),
+      el('span','nj-chevron',state.open?'▾':'▸'));
     head.addEventListener('click',()=>{state.open=!state.open;persistState();render();});
     host.append(head);
-    if (!state.open) return;
-    if (loading && !roster) host.append(el('div','nj-message','ライバー一覧を読み込んでいます…'));
-    if (lastError) host.append(el('div','nj-message','データ取得：'+lastError));
+    if(!state.open)return;
+    if(loading&&!roster)host.append(el('div','nj-message','ライバー一覧を読み込んでいます…'));
+    if(lastError)host.append(el('div','nj-message','データ取得：'+lastError));
     host.append(el('div','nj-message',cloudStatus));
-    if (!roster) {
+    if(!roster) {
       const retry=el('button','nj-refresh','🔄 一覧を読み込む');
       retry.addEventListener('click',()=>void updateRoster(true));
       host.append(retry);return;
     }
     const groups=new Map();
-    for (const item of roster.items) {
-      if (!groups.has(item.year)) groups.set(item.year,[]);
-      groups.get(item.year).push(item);
+    for(const item of roster.items) {
+      if(!groups.has(item.group))groups.set(item.group,[]);
+      groups.get(item.group).push(item);
     }
-    for (const [year,rows] of [...groups].sort((a,b)=>a[0]-b[0])) {
-      const shown=!!state.years[year];
+    const labels=[...GROUPS];
+    if(groups.has('2019年（デビュー月未確認）'))labels.push('2019年（デビュー月未確認）');
+    for(const group of labels) {
+      const rows=groups.get(group)||[];
+      if(!rows.length)continue;
+      const open=state.years[group]===true;
       const button=el('button','nj-year');
-      button.type='button';button.setAttribute('aria-expanded',String(shown));
-      button.append(el('span','nj-chevron',shown?'▾':'▸'),el('span','',year+'年'),el('span','nj-chevron',String(rows.length)));
+      button.type='button';button.setAttribute('aria-expanded',String(open));
+      button.append(el('span','nj-chevron',open?'▾':'▸'),
+        el('span','',group),el('span','nj-chevron',String(rows.length)));
       button.addEventListener('click',()=>{
-        state.years[year]=!shown;persistState();render();
+        state.years[group]=!open;
+        persistState();
+        if(!open)loadGroupMedia(group,false);
+        render();
       });
       host.append(button);
-      if (!shown) continue;
-      const list=el('div','nj-rows');
-      for (const row of rows) {
-        const a=el('a','nj-person'+(row.graduated?' nj-former':''));
-        a.href=row.url;a.title=row.name+(row.date?'（'+row.date+'デビュー）':'')+(row.graduated?'・卒業／活動終了':'');
-        const avatar=row.avatar;
-        if (avatar) {
-          const img=el('img','nj-face');
-          img.loading='lazy';img.referrerPolicy='no-referrer';img.alt='';
-          img.src=avatar;img.addEventListener('error',()=>{
-            const fallback=el('span','nj-face nj-fallback',row.name.slice(0,1));
-            img.replaceWith(fallback);
-          },{once:true});
-          a.append(img);
-        } else a.append(el('span','nj-face nj-fallback',row.name.slice(0,1)));
-        a.append(el('span','nj-name',row.name));
-        if(row.graduated)a.append(el('span','nj-tag','卒業'));
-        list.append(a);
+      if(!open)continue;
+      const active=rows.filter(row=>!row.graduated);
+      const retired=rows.filter(row=>row.graduated);
+      const currentList=el('div','nj-rows');
+      for(const item of active)currentList.append(personLink(item));
+      host.append(currentList);
+      if(!retired.length)continue;
+      const formerKey='former:'+group;
+      const showFormer=state.years[formerKey]===true;
+      const saved=retired.filter(row=>row.archived===true);
+      const waiting=retired.filter(row=>row.archived===null ||
+        Date.now()-Number(row.archiveCheckedAt||0)>MEDIA_RECHECK_MS);
+      const toggle=el('button','nj-former-group');
+      toggle.type='button';toggle.setAttribute('aria-expanded',String(showFormer));
+      toggle.append(el('span','', '卒業済'),el('span','nj-chevron',
+        (showFormer?'▾':'▸')+' '+saved.length+'件'));
+      toggle.addEventListener('click',()=>{
+        state.years[formerKey]=!showFormer;
+        persistState();
+        if(!showFormer)loadGroupMedia(group,true);
+        render();
+      });
+      host.append(toggle);
+      if(showFormer){
+        const formerList=el('div','nj-rows');
+        for(const row of saved)formerList.append(personLink(row));
+        host.append(formerList);
+        if(waiting.length||mediaQueued.size){
+          host.append(el('div','nj-empty','公開アーカイブの有無をYouTubeで確認中です。確認できたチャンネルだけを表示します。'));
+          loadGroupMedia(group,true);
+        }else if(!saved.length){
+          host.append(el('div','nj-empty','公開アーカイブを確認できた卒業済チャンネルはありません。'));
+        }
       }
-      host.append(list);
     }
     const timestamp=roster.at?new Date(roster.at).toLocaleDateString('ja-JP'):'';
-    const refresh=el('button','nj-refresh',(loading?'読み込み中…':'🔄 一覧を更新')+' ・ '+roster.items.length+'名'+(timestamp?' ・ '+timestamp:''));
+    const refresh=el('button','nj-refresh',
+      (loading?'読み込み中…':'🔄 一覧を更新')+' ・ '+roster.items.length+'名'+(timestamp?' ・ '+timestamp:''));
     refresh.disabled=loading;
     refresh.addEventListener('click',()=>void updateRoster(true));
     host.append(refresh);
