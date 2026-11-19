@@ -516,15 +516,92 @@
       && /(?:このチャンネルには動画がありません|has no (?:videos|content)|no videos|動画はありません|コンテンツはありません)/i.test(raw);
   }
 
+
+  function mediaChannelId(html) {
+    return String(html||'').match(/"(?:externalId|channelId)"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"/)?.[1]||'';
+  }
+
+  function mediaGMRequest(url) {
+    return new Promise((resolve,reject)=>{
+      const modern=typeof GM!=='undefined'?(GM.xmlHttpRequest||GM.xmlhttpRequest):null;
+      const old=typeof GM_xmlhttpRequest==='function'?GM_xmlhttpRequest:null;
+      const fn=typeof modern==='function'?modern.bind(GM):old;
+      if(!fn){reject(new Error('ユーザースクリプト通信不可'));return;}
+      let settled=false;
+      const finish=(error,value)=>{
+        if(settled)return;settled=true;
+        if(error)reject(error);else resolve(value);
+      };
+      const success=res=>{
+        if(res.status<200||res.status>=300)return finish(new Error('HTTP '+res.status));
+        const raw=String(res.responseText??res.response??'');
+        if(raw.length<80)return finish(new Error('通信応答が空です'));
+        finish(null,raw);
+      };
+      try{
+        const task=fn({method:'GET',url,timeout:20000,responseType:'text',onload:success,
+          onerror:()=>finish(new Error('接続できませんでした')),
+          ontimeout:()=>finish(new Error('20秒で通信タイムアウト'))});
+        if(task&&typeof task.then==='function')task.then(success).catch(finish);
+      }catch(error){finish(error);}
+    });
+  }
+
+  async function mediaGet(url,minLength=1000) {
+    let primaryError='';
+    try{
+      const res=await fetch(url,{credentials:'include',redirect:'follow',cache:'no-store'});
+      if(!res.ok)throw new Error('HTTP '+res.status);
+      const raw=await res.text();
+      if(raw.length<minLength)throw new Error('HTMLが空か不完全です');
+      if(/consent\.youtube\.com|<title>.*(?:404|not found)/i.test(raw.slice(0,5000)))
+        throw new Error('公開チャンネルが見つかりません');
+      return raw;
+    }catch(error){primaryError=String(error?.message||error);}
+    try{
+      const raw=await mediaGMRequest(url);
+      if(raw.length<minLength)throw new Error('代替通信の応答が不完全');
+      return raw;
+    }catch(error){
+      throw new Error('ブラウザ通信：'+primaryError+'／代替通信：'+String(error?.message||error));
+    }
+  }
+
   async function mediaFetchChannel(url,tab) {
-    const target=url.replace(/\/+$/,'')+'/'+tab;
-    const response=await fetch(target,{credentials:'include',redirect:'follow',cache:'default'});
-    if(!response.ok||!new URL(response.url).hostname.endsWith('youtube.com'))
-      throw new Error('YouTube HTTP '+response.status);
-    const html=await response.text();
-    if(html.length<1000||/consent\.youtube\.com|<title>.*(?:404|not found)/i.test(html.slice(0,5000)))
-      throw new Error('公開チャンネルページを取得できません');
-    return html;
+    return mediaGet(url.replace(/\/+$/,'')+'/'+tab);
+  }
+
+  async function mediaRssArchive(channelId) {
+    if(!/^UC[a-zA-Z0-9_-]{22}$/.test(channelId))return false;
+    try{
+      const raw=await mediaGet('https://www.youtube.com/feeds/videos.xml?channel_id='+channelId,80);
+      return /<entry(?:\s|>)[\s\S]*?<yt:videoId>[A-Za-z0-9_-]{11}<\/yt:videoId>/.test(raw);
+    }catch{return false;}
+  }
+
+  async function inspectMediaCandidate(url,verifyArchives) {
+    const videos=await mediaFetchChannel(url,'videos');
+    let avatar=mediaAvatarFromHtml(videos);
+    if(!verifyArchives)return {avatar,hasArchive:null,confirmed:false};
+    let hasArchive=mediaHasPublicArchive(videos);
+    const videosEmpty=mediaConfirmsEmptyTab(videos);
+    let streams='',streamsEmpty=false,streamError='';
+    if(!hasArchive){
+      try{
+        streams=await mediaFetchChannel(url,'streams');
+        hasArchive=mediaHasPublicArchive(streams);
+        streamsEmpty=mediaConfirmsEmptyTab(streams);
+      }catch(error){streamError=String(error?.message||error);}
+    }
+    if(!avatar&&streams)avatar=mediaAvatarFromHtml(streams);
+    if(!hasArchive){
+      const id=url.match(/\/channel\/(UC[a-zA-Z0-9_-]{22})/)?.[1] ||
+        mediaChannelId(videos)||mediaChannelId(streams);
+      if(id)hasArchive=await mediaRssArchive(id);
+    }
+    if(hasArchive)return {avatar,hasArchive:true,confirmed:true};
+    if(videosEmpty&&streamsEmpty)return {avatar,hasArchive:false,confirmed:true};
+    throw new Error(streamError?('ライブ欄：'+streamError):'動画一覧の確認不可');
   }
 
   function mediaSaveSoon() {
@@ -550,54 +627,58 @@
     if(Date.now()-Number(mediaFailedAt.get(key)||0)<MEDIA_FAILURE_BACKOFF_MS)return;
     if(mediaQueued.has(key))return;
     mediaQueued.add(key);
-    mediaJobs.push({row,verifyArchive});
+    mediaJobs.push({row,verifyArchive,key});
     void mediaDrain();
   }
 
   async function mediaDrain() {
     if(mediaRunning>=2)return;
-    while(mediaRunning<2&&mediaJobs.length) {
+    while(mediaRunning<2&&mediaJobs.length){
       const job=mediaJobs.shift();
       mediaRunning++;
       void (async()=>{
         const row=job.row;
-        try {
-          const spacing=Math.max(0,mediaLastRequest+600-Date.now());
-          if(spacing)await new Promise(r=>setTimeout(r,spacing));
+        try{
+          const spacing=Math.max(0,mediaLastRequest+500-Date.now());
+          if(spacing)await new Promise(resolve=>setTimeout(resolve,spacing));
           mediaLastRequest=Date.now();
-          const videoHtml=await mediaFetchChannel(row.url,'videos');
-          const newAvatar=mediaAvatarFromHtml(videoHtml);
-          if(newAvatar)row.avatar=newAvatar;
-          if(job.verifyArchive && row.graduated){
-            let hasArchive=mediaHasPublicArchive(videoHtml);
-            let emptyVideos=mediaConfirmsEmptyTab(videoHtml);
-            let emptyStreams=false;
-            if(!hasArchive) {
-              await new Promise(r=>setTimeout(r,600));
-              const streamHtml=await mediaFetchChannel(row.url,'streams');
-              hasArchive=mediaHasPublicArchive(streamHtml);
-              emptyStreams=mediaConfirmsEmptyTab(streamHtml);
-              if(!row.avatar)row.avatar=mediaAvatarFromHtml(streamHtml);
-            }
-            if(hasArchive) {
-              row.archived=true;
-              row.archiveCheckedAt=Date.now();
-            }else if(emptyVideos&&emptyStreams) {
-              row.archived=false;
-              row.archiveCheckedAt=Date.now();
-            }else {
-              throw new Error('動画一覧の判定不能（アーカイブの有無は未確認）');
+          const candidates=[...new Set([row.url,...(row.alternates||[])].filter(Boolean))];
+          let verified=false,allEmpty=true,details=[];
+          for(const candidate of candidates){
+            try{
+              const result=await inspectMediaCandidate(candidate,job.verifyArchive&&row.graduated);
+              if(result.avatar&&!row.avatar)row.avatar=result.avatar;
+              if(job.verifyArchive&&row.graduated) {
+                if(result.hasArchive===true){
+                  row.url=candidate;
+                  row.archived=true;
+                  row.archiveCheckedAt=Date.now();
+                  verified=true;break;
+                }
+                if(result.hasArchive!==false)allEmpty=false;
+              } else if(result.avatar){
+                row.avatar=result.avatar;
+                break;
+              }
+            }catch(error){
+              allEmpty=false;
+              details.push(String(error?.message||error));
             }
           }
-          mediaFailedAt.delete(row.url);
+          if(job.verifyArchive&&row.graduated&&!verified){
+            if(allEmpty){row.archived=false;row.archiveCheckedAt=Date.now();}
+            else throw new Error(details.join(' / ')||'アーカイブを確認できません');
+          }
+          mediaFailedAt.delete(job.key);
+          mediaFailureReasons.delete(job.key);
           mediaRefresh();
-        }catch(err){
+        }catch(error){
           mediaFailures++;
-          mediaFailedAt.set(row.url,Date.now());
-          // Never call a failed request "no archive". Keep it unverified.
-          console.warn('[Nijisanji sidebar][channel]',row.name,String(err?.message||err));
+          mediaFailedAt.set(job.key,Date.now());
+          mediaFailureReasons.set(job.key,String(error?.message||error).slice(0,150));
+          console.warn('[Nijisanji sidebar][archive]',row.name,String(error?.message||error));
         }finally{
-          mediaQueued.delete(row.url);
+          mediaQueued.delete(job.key);
           mediaRunning--;
           render();
           void mediaDrain();
@@ -746,14 +827,17 @@
           host.append(el('div','nj-empty','公開アーカイブの有無をYouTubeで確認しています。確認できたチャンネルだけを表示します。'));
           loadGroupMedia(group,true);
         }
-        const failureCount=retired.filter(row=>mediaFailedAt.has(row.url)).length;
+        const failedRows=retired.filter(row=>mediaFailedAt.has(row.url));
+        const failureCount=failedRows.length;
         if(failureCount) {
-          const again=el('button','nj-refresh','⚠️ 未確認 '+failureCount+'件（通信エラー・再確認）');
+          const again=el('button','nj-refresh','⚠️ 確認できない '+failureCount+'件・再確認');
+          again.title=failedRows.map(row=>row.name+'：'+(mediaFailureReasons.get(row.url)||'詳細不明')).join('\n');
           again.addEventListener('click',()=>{
-            for(const row of retired)mediaFailedAt.delete(row.url);
+            for(const row of retired){mediaFailedAt.delete(row.url);mediaFailureReasons.delete(row.url);}
             loadGroupMedia(group,true);render();
           });
           host.append(again);
+          host.append(el('div','nj-empty',failedRows.slice(0,2).map(row=>row.name+'：'+(mediaFailureReasons.get(row.url)||'未確認')).join(' ／ ')));
         }else if(!saved.length&&!waiting.length){
           host.append(el('div','nj-empty','公開アーカイブを確認できた卒業済チャンネルはありません。'));
         }
