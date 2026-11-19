@@ -781,7 +781,8 @@
     if(!row?.url || row.graduated || !state.open || document.visibilityState==='hidden')return;
     const key=row.url,entry=liveChecks.get(key);
     const now=Date.now();
-    if(entry && now-entry.checkedAt<(entry.failed?LIVE_RETRY_MS:LIVE_CHECK_INTERVAL_MS))return;
+    const lastAttempt=entry?.failed?entry.attemptAt:entry?.checkedAt;
+    if(entry && now-Number(lastAttempt||0)<(entry.failed?LIVE_RETRY_MS:LIVE_CHECK_INTERVAL_MS))return;
     if(liveQueued.has(key))return;
     liveQueued.add(key);
     liveJobs.push({key});
