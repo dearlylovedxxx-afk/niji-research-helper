@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.11
+// @version      0.1.12
 // @description  にじさんじをデビュー期別に表示。公開配信中は赤リングとLIVE印、卒業済はアーカイブ確認後に表示。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -705,30 +705,34 @@
   const LIVE_MAX_PARALLEL = 2;
   const LIVE_TIMEOUT_MS = 12000;
   const liveChecks = new Map();
+  const liveErrors = new Map();
   const liveQueued = new Set();
   const liveJobs = [];
   let liveRunning = 0;
   let lastLiveNetworkAt = 0;
 
-  function playerResponseFromHtml(html) {
+  function youtubeEmbeddedData(html,token) {
     const raw=String(html||'');
-    const match=/(?:var\s+)?ytInitialPlayerResponse\s*=\s*/.exec(raw);
-    if(!match)return null;
-    const begin=raw.indexOf('{',match.index+match[0].length);
-    if(begin<0)return null;
-    let depth=0,inString=false,escaped=false;
-    for(let i=begin;i<raw.length&&i<begin+2000000;i++){
-      const c=raw[i];
-      if(inString){
-        if(escaped)escaped=false;
-        else if(c==='\\')escaped=true;
-        else if(c==='"')inString=false;
-        continue;
-      }
-      if(c==='"')inString=true;
-      else if(c==='{')depth++;
-      else if(c==='}' && --depth===0){
-        try{return JSON.parse(raw.slice(begin,i+1));}catch{return null;}
+    const patterns=token==='ytInitialData'
+      ? [/(?:var\s+)?ytInitialData\s*=\s*/,/window\[['"]ytInitialData['"]\]\s*=\s*/]
+      : [/(?:var\s+)?ytInitialPlayerResponse\s*=\s*/,/window\[['"]ytInitialPlayerResponse['"]\]\s*=\s*/];
+    for(const pattern of patterns){
+      const match=pattern.exec(raw);
+      if(!match)continue;
+      const begin=raw.indexOf('{',match.index+match[0].length);
+      if(begin<0||begin>match.index+match[0].length+6)continue;
+      let depth=0,inString=false,escaped=false;
+      for(let i=begin;i<raw.length&&i<begin+4000000;i++){
+        const c=raw[i];
+        if(inString){
+          if(escaped)escaped=false;
+          else if(c==='\\')escaped=true;
+          else if(c==='"')inString=false;
+        }else if(c==='"')inString=true;
+        else if(c==='{')depth++;
+        else if(c==='}' && --depth===0){
+          try{return JSON.parse(raw.slice(begin,i+1));}catch{break;}
+        }
       }
     }
     return null;
@@ -737,38 +741,107 @@
   function liveStatusFromWatchHtml(html,finalUrl) {
     let url;
     try{url=new URL(finalUrl,location.origin);}catch{return {live:false,known:false};}
-    if(!/(?:^|\.)youtube\.com$/.test(url.hostname) ||
-      url.pathname!=='/watch' || !url.searchParams.get('v'))
+    if(!/(?:^|\.)youtube\.com$/.test(url.hostname)||
+      url.pathname!=='/watch'||!url.searchParams.get('v'))
       return {live:false,known:false};
-    const data=playerResponseFromHtml(html);
+    const data=youtubeEmbeddedData(html,'ytInitialPlayerResponse');
     if(!data)return {live:false,known:false};
-    const details=data.videoDetails||{};
-    const broadcast=data.microformat?.playerMicroformatRenderer?.liveBroadcastDetails||{};
+    const d=data.videoDetails||{};
+    const b=data.microformat?.playerMicroformatRenderer?.liveBroadcastDetails||{};
     const offline=data.playabilityStatus?.status==='LIVE_STREAM_OFFLINE';
-    const ended=!!broadcast.endTimestamp;
-    const upcoming=details.isUpcoming===true;
-    const explicitlyNow=broadcast.isLiveNow===true||details.isLive===true;
-    const explicitlyNot=broadcast.isLiveNow===false;
-    return {live:!offline&&!ended&&!upcoming&&!explicitlyNot&&explicitlyNow,known:true};
+    const ended=!!b.endTimestamp,upcoming=d.isUpcoming===true;
+    const explicit=b.isLiveNow===true||d.isLive===true;
+    const inactive=b.isLiveNow===false;
+    return {live:!offline&&!ended&&!upcoming&&!inactive&&explicit,known:true};
+  }
+
+  function liveStatusFromStreamsData(data) {
+    // Select only the requested channel's own Live tab. Scanning all
+    // ytInitialData also picks up unrelated currently live recommendations.
+    const tabs=data?.contents?.twoColumnBrowseResultsRenderer?.tabs;
+    if(!Array.isArray(tabs))return {live:false,known:false};
+    const selected=tabs.find(t=>t.tabRenderer?.selected===true ||
+      t.expandableTabRenderer?.selected===true);
+    const matching=tabs.find(t=>{
+      const r=t.tabRenderer||t.expandableTabRenderer;
+      return /\/streams(?:[/?]|$)/.test(
+        String(r?.endpoint?.commandMetadata?.webCommandMetadata?.url||''));
+    });
+    const tab=matching?.tabRenderer?.selected===true?matching:selected||matching;
+    const content=(tab?.tabRenderer||tab?.expandableTabRenderer)?.content;
+    if(!content)return {live:false,known:false};
+    const cards=[];
+    let traversed=0;
+    function visit(node,depth=0){
+      if(!node||typeof node!=='object'||depth>24||traversed++>2400)return;
+      if(Array.isArray(node)){
+        for(const item of node.slice(0,150))visit(item,depth+1);
+        return;
+      }
+      for(const key of ['videoRenderer','gridVideoRenderer','lockupViewModel','videoWithContextRenderer']){
+        if(node[key]&&typeof node[key]==='object'){
+          const item=node[key];
+          if(key==='lockupViewModel'){
+            const id=item.contentId;
+            if(!/^[A-Za-z0-9_-]{11}$/.test(String(id||'')))continue;
+            if(item.contentType&&String(item.contentType)!=='VIDEO')continue;
+          }
+          cards.push(item);
+          return;
+        }
+      }
+      for(const [key,value] of Object.entries(node)){
+        if(/reel|shorts|playlist|continuationItem|channelRenderer/i.test(key))continue;
+        visit(value,depth+1);
+      }
+    }
+    visit(content);
+    if(!cards.length)return {live:false,known:false};
+    const current=cards.some(card=>{
+      const json=JSON.stringify(card);
+      if(/"style"\s*:\s*"UPCOMING"|"style"\s*:\s*"BADGE_STYLE_TYPE_UPCOMING"/.test(json))
+        return false;
+      return /"(?:style|badgeStyle)"\s*:\s*"BADGE_STYLE_TYPE_LIVE_NOW"/.test(json)
+        || /"thumbnailOverlayTimeStatusRenderer"\s*:\s*\{\s*"style"\s*:\s*"LIVE"/.test(json)
+        || /"style"\s*:\s*"LIVE"/.test(json)
+        || /"iconType"\s*:\s*"LIVE"/.test(json)
+        || /"isLiveNow"\s*:\s*true/.test(json);
+    });
+    return {live:current,known:true,cardCount:cards.length};
+  }
+
+  function liveStatusFromStreamsHtml(html) {
+    const data=youtubeEmbeddedData(html,'ytInitialData');
+    return data?liveStatusFromStreamsData(data):{live:false,known:false};
   }
 
   async function probeChannelLive(channelUrl) {
+    // The old version depended solely on /live redirecting to /watch.
+    // YouTube may render /live as a channel page without such a redirect.
+    // The channel's own /streams tab and its explicit LIVE badges are the
+    // primary signal; /live is now only a fallback.
+    const streamsUrl=channelUrl.replace(/\/+$/,'')+'/streams';
+    let firstError='';
+    try {
+      const streamsHtml=await mediaGet(streamsUrl,1000);
+      const status=liveStatusFromStreamsHtml(streamsHtml);
+      if(status.known)return status.live;
+      firstError='ライブ一覧を解析できませんでした';
+    }catch(error){firstError=String(error?.message||error);}
     const target=channelUrl.replace(/\/+$/,'')+'/live';
     const controller=new AbortController();
     const timeout=setTimeout(()=>controller.abort(),LIVE_TIMEOUT_MS);
-    try{
+    try {
       const response=await fetch(target,{credentials:'include',redirect:'follow',
         cache:'no-store',signal:controller.signal});
       if(!response.ok)throw new Error('YouTube HTTP '+response.status);
       const html=await response.text();
-      const status=liveStatusFromWatchHtml(html,response.url||target);
-      // YouTube normally redirects /live to /watch?v=... for current or
-      // scheduled broadcasts. If it stays on /live, there is no active stream.
-      if(status.known)return status.live;
-      const resolved=new URL(response.url||target,location.origin);
-      if(resolved.pathname==='/watch')
-        throw new Error('YouTubeの配信状態を解析できません');
-      return false;
+      const watch=liveStatusFromWatchHtml(html,response.url||target);
+      if(watch.known)return watch.live;
+      const streams=liveStatusFromStreamsHtml(html);
+      if(streams.known)return streams.live;
+      // No reliable signal is not "offline": report it for diagnosis.
+      throw new Error('配信情報を判定できません。ライブ欄：'+firstError);
     }finally{clearTimeout(timeout);}
   }
 
@@ -808,6 +881,7 @@
           const wasLive=isLiveNow(job.key);
           const currentlyLive=await probeChannelLive(job.key);
           liveChecks.set(job.key,{live:currentlyLive,checkedAt:Date.now(),failed:false});
+          liveErrors.delete(job.key);
           if(wasLive!==currentlyLive)render();
         }catch(error){
           // Failure is unknown, not evidence that a livestream ended.
@@ -815,7 +889,9 @@
           const previous=liveChecks.get(job.key);
           liveChecks.set(job.key,{live:previous?.live===true,
             checkedAt:previous?.checkedAt||0,failed:true,attemptAt:Date.now()});
-          console.debug('[Nijisanji sidebar][LIVE]',job.key,String(error?.message||error));
+          liveErrors.set(job.key,String(error?.message||error).slice(0,200));
+          console.warn('[Nijisanji sidebar][LIVE]',job.key,String(error?.message||error));
+          render();
         }finally{
           liveQueued.delete(job.key);
           liveRunning--;
@@ -904,6 +980,13 @@
     if(loading&&!roster)host.append(el('div','nj-message','ライバー一覧を読み込んでいます…'));
     if(lastError)host.append(el('div','nj-message','データ取得：'+lastError));
     host.append(el('div','nj-message',cloudStatus));
+    const visibleLiveErrors=[...liveErrors.entries()].filter(([url])=>
+      roster?.items?.some(row=>row.url===url&&!row.graduated&&state.years[row.group]===true));
+    if(visibleLiveErrors.length){
+      const note=el('div','nj-message','⚠️ LIVE確認できないチャンネル '+visibleLiveErrors.length+'件');
+      note.title=visibleLiveErrors.slice(0,8).map(([url,reason])=>url+'：'+reason).join('\n');
+      host.append(note);
+    }
     if(!roster) {
       const retry=el('button','nj-refresh','🔄 一覧を読み込む');
       retry.addEventListener('click',()=>void updateRoster(true));
