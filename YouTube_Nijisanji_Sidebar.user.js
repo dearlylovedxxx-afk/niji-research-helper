@@ -1316,13 +1316,22 @@
     return {mount,element};
   }
 
-  function liveHubNativeVideoPlaying(mount) {
+  function liveHubNativeVideoPlaying(mount,videoId) {
     const candidates=[
       ...mount.querySelectorAll('video'),
       ...document.querySelectorAll('ytd-video-preview video,#inline-preview-player video')
     ];
     if(mount.shadowRoot)candidates.push(...mount.shadowRoot.querySelectorAll('video'));
-    return candidates.some(video=>!video.paused && !video.ended && video.readyState>=2);
+    for(const video of candidates){
+      if(!video.paused && !video.ended && video.readyState>=2){
+        video.muted=true;
+        return true;
+      }
+    }
+    const globalPreview=document.querySelector('ytd-video-preview[playing]');
+    const previewVideoId=globalPreview?.videoPreviewData?.navigationEndpoint?.watchEndpoint?.videoId
+      ||globalPreview?.data?.navigationEndpoint?.watchEndpoint?.videoId;
+    return previewVideoId===videoId;
   }
 
   function liveHubDispatchNativeHover(element) {
@@ -1361,7 +1370,7 @@
       };
       const check=()=>{
         if(!liveHubSessionValid(thumb,token)){finish(false);return;}
-        if(liveHubNativeVideoPlaying(native.mount)){
+        if(liveHubNativeVideoPlaying(native.mount,videoId)){
           // Native playback stays in the YouTube component and is never
           // replaced by a fake image or a separate ad-hoc video element.
           liveHubActivePreview=thumb;
@@ -1379,10 +1388,8 @@
         clearTimeout(timeout);clearTimeout(trigger);
         oldCleanup();
       };
-      const oldFinish=finish;
-      // Keep timers bounded after resolution without changing promise state.
-      const safeCheck=()=>{if(finished){clearTimeout(timeout);clearTimeout(trigger);}};
-      setTimeout(safeCheck,LIVE_HUB_NATIVE_WAIT_MS+100);
+      // The native player's own runtime owns playback after confirmation;
+      // all outstanding timers are cleared when the card is left.
     });
   }
 
@@ -1415,7 +1422,8 @@
           try{payload=JSON.parse(payload);}catch{return;}
         }
         if(!payload||typeof payload!=='object')return;
-        if(payload.event==='onStateChange' && Number(payload.info)===1){
+        if((payload.event==='onStateChange' && Number(payload.info)===1) ||
+          (payload.event==='infoDelivery' && Number(payload.info?.playerState)===1)){
           if(!liveHubSessionValid(thumb,token)){finish(false);return;}
           frame.style.opacity='1';
           frame.setAttribute('aria-hidden','false');
@@ -1427,9 +1435,19 @@
            payload.info?.errorCode)){
           finish(false);
         }else if(payload.event==='onReady') {
-          try{frame.contentWindow.postMessage(JSON.stringify({
-            event:'command',func:'mute',args:[]
-          }),'https://www.youtube.com');}catch{}
+          try {
+            for(const eventName of ['onStateChange','onError']){
+              frame.contentWindow.postMessage(JSON.stringify({
+                event:'command',func:'addEventListener',args:[eventName]
+              }),'https://www.youtube.com');
+            }
+            frame.contentWindow.postMessage(JSON.stringify({
+              event:'command',func:'mute',args:[]
+            }),'https://www.youtube.com');
+            frame.contentWindow.postMessage(JSON.stringify({
+              event:'command',func:'playVideo',args:[]
+            }),'https://www.youtube.com');
+          }catch{}
         }
       };
       const finish=ok=>{
@@ -1444,7 +1462,7 @@
       window.addEventListener('message',message);
       frame.addEventListener('load',()=>{
         try{frame.contentWindow.postMessage(JSON.stringify({
-          event:'listening',id:'niji-live-hover'
+          event:'listening',id:'niji-live-hover',channel:'widget'
         }),'https://www.youtube.com');}catch{}
       },{once:true});
       thumb.append(frame);
