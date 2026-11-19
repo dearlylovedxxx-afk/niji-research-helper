@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.0
+// @version      0.1.1
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -135,8 +135,32 @@
     if (!scope) return {lines:[],icons:{}};
     const lines = [];
     const icons = {};
-    const nodes = scope.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li');
+    const nodes = [...scope.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li')];
+
+    // Wiki headings sometimes have date text in bare div/text nodes, not p.
+    // Capture those text nodes in their original DOM order so debut dates
+    // cannot silently disappear while channel links still parse correctly.
+    if (type === 'official') {
+      const walker = doc.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const parent = node.parentElement;
+        if (!parent || parent.closest('li,p,h1,h2,h3,h4,h5,h6,nav,header,footer,aside,script,style')) continue;
+        const t = text(node.nodeValue);
+        if (t.length > 500 || !/20\d{2}[\/.-]\d{1,2}[\/.-]\d{1,2}/.test(t)) continue;
+        if (!/デビュー|公式デビュー日/.test(t)) continue;
+        nodes.push(node);
+      }
+      nodes.sort((a,b) => {
+        if (a === b) return 0;
+        return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
+      });
+    }
     for (const el of nodes) {
+      if (el.nodeType === Node.TEXT_NODE) {
+        lines.push(text(el.nodeValue));
+        continue;
+      }
       if (el.closest('nav,header,footer,aside')) continue;
       if (el.tagName === 'P' && el.closest('li')) continue;
       if (el.tagName === 'LI' && el.querySelector('li')) continue;
