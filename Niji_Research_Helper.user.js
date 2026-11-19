@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.133
+// @version      1.0.134
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -978,7 +978,7 @@
 
   // Niji Cloud integration for the YouTube Nijisanji sidebar. Keep the
   // existing authenticated NRH preference stream; never expose its token.
-  const NIJI_SIDEBAR_PREF = 'nijisanjiSidebarV1';
+  const NIJI_SIDEBAR_PREF = 'nijisanjiSidebarV2';
   const NIJI_SIDEBAR_STATE_LS = 'marina-niji-yt-open-v1';
   const NIJI_SIDEBAR_ROSTER_LS = 'marina-niji-yt-roster-v1';
   let nijiSidebarBridgeBound = false;
@@ -1007,7 +1007,7 @@
     try {
       const raw=localStorage.getItem(NIJI_SIDEBAR_ROSTER_LS);
       const row=raw?JSON.parse(raw):null;
-      if(row && row.schema===2 && Array.isArray(row.items) && row.items.length>=90 && row.items.length<=600) {
+      if(row && row.schema===3 && Array.isArray(row.items) && row.items.length>=90 && row.items.length<=600) {
         const items=row.items.map(x=>({
           name:String(x.name||'').slice(0,90),year:Number(x.year||0),
           group:String(x.group||'').slice(0,60),
@@ -1020,7 +1020,7 @@
           order:Number(x.order||0),officialOrder:Number(x.officialOrder||x.order||0)
         })).filter(x=>x.name && x.group &&
           /^https:\/\/www\.youtube\.com\//.test(x.url) && x.year>=2018 && x.year<=2099);
-        if(items.length>=90) localRoster={schema:2,at:Math.max(0,Number(row.at||0)),items};
+        if(items.length>=90) localRoster={schema:3,at:Math.max(0,Number(row.at||0)),items};
       }
     } catch {}
     const old=nijiSidebarValid(previous);
@@ -1035,7 +1035,7 @@
     if(!data)return false;
     try {
       localStorage.setItem(NIJI_SIDEBAR_STATE_LS,JSON.stringify(data.state));
-      if(data.roster?.schema===2 && data.roster?.items?.length>=90)
+      if(data.roster?.schema===3 && data.roster?.items?.length>=90)
         localStorage.setItem(NIJI_SIDEBAR_ROSTER_LS,JSON.stringify(data.roster));
       window.dispatchEvent(new Event('nijisanji-sidebar:cloud-applied'));
       nijiSidebarStatus('☁️ Niji Cloudと同期済み');
