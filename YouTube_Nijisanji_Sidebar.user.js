@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.2.0
+// @version      0.2.1
 // @description  にじさんじをデビュー期別に表示。公開配信中は赤リングとLIVE印、卒業済はアーカイブ確認後に表示。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -1016,6 +1016,9 @@
   let liveHub=null,liveHubLoading=false,liveHubLastAt=0;
   let liveHubCards=[],liveHubError='',liveHubMatched=0,liveHubSourceCount=0;
   let liveHubHoverTimer=null,liveHubActivePreview=null;
+  let liveHubPreviewGeneration=0;
+  const liveHubPreviewCache=new Map();
+  const LIVE_HUB_PREVIEW_CACHE_MS=60*60*1000;
 
   function liveHubActive() {
     return location.pathname==='/' && location.hash===LIVE_HUB_HASH;
@@ -1159,7 +1162,7 @@
       '#'+LIVE_HUB_ID+' .nh-card{min-width:0}',
       '#'+LIVE_HUB_ID+' .nh-thumb{position:relative;display:block;width:100%;aspect-ratio:16/9;background:#111;overflow:hidden;border-radius:12px;text-decoration:none;color:#fff}',
       '#'+LIVE_HUB_ID+' .nh-thumb>img{display:block;width:100%;height:100%;object-fit:cover}',
-      '#'+LIVE_HUB_ID+' .nh-thumb iframe{position:absolute;inset:0;width:100%;height:100%;border:0;pointer-events:none;background:#000}',
+      '#'+LIVE_HUB_ID+' .nh-moving-preview{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover;pointer-events:none}',
       '#'+LIVE_HUB_ID+' .nh-badge{position:absolute;left:10px;top:10px;z-index:2;background:#e21b38;color:#fff;font-size:12px;font-weight:700;border-radius:4px;padding:4px 6px}',
       '#'+LIVE_HUB_ID+' .nh-viewers{position:absolute;right:8px;bottom:8px;z-index:2;background:rgba(0,0,0,.8);font-size:12px;border-radius:4px;padding:4px 7px}',
       '#'+LIVE_HUB_ID+' .nh-info{display:flex;gap:10px;padding:12px 2px 0}',
@@ -1187,13 +1190,92 @@
     }
     liveHub.style.left=left+'px';
   }
+  // YouTube's home page uses signed animated thumbnails, not the embedded
+  // player. An embedded iframe may be blocked by the uploader (error 152).
+  // Only use YouTube-issued preview URLs for the exact video.
+  function liveHubAnimatedUrl(value,videoId) {
+    try {
+      const raw=String(value||'').replace(/\\u0026/gi,'&').replace(/&amp;/g,'&').replace(/\\\//g,'/');
+      const url=new URL(raw,location.origin);
+      if(url.protocol!=='https:'||!/^(?:i|i\d+)\.ytimg\.com$/i.test(url.hostname))return '';
+      if(!url.pathname.startsWith('/an_webp/'+videoId+'/'))return '';
+      if(!/\.webp$/i.test(url.pathname))return '';
+      return url.href;
+    }catch{return '';}
+  }
+
+  function liveHubVideoRendererPreview(html,videoId) {
+    const parsed=youtubeEmbeddedData(html,'ytInitialData');
+    if(!parsed)return '';
+    const queue=[parsed];
+    let visited=0;
+    while(queue.length && visited++<12000) {
+      const node=queue.pop();
+      if(!node||typeof node!=='object')continue;
+      if(Array.isArray(node)) {
+        for(let i=node.length-1;i>=0;i--)queue.push(node[i]);
+        continue;
+      }
+      const card=node.videoRenderer||node.gridVideoRenderer||node;
+      const matched=card.videoId===videoId||
+        (card.contentId===videoId&&card.contentType==='VIDEO');
+      if(matched) {
+        const thumbs=card.richThumbnail?.movingThumbnailRenderer
+          ?.movingThumbnailDetails?.thumbnails
+          || card.movingThumbnailRenderer?.movingThumbnailDetails?.thumbnails
+          || card.richThumbnail?.movingThumbnailDetails?.thumbnails
+          || [];
+        for(let i=thumbs.length-1;i>=0;i--){
+          const url=liveHubAnimatedUrl(thumbs[i]?.url,videoId);
+          if(url)return url;
+        }
+      }
+      for(const [key,value] of Object.entries(node)) {
+        if(key==='responseContext'||key==='frameworkUpdates'||key==='playerOverlays')continue;
+        if(value&&typeof value==='object')queue.push(value);
+      }
+    }
+    return '';
+  }
+
+  function liveHubRawPreviewUrl(html,videoId) {
+    // Some responses contain an_webp as an escaped JSON string without
+    // the movingThumbnailRenderer wrapper.
+    const raw=String(html||'');
+    const regex=new RegExp('https?:\\\\/\\\\/(?:i|i\\\\d+)\\\\.ytimg\\\\.com\\\\/an_webp\\\\/'+videoId+'\\\\/[^"\\\\s<>]+?\\\\.webp(?:\\\\?[^"\\\\s<>]*)?','g');
+    for(const match of raw.matchAll(regex)) {
+      const url=liveHubAnimatedUrl(match[0],videoId);
+      if(url)return url;
+    }
+    return '';
+  }
+
+  async function liveHubFindAnimatedPreview(videoId) {
+    const existing=liveHubPreviewCache.get(videoId);
+    if(existing && Date.now()-existing.at<LIVE_HUB_PREVIEW_CACHE_MS)return existing.url;
+    // Search returns the signed URL YouTube issues for eligible videos.
+    const target='https://www.youtube.com/results?search_query='+encodeURIComponent(videoId);
+    try {
+      const html=await mediaGet(target,1000);
+      const url=liveHubVideoRendererPreview(html,videoId)
+        || liveHubRawPreviewUrl(html,videoId);
+      liveHubPreviewCache.set(videoId,{url,at:Date.now()});
+      return url;
+    }catch(error) {
+      console.debug('[Nijisanji live hub][preview]',videoId,String(error?.message||error));
+      return '';
+    }
+  }
+
   function liveHubStopPreview() {
+    liveHubPreviewGeneration++;
     if(liveHubHoverTimer){clearTimeout(liveHubHoverTimer);liveHubHoverTimer=null;}
     if(liveHubActivePreview){
-      liveHubActivePreview.querySelector('iframe')?.remove();
+      liveHubActivePreview.querySelector('.nh-moving-preview')?.remove();
       liveHubActivePreview=null;
     }
   }
+
   function liveHubCard(item) {
     const card=el('article','nh-card');
     const thumb=el('a','nh-thumb');
@@ -1207,19 +1289,30 @@
       item.viewers===null?'同接 —':item.viewers.toLocaleString('ja-JP')+' 人が視聴中'));
     const start=()=>{
       liveHubStopPreview();
-      liveHubHoverTimer=setTimeout(()=>{
+      const generation=liveHubPreviewGeneration;
+      liveHubHoverTimer=setTimeout(async()=>{
         liveHubHoverTimer=null;
-        if(!thumb.isConnected || !liveHubActive() || document.visibilityState==='hidden')return;
-        // Only the hovered card creates an iframe; muted autoplay is requested.
-        const iframe=el('iframe');
-        iframe.src='https://www.youtube-nocookie.com/embed/'+item.id+
-          '?autoplay=1&mute=1&controls=0&playsinline=1&rel=0';
-        iframe.allow='autoplay; encrypted-media; picture-in-picture';
-        iframe.setAttribute('referrerpolicy','strict-origin-when-cross-origin');
-        iframe.setAttribute('aria-hidden','true');
-        thumb.append(iframe);
-        liveHubActivePreview=thumb;
-      },550);
+        if(!thumb.isConnected||!liveHubActive()||document.visibilityState==='hidden')return;
+        const url=await liveHubFindAnimatedPreview(item.id);
+        if(!url || generation!==liveHubPreviewGeneration ||
+          !thumb.matches(':hover') || !thumb.isConnected || !liveHubActive())return;
+        // Preload the animation; failures keep the original static image.
+        const moving=el('img','nh-moving-preview');
+        moving.alt='';
+        moving.decoding='async';
+        moving.referrerPolicy='strict-origin-when-cross-origin';
+        moving.onload=()=>{
+          if(generation!==liveHubPreviewGeneration||!thumb.isConnected||
+            !thumb.matches(':hover'))return;
+          thumb.append(moving);
+          liveHubActivePreview=thumb;
+        };
+        moving.onerror=()=>{
+          const cache=liveHubPreviewCache.get(item.id);
+          if(cache?.url===url)liveHubPreviewCache.delete(item.id);
+        };
+        moving.src=url;
+      },420);
     };
     thumb.addEventListener('mouseenter',start);
     thumb.addEventListener('mouseleave',liveHubStopPreview);
