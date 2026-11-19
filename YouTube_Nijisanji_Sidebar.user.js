@@ -95,6 +95,8 @@
     if(fresh) roster=fresh;
     render();
     renderLiveHub();
+    if(liveHubActive()&&roster?.items?.length&&!liveHubLoading&&!liveHubLastAt)
+      void liveHubFetch();
   });
   window.addEventListener('nijisanji-sidebar:cloud-status',event=>{
     cloudStatus=String(event.detail?.message||'☁️ Niji Cloud状態不明');
@@ -471,7 +473,11 @@
       saveCache(items);
     } catch(e) {
       lastError=String(e?.message || e);
-    } finally { loading=false;render();renderLiveHub(); }
+    } finally {
+      loading=false;render();renderLiveHub();
+      if(liveHubActive()&&roster?.items?.length&&!liveHubLoading&&!liveHubLastAt)
+        void liveHubFetch();
+    }
   }
 
 
@@ -1250,6 +1256,7 @@
     top.append(refresh,close);wrap.append(top);
     const meta=el('div','nh-meta',
       '同時視聴者数の多い順 ・ 約3分ごとに自動更新'+
+      (liveHubLastAt?' ・ 取得候補 '+liveHubSourceCount+'件／JP一致 '+liveHubMatched+'件':'')+
       (liveHubLastAt?' ・ 取得 '+new Date(liveHubLastAt).toLocaleTimeString('ja-JP'):'')+
       ' ・ 取得元：');
     const link=el('a','','VTuberマップ');
