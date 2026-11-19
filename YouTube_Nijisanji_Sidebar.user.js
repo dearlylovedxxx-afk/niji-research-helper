@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.5
+// @version      0.1.6
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -393,7 +393,8 @@
   function mergeRoster(channels,official) {
     const previous=new Map((roster?.items||[]).map(row=>[row.url,row]));
     const merged=channels.map(row=>{
-      const matched=official.get(normalize(row.name));
+      const aliases={'ましろ':'ましろ爻'};
+      const matched=official.get(normalize(aliases[row.name]||row.name));
       const date=matched?.date || '';
       const year=date?Number(date.slice(0,4)):row.year;
       const group=year===2019?periodGroupFor2019(date,row.order):
@@ -406,6 +407,16 @@
         officialOrder:matched?.order??row.order};
     }).filter(row=>row.year>=2018 && row.year<=2026 && !!row.url
       && (GROUP_ORDER.has(row.group)||row.group==='2019年（デビュー月未確認）'));
+    // Channel list is chronological. If Wiki's official-name spelling
+    // prevents a date match, place it with the nearest dated 2019 entry,
+    // while leaving the exact debut date blank rather than inventing one.
+    for(const row of merged) {
+      if(row.group!=='2019年（デビュー月未確認）')continue;
+      const known=merged.filter(other=>other.year===2019 && other.date &&
+        GROUP_ORDER.has(other.group));
+      known.sort((a,b)=>Math.abs(a.order-row.order)-Math.abs(b.order-row.order));
+      row.group=known[0]?.group||'2019年1～3月デビュー';
+    }
     merged.sort((a,b)=>(GROUP_ORDER.get(a.group)??16)-(GROUP_ORDER.get(b.group)??16) ||
       (a.date&&b.date?a.date.localeCompare(b.date):a.date?-1:b.date?1:0)||
       a.officialOrder-b.officialOrder||a.order-b.order);
@@ -439,6 +450,8 @@
   // Channel avatars and surviving archives are verified against YouTube itself.
   // Do not reuse Wiki's generic &icon thumbnail for every member.
   const MEDIA_RECHECK_MS=14*24*60*60*1000;
+  const MEDIA_FAILURE_BACKOFF_MS=15*60*1000;
+  const mediaFailedAt=new Map();
   const mediaJobs=[],mediaQueued=new Set();
   let mediaRunning=0,mediaPersistTimer=null,mediaLastRequest=0;
   let mediaFailures=0;
@@ -492,9 +505,10 @@
   function mediaEnqueue(row,verifyArchive=false) {
     if(!row?.url)return;
     const isDue=Date.now()-Number(row.archiveCheckedAt||0)>MEDIA_RECHECK_MS;
-    if(verifyArchive && row.graduated && row.archived!==true && !isDue)return;
+    if(verifyArchive && row.graduated && !isDue && row.archived!==null)return;
     if(!verifyArchive && row.avatar && row.avatar.startsWith('https://yt3.'))return;
     const key=row.url;
+    if(Date.now()-Number(mediaFailedAt.get(key)||0)<MEDIA_FAILURE_BACKOFF_MS)return;
     if(mediaQueued.has(key))return;
     mediaQueued.add(key);
     mediaJobs.push({row,verifyArchive});
@@ -526,9 +540,11 @@
             row.archived=hasArchive;
             row.archiveCheckedAt=Date.now();
           }
+          mediaFailedAt.delete(row.url);
           mediaRefresh();
         }catch(err){
           mediaFailures++;
+          mediaFailedAt.set(row.url,Date.now());
           // Never call a failed request "no archive". Keep it unverified.
           console.warn('[Nijisanji sidebar][channel]',row.name,String(err?.message||err));
         }finally{
@@ -630,9 +646,7 @@
       if(!groups.has(item.group))groups.set(item.group,[]);
       groups.get(item.group).push(item);
     }
-    const labels=[...GROUPS];
-    if(groups.has('2019年（デビュー月未確認）'))labels.push('2019年（デビュー月未確認）');
-    for(const group of labels) {
+    for(const group of GROUPS) {
       const rows=groups.get(group)||[];
       if(!rows.length)continue;
       const open=state.years[group]===true;
@@ -656,9 +670,11 @@
       if(!retired.length)continue;
       const formerKey='former:'+group;
       const showFormer=state.years[formerKey]===true;
-      const saved=retired.filter(row=>row.archived===true);
-      const waiting=retired.filter(row=>row.archived===null ||
-        Date.now()-Number(row.archiveCheckedAt||0)>MEDIA_RECHECK_MS);
+      const saved=retired.filter(row=>row.archived===true &&
+        Date.now()-Number(row.archiveCheckedAt||0)<MEDIA_RECHECK_MS);
+      const waiting=retired.filter(row=>(row.archived===null ||
+        Date.now()-Number(row.archiveCheckedAt||0)>=MEDIA_RECHECK_MS) &&
+        !(Date.now()-Number(mediaFailedAt.get(row.url)||0)<MEDIA_FAILURE_BACKOFF_MS));
       const toggle=el('button','nj-former-group');
       toggle.type='button';toggle.setAttribute('aria-expanded',String(showFormer));
       toggle.append(el('span','', '卒業済'),el('span','nj-chevron',
@@ -674,10 +690,19 @@
         const formerList=el('div','nj-rows');
         for(const row of saved)formerList.append(personLink(row));
         host.append(formerList);
-        if(waiting.length||mediaQueued.size){
-          host.append(el('div','nj-empty','公開アーカイブの有無をYouTubeで確認中です。確認できたチャンネルだけを表示します。'));
+        if(waiting.length) {
+          host.append(el('div','nj-empty','公開アーカイブの有無をYouTubeで確認しています。確認できたチャンネルだけを表示します。'));
           loadGroupMedia(group,true);
-        }else if(!saved.length){
+        }
+        const failureCount=retired.filter(row=>mediaFailedAt.has(row.url)).length;
+        if(failureCount) {
+          const again=el('button','nj-refresh','⚠️ 未確認 '+failureCount+'件（通信エラー・再確認）');
+          again.addEventListener('click',()=>{
+            for(const row of retired)mediaFailedAt.delete(row.url);
+            loadGroupMedia(group,true);render();
+          });
+          host.append(again);
+        }else if(!saved.length&&!waiting.length){
           host.append(el('div','nj-empty','公開アーカイブを確認できた卒業済チャンネルはありません。'));
         }
       }
