@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.130
+// @version      1.0.131
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -8112,9 +8112,9 @@
     const host = youtubeTimestampPlayerHost();
     if (!host) { root.style.display = 'none'; return; }
 
-    // A document-level portal avoids the competing chat overlay's stacking
-    // context inside the YouTube video player. Keep it visually attached to
-    // the player with fresh viewport coordinates on each UI tick.
+    // A portal outside the video keeps priority comments above the player,
+    // while the native YouTube guide remains above this portal in stacking
+    // order. Its saved video-relative x/y position is never shifted.
     const rect = host.getBoundingClientRect();
     const vw = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
     const vh = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
@@ -8137,37 +8137,22 @@
     const y = Math.max(4, Math.min(maxY,
       youtubePriorityOverlayUi.y == null ? (mobile ? 52 : 36) : youtubePriorityOverlayUi.y));
 
-    // The player can extend under YouTube's opened left guide. Keep this
-    // floating overlay entirely to the RIGHT of the visible guide, even when
-    // the user previously dragged it to the left. Stored drag coordinates
-    // remain unchanged, so its old location returns when the guide closes.
-    let guideRight = 0;
-    for (const guide of document.querySelectorAll(
-      'ytd-guide-renderer, ytd-app #guide, #guide-content, tp-yt-app-drawer'
-    )) {
-      const bounds=guide.getBoundingClientRect();
-      if (bounds.left > 16 || bounds.right < 24 || bounds.right > vw*0.5 ||
-          bounds.height < 100) continue;
-      const css=getComputedStyle(guide);
-      if (css.display==='none' || css.visibility==='hidden' || Number(css.opacity)===0) continue;
-      guideRight=Math.max(guideRight,Math.ceil(bounds.right));
-    }
-    const naturalLeft = Math.max(0, Math.min(vw - Math.min(width, vw),
+    // Keep the overlay exactly where the user dragged it. Its DOM layer is
+    // below the native YouTube guide, so the guide covers any overlap
+    // immediately without polling, repositioning or a one-frame flash.
+    const left = Math.max(0, Math.min(vw - Math.min(width, vw),
       Math.round(rect.left + x)));
-    const left = Math.max(naturalLeft, guideRight ? guideRight + 8 : 0);
-    const safeWidth = Math.min(width, Math.max(0, Math.floor(vw-left-8)));
-    if (safeWidth < 95) {root.style.display='none';return;}
     const top = Math.max(0, Math.min(vh - 40, Math.round(rect.top + y)));
 
     root.style.cssText = [
       'position:fixed',
       `left:${left}px`, `top:${top}px`,
       'right:auto','bottom:auto','margin:0',
-      'z-index:2147483500',
+      'z-index:2100',
       'display:flex','flex-direction:column',
-      `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : safeWidth + 'px'}`,
-      `max-width:${safeWidth}px`,
-      `min-width:${youtubePriorityOverlayUi.collapsed ? '0' : Math.min(mobile ? 170 : 220, safeWidth) + 'px'}`,
+      `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : width + 'px'}`,
+      `max-width:${maxWidth}px`,
+      `min-width:${youtubePriorityOverlayUi.collapsed ? '0' : Math.min(mobile ? 170 : 220, maxWidth) + 'px'}`,
       `max-height:${maxHeight}px`,
       'border:1px solid rgba(255,255,255,.20)',
       'border-radius:10px',
@@ -8276,7 +8261,19 @@
     let root = existing;
     // Mount above the player as a viewport-fixed sibling, not inside the
     // player's stacked layers where Live Chat Overlay can cover it.
-    const portal = document.documentElement;
+    // Apply the guide layer CSS once; never react to sidebar open/close.
+    // The priority overlay is always behind the guide, even while it animates.
+    if (!document.getElementById('npf-priority-under-guide-css')) {
+      const stackStyle=document.createElement('style');
+      stackStyle.id='npf-priority-under-guide-css';
+      stackStyle.textContent=[
+        'ytd-app #guide{z-index:2600!important}',
+        'ytd-app tp-yt-app-drawer{z-index:2600!important}',
+        'ytd-app ytd-guide-renderer{z-index:2601!important}'
+      ].join('\n');
+      (document.head || document.documentElement).append(stackStyle);
+    }
+    const portal = document.querySelector('ytd-app') || document.documentElement;
     if (!root) {
       root = document.createElement('section');
       root.id = 'npf-yt-priority-overlay';
