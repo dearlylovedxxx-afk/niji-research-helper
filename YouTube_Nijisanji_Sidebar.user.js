@@ -11,6 +11,8 @@
 // @grant        GM.xmlHttpRequest
 // @grant        GM.xmlhttpRequest
 // @connect      wikiwiki.jp
+// @connect      www.youtube.com
+// @connect      youtube.com
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Nijisanji_Sidebar.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Nijisanji_Sidebar.user.js
 // ==/UserScript==
@@ -78,7 +80,8 @@
   }
 
   const defaultState = {open:false, years:{}};
-  let state = loadState();
+  // Reload defaults to closed; only roster data is restored from the cloud.
+  let state = {open:false,years:{}};
   let roster = readCache();
   let loading = false;
   let lastError = '';
@@ -86,7 +89,7 @@
   let host = null;
   let pendingMount = false;
   window.addEventListener('nijisanji-sidebar:cloud-applied',()=>{
-    state=loadState();
+    // Cloud roster refresh must not reopen old accordion states.
     const fresh=readCache();
     if(fresh) roster=fresh;
     render();
@@ -112,12 +115,12 @@
   function readCache() {
     try {
       const value = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
-      if (!value || value.schema!==3 || !Array.isArray(value.items) || value.items.length < 10) return null;
+      if (!value || value.schema!==4 || !Array.isArray(value.items) || value.items.length < 10) return null;
       return value;
     } catch { return null; }
   }
   function saveCache(items) {
-    const value = {schema:3,at:Date.now(),items};
+    const value = {schema:4,at:Date.now(),items};
     try { localStorage.setItem(CACHE_KEY, JSON.stringify(value)); } catch {}
     roster = value;
     tellCloud();
@@ -343,9 +346,11 @@
         if(g)year=g.includes('2019')?2019:GROUP_ORDER.has(g)?(GROUP_ORDER.get(g)<5?2018:Number(g.slice(0,4))):2018;
       }
       if(!enabled||!raw.startsWith('-'))continue;
-      const link=raw.match(/https?:\/\/(?:www\.)?youtube\.com\/(?:@[^\s\],>};]+|channel\/UC[a-zA-Z0-9_-]{22})/i);
-      if(!link)continue;
-      const url=validYouTubeUrl(link[0]);
+      const links=[...raw.matchAll(/https?:\/\/(?:www\.)?youtube\.com\/(?:@[^\s\],>};]+|channel\/UC[a-zA-Z0-9_-]{22})/gi)]
+        .map(m=>validYouTubeUrl(m[0])).filter(Boolean);
+      const urls=[...new Set(links)];
+      if(!urls.length)continue;
+      const url=urls[0];
       if(!url)continue;
       let label=raw.split(/[：:]/)[0].replace(/^-\s*/,'')
         .replace(/&color\([^)]*\)\{/g,'').replace(/&ref\([^)]*\);/g,'')
@@ -357,7 +362,7 @@
       found.add(key);
       const graduated=/&color\(,\s*#(?:ddd|dddddd)\)/i.test(raw) ||
         WIKI_FORMER_JP_FALLBACK.has(normalize(label));
-      records.push({name:label,year,group,url,graduated,order:ordinal++,date:'',avatar:'',
+      records.push({name:label,year,group,url,alternates:urls.slice(1),graduated,order:ordinal++,date:'',avatar:'',
         archived:null,archiveCheckedAt:0});
     }
     return records;
@@ -422,6 +427,7 @@
       const old=previous.get(row.url);
       return {...row,year,date,group,
         graduated:row.graduated===true || matched?.graduated===true,
+        alternates:[...new Set([...(row.alternates||[]),...(old?.alternates||[])])].filter(u=>u!==row.url),
         avatar:old?.avatar||'',archived:old?.archived===true?true:old?.archived===false?false:null,
         archiveCheckedAt:Number(old?.archiveCheckedAt||0),
         officialOrder:matched?.order??row.order};
@@ -472,6 +478,7 @@
   const MEDIA_RECHECK_MS=14*24*60*60*1000;
   const MEDIA_FAILURE_BACKOFF_MS=15*60*1000;
   const mediaFailedAt=new Map();
+  const mediaFailureReasons=new Map();
   const mediaJobs=[],mediaQueued=new Set();
   let mediaRunning=0,mediaPersistTimer=null,mediaLastRequest=0;
   let mediaFailures=0;
@@ -619,7 +626,8 @@
       '#'+ROOT_ID+' .nj-head:hover,#'+ROOT_ID+' .nj-year:hover,#'+ROOT_ID+' .nj-person:hover{background:var(--yt-spec-10-percent-layer,rgba(127,127,127,.1))}',
       '#'+ROOT_ID+' .nj-symbol{display:flex;justify-content:center;align-items:center;width:24px;height:24px;font-size:19px;flex-shrink:0}',
       '#'+ROOT_ID+' .nj-chevron{margin-left:auto;font-size:12px;color:var(--yt-spec-text-secondary,#777)}',
-      '#'+ROOT_ID+' .nj-year{width:calc(100% - 12px);margin:0 6px;border-radius:10px;padding:8px 12px 8px 28px;min-height:36px;font-size:13px;display:flex;align-items:center;gap:10px}',
+      '#'+ROOT_ID+' .nj-year{width:calc(100% - 12px)!important;max-width:calc(100% - 12px)!important;margin:0 6px;border-radius:10px;padding:8px 12px 8px 28px;min-height:36px;font-size:13px;display:flex!important;align-items:center;gap:10px;cursor:pointer;position:relative}',
+      '#'+ROOT_ID+' .nj-year>*,#'+ROOT_ID+' .nj-former-group>*{pointer-events:none}',
       '#'+ROOT_ID+' .nj-year .nj-chevron{margin-left:0;width:11px}',
       '#'+ROOT_ID+' .nj-rows{padding:0 4px 0 19px}',
       '#'+ROOT_ID+' .nj-person{min-height:40px;margin:1px 4px;padding:5px 7px;border-radius:10px;display:flex;align-items:center;gap:10px;color:inherit;text-decoration:none;font-size:13px;white-space:nowrap;overflow:hidden}',
@@ -629,7 +637,7 @@
       '#'+ROOT_ID+' .nj-fallback{display:grid;place-items:center;font-size:12px;font-weight:700}',
       '#'+ROOT_ID+' .nj-name{overflow:hidden;text-overflow:ellipsis;flex:1}',
       '#'+ROOT_ID+' .nj-tag{flex-shrink:0;font-size:9px;opacity:.78}',
-      '#'+ROOT_ID+' .nj-former-group{display:flex;align-items:center;gap:8px;padding:7px 8px;margin:5px 8px 5px 20px;width:calc(100% - 28px);border-radius:9px;font-size:12px;font-weight:500;background:var(--yt-spec-10-percent-layer,rgba(128,128,128,.11))}',
+      '#'+ROOT_ID+' .nj-former-group{display:flex!important;align-items:center;gap:8px;padding:7px 8px;margin:5px 8px 5px 20px;width:calc(100% - 28px)!important;border-radius:9px;font-size:12px;font-weight:500;cursor:pointer;background:var(--yt-spec-10-percent-layer,rgba(128,128,128,.11))}',
       '#'+ROOT_ID+' .nj-former-group .nj-chevron{margin-left:auto}',
       '#'+ROOT_ID+' .nj-empty{padding:8px 12px 8px 27px;font-size:11px;line-height:1.6;color:var(--yt-spec-text-secondary,#777)}',
       '#'+ROOT_ID+' .nj-message{font-size:11px;line-height:1.45;color:var(--yt-spec-text-secondary,#777);padding:8px 18px;white-space:normal}',
