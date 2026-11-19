@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.129
+// @version      1.0.130
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -8137,8 +8137,26 @@
     const y = Math.max(4, Math.min(maxY,
       youtubePriorityOverlayUi.y == null ? (mobile ? 52 : 36) : youtubePriorityOverlayUi.y));
 
-    const left = Math.max(0, Math.min(vw - Math.min(width, vw),
+    // The player can extend under YouTube's opened left guide. Keep this
+    // floating overlay entirely to the RIGHT of the visible guide, even when
+    // the user previously dragged it to the left. Stored drag coordinates
+    // remain unchanged, so its old location returns when the guide closes.
+    let guideRight = 0;
+    for (const guide of document.querySelectorAll(
+      'ytd-guide-renderer, ytd-app #guide, #guide-content, tp-yt-app-drawer'
+    )) {
+      const bounds=guide.getBoundingClientRect();
+      if (bounds.left > 16 || bounds.right < 24 || bounds.right > vw*0.5 ||
+          bounds.height < 100) continue;
+      const css=getComputedStyle(guide);
+      if (css.display==='none' || css.visibility==='hidden' || Number(css.opacity)===0) continue;
+      guideRight=Math.max(guideRight,Math.ceil(bounds.right));
+    }
+    const naturalLeft = Math.max(0, Math.min(vw - Math.min(width, vw),
       Math.round(rect.left + x)));
+    const left = Math.max(naturalLeft, guideRight ? guideRight + 8 : 0);
+    const safeWidth = Math.min(width, Math.max(0, Math.floor(vw-left-8)));
+    if (safeWidth < 95) {root.style.display='none';return;}
     const top = Math.max(0, Math.min(vh - 40, Math.round(rect.top + y)));
 
     root.style.cssText = [
@@ -8147,9 +8165,9 @@
       'right:auto','bottom:auto','margin:0',
       'z-index:2147483500',
       'display:flex','flex-direction:column',
-      `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : width + 'px'}`,
-      `max-width:${maxWidth}px`,
-      `min-width:${youtubePriorityOverlayUi.collapsed ? '0' : Math.min(mobile ? 170 : 220, maxWidth) + 'px'}`,
+      `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : safeWidth + 'px'}`,
+      `max-width:${safeWidth}px`,
+      `min-width:${youtubePriorityOverlayUi.collapsed ? '0' : Math.min(mobile ? 170 : 220, safeWidth) + 'px'}`,
       `max-height:${maxHeight}px`,
       'border:1px solid rgba(255,255,255,.20)',
       'border-radius:10px',
@@ -8267,18 +8285,13 @@
       portal.appendChild(root);
     }
 
-    // Live Chat Overlay injects a separate player overlay layer. An ordinary
-    // high z-index was not enough on iPad Safari; use the browser's top layer
-    // when available. "manual" does not block clicks outside this box.
-    if (typeof root.showPopover === 'function') {
-      try {
-        root.setAttribute('popover', 'manual');
-        if (!root.matches(':popover-open')) root.showPopover();
-      } catch (error) {
-        root.removeAttribute('popover'); // Fall back to fixed positioning.
-        console.debug('[NRH][priority popover]', String(error?.message || error));
-      }
-    }
+    // Never use the browser's popover top layer here. A top-layer element
+    // wins over YouTube's guide regardless of z-index and obscures its links.
+    // The fixed document-level portal still floats above the video player.
+    try {
+      if (root.matches?.(':popover-open')) root.hidePopover?.();
+    } catch {}
+    root.removeAttribute('popover');
 
     styleYoutubePriorityOverlay(root);
     const stamp = youtubePriorityOverlayStamp(entries);
