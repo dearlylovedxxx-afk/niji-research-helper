@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.3.0
+// @version      0.3.1
 // @description  にじさんじをデビュー期別に表示。公開配信中は赤リングとLIVE印、卒業済はアーカイブ確認後に表示。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -1029,10 +1029,9 @@
   function liveHubActive() {
     return location.pathname==='/' && location.hash===LIVE_HUB_HASH;
   }
-  function openLiveHub() {
-    if(!liveHubActive())location.assign('https://www.youtube.com/'+LIVE_HUB_HASH);
-    else syncLiveHub();
-  }
+  // The sidebar entry is a native <a href>, not a scripted button.
+  // This preserves Edge's middle-click / Ctrl+click background-new-tab behavior,
+  // while ordinary left-click follows the same-page YouTube route.
   function liveHubVideoId(raw) {
     try {
       const u=new URL(raw,location.origin);
@@ -1622,7 +1621,7 @@
       '#'+ROOT_ID+' .nj-former-group{display:flex!important;align-items:center;gap:8px;padding:7px 8px;margin:5px 8px 5px 20px;width:calc(100% - 28px)!important;border-radius:9px;font-size:12px;font-weight:500;cursor:pointer;background:var(--yt-spec-10-percent-layer,rgba(128,128,128,.11))}',
       '#'+ROOT_ID+' .nj-former-group .nj-chevron{margin-left:auto}',
       '#'+ROOT_ID+' .nj-empty{padding:8px 12px 8px 27px;font-size:11px;line-height:1.6;color:var(--yt-spec-text-secondary,#777)}',
-      '#'+ROOT_ID+' .nj-live-hub-link{display:block!important;width:calc(100% - 12px)!important;text-align:left;padding:10px 12px 10px 33px;margin:2px 6px 8px;border-radius:10px;font-size:13px;font-weight:600;color:inherit}',
+      '#'+ROOT_ID+' a.nj-live-hub-link{display:block!important;width:calc(100% - 12px)!important;box-sizing:border-box;text-decoration:none!important;text-align:left;padding:10px 12px 10px 33px;margin:2px 6px 8px;border-radius:10px;font-size:13px;font-weight:600;color:inherit!important;cursor:pointer}',
       '#'+ROOT_ID+' .nj-live-hub-link:hover{background:var(--yt-spec-10-percent-layer,rgba(127,127,127,.1))}',
       '#'+ROOT_ID+' .nj-message{font-size:11px;line-height:1.45;color:var(--yt-spec-text-secondary,#777);padding:8px 18px;white-space:normal}',
       '#'+ROOT_ID+' .nj-refresh{font-size:11px;text-align:center;color:var(--yt-spec-text-secondary,#777);padding:7px 12px;display:block;margin:auto;border-radius:8px}',
@@ -1671,10 +1670,9 @@
       el('span','nj-chevron',state.open?'▾':'▸'));
     head.addEventListener('click',()=>{state.open=!state.open;persistState();render();});
     host.append(head);
-    const hubLink=el('button','nj-live-hub-link','🔴 配信中一覧');
-    hubLink.type='button';
-    hubLink.title='配信中のにじさんじJPライバーをサムネイル一覧で開く';
-    hubLink.addEventListener('click',openLiveHub);
+    const hubLink=el('a','nj-live-hub-link','🔴 配信中一覧');
+    hubLink.href='https://www.youtube.com/'+LIVE_HUB_HASH;
+    hubLink.title='左クリックで開く／ホイールクリックでバックグラウンドの新規タブに開く';
     host.append(hubLink);
     if(!state.open)return;
     if(loading&&!roster)host.append(el('div','nj-message','ライバー一覧を読み込んでいます…'));
