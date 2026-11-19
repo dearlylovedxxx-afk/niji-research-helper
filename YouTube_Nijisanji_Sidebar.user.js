@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.1
+// @version      0.1.2
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -437,6 +437,7 @@
     pendingMount=false;
     const target=findSubscriptions();
     if (!target || !target.parentElement) return;
+    const container=target.parentElement;
     if (!host) {
       styles();
       host=el('section');
@@ -444,8 +445,22 @@
       host.setAttribute('aria-label','にじさんじライバー');
       render();
     }
-    if (host.parentElement!==target.parentElement || host.nextElementSibling!==target) {
-      target.parentElement.insertBefore(host,target);
+    // Keep both sections directly after Home/Shorts, before the "You" section.
+    // Some YouTube layouts place Subscriptions below Explore or Settings.
+    const sections=[...container.children]
+      .filter(node => node.matches?.('ytd-guide-section-renderer') && node!==target);
+    const home=sections.find(node =>
+      node.querySelector('a[href="/"],a[href="/feed/subscriptions"]') &&
+      /ホーム|Home|ショート|Shorts/.test(text(node.textContent))) || sections[0];
+    const homeIndex=sections.indexOf(home);
+    const anchor=homeIndex>=0 ? sections[homeIndex+1] || null : sections[0] || null;
+
+    // DOM moves fire MutationObserver; only change the order when needed.
+    if (anchor ? target.nextElementSibling!==anchor : target!==container.lastElementChild) {
+      container.insertBefore(target,anchor);
+    }
+    if (host.parentElement!==container || host.nextElementSibling!==target) {
+      container.insertBefore(host,target);
     }
   }
   function scheduleMount() {
