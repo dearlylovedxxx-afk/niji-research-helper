@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.8
+// @version      0.1.9
 // @description  登録チャンネルの上に、にじさんじライバーをデビュー年・デビュー日順に表示（卒業・活動終了も区別）。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -492,9 +492,21 @@
   }
 
   function mediaHasPublicArchive(html) {
-    // Deliberately exclude Shorts and shelves of recommended channels.
-    // The upload / livestream tabs carry their own videoRenderer IDs.
-    return /"(?:videoRenderer|gridVideoRenderer)"\s*:\s*\{\s*"videoId"\s*:\s*"[A-Za-z0-9_-]{11}"/.test(String(html||''));
+    // Inspect YouTube's channel Videos/Live tab metadata, not the channel
+    // homepage. Channel video cards can use old videoRenderer or the newer
+    // lockupViewModel shape. Do not count Shorts-only or playlists.
+    const raw=String(html||'');
+    return /"(?:videoRenderer|gridVideoRenderer)"\s*:\s*\{\s*"videoId"\s*:\s*"[A-Za-z0-9_-]{11}"/.test(raw)
+      || /"lockupViewModel"\s*:\s*\{\s*"contentId"\s*:\s*"[A-Za-z0-9_-]{11}"/.test(raw)
+      || /"videoRenderer"\s*:\s*\{[^{}]{0,500}"videoId"\s*:\s*"[A-Za-z0-9_-]{11}"/.test(raw);
+  }
+
+  function mediaConfirmsEmptyTab(html) {
+    // If YouTube does not supply a parsable video list, absence of a renderer
+    // is NOT proof the channel is empty. Never cache it as archive=false.
+    const raw=String(html||'');
+    return /"(?:emptyTabRenderer|messageRenderer)"\s*:\s*\{/.test(raw)
+      && /(?:このチャンネルには動画がありません|has no (?:videos|content)|no videos|動画はありません|コンテンツはありません)/i.test(raw);
   }
 
   async function mediaFetchChannel(url,tab) {
@@ -551,14 +563,24 @@
           if(newAvatar)row.avatar=newAvatar;
           if(job.verifyArchive && row.graduated){
             let hasArchive=mediaHasPublicArchive(videoHtml);
+            let emptyVideos=mediaConfirmsEmptyTab(videoHtml);
+            let emptyStreams=false;
             if(!hasArchive) {
               await new Promise(r=>setTimeout(r,600));
               const streamHtml=await mediaFetchChannel(row.url,'streams');
               hasArchive=mediaHasPublicArchive(streamHtml);
+              emptyStreams=mediaConfirmsEmptyTab(streamHtml);
               if(!row.avatar)row.avatar=mediaAvatarFromHtml(streamHtml);
             }
-            row.archived=hasArchive;
-            row.archiveCheckedAt=Date.now();
+            if(hasArchive) {
+              row.archived=true;
+              row.archiveCheckedAt=Date.now();
+            }else if(emptyVideos&&emptyStreams) {
+              row.archived=false;
+              row.archiveCheckedAt=Date.now();
+            }else {
+              throw new Error('動画一覧の判定不能（アーカイブの有無は未確認）');
+            }
           }
           mediaFailedAt.delete(row.url);
           mediaRefresh();
