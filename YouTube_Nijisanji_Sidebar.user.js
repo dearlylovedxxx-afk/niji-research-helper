@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.1.13
+// @version      0.2.0
 // @description  にじさんじをデビュー期別に表示。公開配信中は赤リングとLIVE印、卒業済はアーカイブ確認後に表示。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -13,6 +13,7 @@
 // @connect      wikiwiki.jp
 // @connect      www.youtube.com
 // @connect      youtube.com
+// @connect      vtuber-map.com
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Nijisanji_Sidebar.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Nijisanji_Sidebar.user.js
 // ==/UserScript==
@@ -93,6 +94,7 @@
     const fresh=readCache();
     if(fresh) roster=fresh;
     render();
+    renderLiveHub();
   });
   window.addEventListener('nijisanji-sidebar:cloud-status',event=>{
     cloudStatus=String(event.detail?.message||'☁️ Niji Cloud状態不明');
@@ -469,7 +471,7 @@
       saveCache(items);
     } catch(e) {
       lastError=String(e?.message || e);
-    } finally { loading=false;render(); }
+    } finally { loading=false;render();renderLiveHub(); }
   }
 
 
@@ -994,6 +996,299 @@
     }
   }
 
+
+  // ---------- dedicated Nijisanji LIVE hub ----------
+  // #niji-live is a local YouTube route: YouTube's page, account, sidebar
+  // and playback links remain intact. This does not create a 404-prone path.
+  // Source is a public live listing and is read-only. Never store dynamic
+  // viewer counts/live state in Niji Cloud, which owns only roster settings.
+  const LIVE_HUB_HASH='#niji-live';
+  const LIVE_HUB_ID='marina-niji-live-hub';
+  const LIVE_HUB_STYLE_ID='marina-niji-live-hub-css';
+  const LIVE_HUB_SOURCE='https://vtuber-map.com/live?group=Nijisanji&membership=public&status=live';
+  const LIVE_HUB_REFRESH_MS=3*60*1000;
+  let liveHub=null,liveHubLoading=false,liveHubLastAt=0;
+  let liveHubCards=[],liveHubError='',liveHubMatched=0,liveHubSourceCount=0;
+  let liveHubHoverTimer=null,liveHubActivePreview=null;
+
+  function liveHubActive() {
+    return location.pathname==='/' && location.hash===LIVE_HUB_HASH;
+  }
+  function openLiveHub() {
+    if(!liveHubActive())location.assign('https://www.youtube.com/'+LIVE_HUB_HASH);
+    else syncLiveHub();
+  }
+  function liveHubVideoId(raw) {
+    try {
+      const u=new URL(raw,location.origin);
+      if(!['youtube.com','www.youtube.com','m.youtube.com','youtu.be'].includes(u.hostname))return '';
+      const id=u.hostname==='youtu.be'?u.pathname.split('/')[1]:
+        u.pathname==='/watch'?u.searchParams.get('v'):
+        u.pathname.match(/^\/(?:live|embed|shorts)\/([A-Za-z0-9_-]{11})/)?.[1];
+      return /^[A-Za-z0-9_-]{11}$/.test(String(id||''))?id:'';
+    }catch{return '';}
+  }
+  function liveHubScopedText(node) {
+    return String(node?.textContent||'').replace(/\s+/g,' ').trim();
+  }
+  function liveHubViewerCount(value) {
+    const m=String(value||'').match(/(?:現在同接|同時接続数|同時視聴者数|Concurrent viewers)\s*[：:]?\s*([0-9,]+)/i);
+    return m?Number(m[1].replace(/,/g,'')):null;
+  }
+  function liveHubFindCard(link) {
+    let node=link;
+    for(let i=0;i<12&&node?.parentElement;i++){
+      node=node.parentElement;
+      const copy=liveHubScopedText(node);
+      if(copy.length>6500)break;
+      if(!/(?:現在同接|同時接続数|同時視聴者数|Concurrent viewers)/i.test(copy))continue;
+      if(!/\bLIVE\b|配信中/.test(copy))continue;
+      // Stop at the smallest meaningful card. Container pages may include
+      // unrelated streams, which would produce wrong viewers/channels.
+      const videoCount=[...node.querySelectorAll('a[href]')]
+        .filter(a=>liveHubVideoId(a.getAttribute('href')||'')).length;
+      if(videoCount>5)continue;
+      return node;
+    }
+    return null;
+  }
+  function liveHubMatchLiver(scope) {
+    if(!roster?.items?.length)return null;
+    const active=roster.items.filter(row=>!row.graduated);
+    // Prefer a matching channel URL (including alternate official URLs).
+    const links=[...scope.querySelectorAll('a[href]')].map(a=>
+      nativeChannelPath(a.getAttribute('href')||'')).filter(Boolean);
+    if(links.length){
+      const match=active.find(row=>[row.url,...(row.alternates||[])]
+        .some(url=>links.includes(nativeChannelPath(url))));
+      if(match)return match;
+    }
+    const copy=liveHubScopedText(scope);
+    const clean=normalize(copy);
+    const matches=active.filter(row=>{
+      const name=normalize(row.name);
+      if(!name)return false;
+      // Very short names ("叶", "える") must have a channel-name boundary.
+      if(name.length<=2)
+        return new RegExp('(?:^|[／/　\\s])'+name+'(?:[／/〖【|　\\s]|$)').test(copy);
+      return clean.includes(name);
+    }).sort((a,b)=>normalize(b.name).length-normalize(a.name).length);
+    return matches[0]||null;
+  }
+  function liveHubParseSource(html) {
+    const doc=parseWikiDocument(html);
+    const result=[],seen=new Set();
+    const all=[...doc.querySelectorAll('a[href]')]
+      .map(a=>({anchor:a,id:liveHubVideoId(a.getAttribute('href')||'')}));
+    for(const {anchor,id} of all){
+      if(!id||seen.has(id))continue;
+      const scope=liveHubFindCard(anchor);
+      if(!scope)continue;
+      seen.add(id);
+      const copy=liveHubScopedText(scope);
+      const viewers=liveHubViewerCount(copy);
+      const images=[...scope.querySelectorAll('img[alt]')];
+      const poster=images.find(img=>/youtu|thumbnail|hqdefault|mqdefault/i.test(
+        img.getAttribute('src')||''))||images.find(img=>(img.getAttribute('alt')||'').length>12);
+      const candidates=[
+        poster?.getAttribute('alt')||'',
+        scope.querySelector('h2,h3,h4')?.textContent||'',
+        anchor.getAttribute('title')||''
+      ].map(text).filter(value=>value.length>=6&&value.length<=260);
+      const title=candidates[0]||'配信中のライブ';
+      // Membership/organisation filtering is done using our existing JP
+      // liver roster, not the source's broad "Nijisanji" grouping.
+      const liver=liveHubMatchLiver(scope);
+      result.push({id,title,viewers,liver,
+        channel:liver?.name||'',url:'https://www.youtube.com/watch?v='+id});
+    }
+    return result;
+  }
+  async function liveHubFetch() {
+    if(liveHubLoading||!liveHubActive())return;
+    liveHubLoading=true;liveHubError='';renderLiveHub();
+    try{
+      // One lightweight request for all active streams, not 150+ queries to
+      // each individual channel. Reuse the existing privileged transport.
+      const html=await mediaGMRequest(LIVE_HUB_SOURCE);
+      if(!/現在同接|同時接続数|Concurrent viewers/.test(html))
+        throw new Error('取得元から配信データを受信できませんでした');
+      const result=liveHubParseSource(html);
+      liveHubSourceCount=result.length;
+      if(!result.length && /\bLIVE\b/.test(html))
+        throw new Error('配信一覧のHTML形式が変わりました（カードを解析できません）');
+      if(!roster?.items?.length)
+        throw new Error('JPライバー一覧を取得中です。ライバー一覧の読み込み後に更新してください。');
+      const jp=result.filter(x=>x.liver);
+      if(result.length && !jp.length)
+        throw new Error('配信候補は取得しましたが、JPライバーの照合に失敗しました（'+result.length+'件）');
+      liveHubCards=jp.sort((a,b)=>(b.viewers??-1)-(a.viewers??-1));
+      liveHubMatched=jp.length;
+      liveHubLastAt=Date.now();
+    }catch(err){
+      liveHubError=String(err?.message||err);
+      // Avoid displaying stale streams as if they were presently live.
+      liveHubCards=[];
+    }finally{
+      liveHubLoading=false;
+      renderLiveHub();
+    }
+  }
+  function liveHubStyle() {
+    if(document.getElementById(LIVE_HUB_STYLE_ID))return;
+    const st=document.createElement('style');
+    st.id=LIVE_HUB_STYLE_ID;
+    st.textContent=[
+      '#'+LIVE_HUB_ID+'{position:fixed;top:56px;right:0;bottom:0;left:220px;z-index:2100;overflow-y:auto;overscroll-behavior:contain;background:var(--yt-spec-base-background,#fff);color:var(--yt-spec-text-primary,#0f0f0f);font:14px Roboto,Arial,sans-serif}',
+      '#'+LIVE_HUB_ID+' *{box-sizing:border-box}',
+      '#'+LIVE_HUB_ID+' .nh-wrap{max-width:1800px;margin:0 auto;padding:24px 30px 80px}',
+      '#'+LIVE_HUB_ID+' .nh-top{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:10px}',
+      '#'+LIVE_HUB_ID+' h1{font-size:24px;margin:0;font-weight:750;flex:1;min-width:220px}',
+      '#'+LIVE_HUB_ID+' .nh-pill{font-size:12px;color:#f3f3f3;background:#d71d32;border-radius:7px;padding:5px 9px;font-weight:700}',
+      '#'+LIVE_HUB_ID+' button{font:inherit;cursor:pointer;border:0;border-radius:18px;background:var(--yt-spec-badge-chip-background,#eee);color:inherit;padding:9px 15px}',
+      '#'+LIVE_HUB_ID+' button:disabled{opacity:.5;cursor:default}',
+      '#'+LIVE_HUB_ID+' .nh-meta{font-size:12px;color:var(--yt-spec-text-secondary,#666);margin:8px 0 25px}',
+      '#'+LIVE_HUB_ID+' .nh-meta a{color:inherit;text-decoration:underline}',
+      '#'+LIVE_HUB_ID+' .nh-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:32px 18px}',
+      '#'+LIVE_HUB_ID+' .nh-card{min-width:0}',
+      '#'+LIVE_HUB_ID+' .nh-thumb{position:relative;display:block;width:100%;aspect-ratio:16/9;background:#111;overflow:hidden;border-radius:12px;text-decoration:none;color:#fff}',
+      '#'+LIVE_HUB_ID+' .nh-thumb>img{display:block;width:100%;height:100%;object-fit:cover}',
+      '#'+LIVE_HUB_ID+' .nh-thumb iframe{position:absolute;inset:0;width:100%;height:100%;border:0;pointer-events:none;background:#000}',
+      '#'+LIVE_HUB_ID+' .nh-badge{position:absolute;left:10px;top:10px;z-index:2;background:#e21b38;color:#fff;font-size:12px;font-weight:700;border-radius:4px;padding:4px 6px}',
+      '#'+LIVE_HUB_ID+' .nh-viewers{position:absolute;right:8px;bottom:8px;z-index:2;background:rgba(0,0,0,.8);font-size:12px;border-radius:4px;padding:4px 7px}',
+      '#'+LIVE_HUB_ID+' .nh-info{display:flex;gap:10px;padding:12px 2px 0}',
+      '#'+LIVE_HUB_ID+' .nh-avatar{width:36px;height:36px;border-radius:50%;flex-shrink:0;object-fit:cover;background:#ddd}',
+      '#'+LIVE_HUB_ID+' .nh-fallback{display:grid;place-items:center;background:#ddd;color:#333;font-weight:bold}',
+      '#'+LIVE_HUB_ID+' .nh-details{min-width:0;flex:1}',
+      '#'+LIVE_HUB_ID+' .nh-title{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.4;font-weight:600;font-size:14px;color:inherit;text-decoration:none}',
+      '#'+LIVE_HUB_ID+' .nh-channel{color:var(--yt-spec-text-secondary,#666);margin-top:5px;font-size:12px}',
+      '#'+LIVE_HUB_ID+' .nh-note{padding:26px 18px;border-radius:12px;background:var(--yt-spec-10-percent-layer,rgba(127,127,127,.08));color:var(--yt-spec-text-secondary,#666);line-height:1.8}',
+      '@media(max-width:1250px){#'+LIVE_HUB_ID+' .nh-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}',
+      '@media(max-width:760px){#'+LIVE_HUB_ID+' .nh-wrap{padding:16px 12px 40px}#'+LIVE_HUB_ID+' .nh-grid{grid-template-columns:1fr}#'+LIVE_HUB_ID+' h1{font-size:20px}}'
+    ].join('\n');
+    (document.head||document.documentElement).append(st);
+  }
+  function liveHubBounds() {
+    if(!liveHub)return;
+    const guide=document.querySelector('ytd-app #guide, ytd-guide-renderer');
+    let left=0;
+    if(guide){
+      const r=guide.getBoundingClientRect();
+      const cs=getComputedStyle(guide);
+      if(r.right>=48&&r.left<40&&r.right<window.innerWidth*.55 &&
+        r.height>150&&cs.display!=='none'&&cs.visibility!=='hidden')
+        left=Math.ceil(r.right);
+    }
+    liveHub.style.left=left+'px';
+  }
+  function liveHubStopPreview() {
+    if(liveHubHoverTimer){clearTimeout(liveHubHoverTimer);liveHubHoverTimer=null;}
+    if(liveHubActivePreview){
+      liveHubActivePreview.querySelector('iframe')?.remove();
+      liveHubActivePreview=null;
+    }
+  }
+  function liveHubCard(item) {
+    const card=el('article','nh-card');
+    const thumb=el('a','nh-thumb');
+    thumb.href=item.url;thumb.title=item.title;
+    const img=el('img');
+    img.src='https://i.ytimg.com/vi/'+item.id+'/hqdefault.jpg';
+    img.loading='lazy';img.alt=item.title;
+    thumb.append(img);
+    thumb.append(el('span','nh-badge','● LIVE'));
+    thumb.append(el('span','nh-viewers',
+      item.viewers===null?'同接 —':item.viewers.toLocaleString('ja-JP')+' 人が視聴中'));
+    const start=()=>{
+      liveHubStopPreview();
+      liveHubHoverTimer=setTimeout(()=>{
+        liveHubHoverTimer=null;
+        if(!thumb.isConnected || !liveHubActive() || document.visibilityState==='hidden')return;
+        // Only the hovered card creates an iframe; muted autoplay is requested.
+        const iframe=el('iframe');
+        iframe.src='https://www.youtube-nocookie.com/embed/'+item.id+
+          '?autoplay=1&mute=1&controls=0&playsinline=1&rel=0';
+        iframe.allow='autoplay; encrypted-media; picture-in-picture';
+        iframe.setAttribute('referrerpolicy','strict-origin-when-cross-origin');
+        iframe.setAttribute('aria-hidden','true');
+        thumb.append(iframe);
+        liveHubActivePreview=thumb;
+      },550);
+    };
+    thumb.addEventListener('mouseenter',start);
+    thumb.addEventListener('mouseleave',liveHubStopPreview);
+    thumb.addEventListener('focus',()=>{});
+    card.append(thumb);
+    const details=el('div','nh-info');
+    if(item.liver.avatar){
+      const avatar=el('img','nh-avatar');
+      avatar.src=item.liver.avatar;avatar.alt='';
+      avatar.addEventListener('error',()=>{
+        if(avatar.isConnected)avatar.replaceWith(el('span','nh-avatar nh-fallback',item.liver.name.slice(0,1)));
+      },{once:true});
+      details.append(avatar);
+    }else details.append(el('span','nh-avatar nh-fallback',item.liver.name.slice(0,1)));
+    const words=el('div','nh-details');
+    const title=el('a','nh-title',item.title);
+    title.href=item.url;
+    words.append(title,el('div','nh-channel',item.liver.name));
+    details.append(words);card.append(details);
+    return card;
+  }
+  function renderLiveHub() {
+    if(!liveHub||!liveHubActive())return;
+    liveHubStopPreview();
+    liveHub.replaceChildren();
+    const wrap=el('div','nh-wrap');
+    const top=el('div','nh-top');
+    const heading=el('h1','','にじさんじ 配信中');
+    top.append(heading,el('span','nh-pill','● LIVE '+liveHubCards.length));
+    const refresh=el('button','',liveHubLoading?'取得中…':'↻ 更新');
+    refresh.disabled=liveHubLoading;refresh.addEventListener('click',()=>void liveHubFetch());
+    const close=el('button','','YouTubeトップへ');
+    close.addEventListener('click',()=>location.assign('https://www.youtube.com/'));
+    top.append(refresh,close);wrap.append(top);
+    const meta=el('div','nh-meta',
+      '同時視聴者数の多い順 ・ 約3分ごとに自動更新'+
+      (liveHubLastAt?' ・ 取得 '+new Date(liveHubLastAt).toLocaleTimeString('ja-JP'):'')+
+      ' ・ 取得元：');
+    const link=el('a','','VTuberマップ');
+    link.href=LIVE_HUB_SOURCE;link.target='_blank';link.rel='noopener noreferrer';
+    meta.append(link);wrap.append(meta);
+    if(liveHubError)wrap.append(el('div','nh-note','⚠️ '+liveHubError));
+    if(!liveHubError && !liveHubCards.length){
+      wrap.append(el('div','nh-note',liveHubLoading?
+        '配信中ライバーを取得しています…':
+        '現在、取得元でJPライバーの配信を確認できません。更新して再確認できます。'));
+    }
+    if(liveHubCards.length){
+      const grid=el('div','nh-grid');
+      for(const item of liveHubCards)grid.append(liveHubCard(item));
+      wrap.append(grid);
+    }
+    liveHub.append(wrap);
+    liveHubBounds();
+  }
+  function syncLiveHub() {
+    if(!liveHubActive()){
+      liveHubStopPreview();
+      if(liveHub)liveHub.hidden=true;
+      return;
+    }
+    liveHubStyle();
+    if(!liveHub){
+      liveHub=el('main');
+      liveHub.id=LIVE_HUB_ID;
+      liveHub.setAttribute('aria-label','にじさんじ配信中一覧');
+      (document.querySelector('ytd-app')||document.body||document.documentElement).append(liveHub);
+    }
+    liveHub.hidden=false;
+    liveHubBounds();
+    renderLiveHub();
+    if(!liveHubLastAt||Date.now()-liveHubLastAt>LIVE_HUB_REFRESH_MS)
+      void liveHubFetch();
+  }
+
   function styles() {
     if (document.getElementById(CSS_ID)) return;
     const st=document.createElement('style');
@@ -1022,6 +1317,8 @@
       '#'+ROOT_ID+' .nj-former-group{display:flex!important;align-items:center;gap:8px;padding:7px 8px;margin:5px 8px 5px 20px;width:calc(100% - 28px)!important;border-radius:9px;font-size:12px;font-weight:500;cursor:pointer;background:var(--yt-spec-10-percent-layer,rgba(128,128,128,.11))}',
       '#'+ROOT_ID+' .nj-former-group .nj-chevron{margin-left:auto}',
       '#'+ROOT_ID+' .nj-empty{padding:8px 12px 8px 27px;font-size:11px;line-height:1.6;color:var(--yt-spec-text-secondary,#777)}',
+      '#'+ROOT_ID+' .nj-live-hub-link{display:block!important;width:calc(100% - 12px)!important;text-align:left;padding:10px 12px 10px 33px;margin:2px 6px 8px;border-radius:10px;font-size:13px;font-weight:600;color:inherit}',
+      '#'+ROOT_ID+' .nj-live-hub-link:hover{background:var(--yt-spec-10-percent-layer,rgba(127,127,127,.1))}',
       '#'+ROOT_ID+' .nj-message{font-size:11px;line-height:1.45;color:var(--yt-spec-text-secondary,#777);padding:8px 18px;white-space:normal}',
       '#'+ROOT_ID+' .nj-refresh{font-size:11px;text-align:center;color:var(--yt-spec-text-secondary,#777);padding:7px 12px;display:block;margin:auto;border-radius:8px}',
       '#'+ROOT_ID+' .nj-refresh:hover{background:var(--yt-spec-10-percent-layer,rgba(127,127,127,.1))}'
@@ -1069,6 +1366,11 @@
       el('span','nj-chevron',state.open?'▾':'▸'));
     head.addEventListener('click',()=>{state.open=!state.open;persistState();render();});
     host.append(head);
+    const hubLink=el('button','nj-live-hub-link','🔴 配信中一覧');
+    hubLink.type='button';
+    hubLink.title='配信中のにじさんじJPライバーをサムネイル一覧で開く';
+    hubLink.addEventListener('click',openLiveHub);
+    host.append(hubLink);
     if(!state.open)return;
     if(loading&&!roster)host.append(el('div','nj-message','ライバー一覧を読み込んでいます…'));
     if(lastError)host.append(el('div','nj-message','データ取得：'+lastError));
@@ -1259,13 +1561,15 @@
     if(state.open)scheduleNativeLiveRefresh();
   });
   observer.observe(document.documentElement,{childList:true,subtree:true});
-  document.addEventListener('yt-navigate-finish',scheduleMount);
+  document.addEventListener('yt-navigate-finish',()=>{scheduleMount();syncLiveHub();});
+  window.addEventListener('hashchange',syncLiveHub);
   document.addEventListener('yt-page-data-updated',()=>{
     scheduleMount();
     queueVisibleLiveChecks();
   });
   document.addEventListener('visibilitychange',()=>{
     if(document.visibilityState==='visible'){
+      if(liveHubActive())syncLiveHub();
       scheduleNativeLiveRefresh();
       queueVisibleLiveChecks();
     }
@@ -1274,7 +1578,14 @@
     queueVisibleLiveChecks();
     if(state.open && [...liveChecks.values()].some(x=>x.live && Date.now()-x.checkedAt>=LIVE_DISPLAY_TTL_MS))render();
   },60*1000);
+  setInterval(()=>{
+    if(liveHubActive()&&document.visibilityState==='visible'&&
+      !liveHubLoading&&Date.now()-liveHubLastAt>=LIVE_HUB_REFRESH_MS)
+      void liveHubFetch();
+  },30*1000);
+  window.addEventListener('resize',liveHubBounds);
   scheduleMount();
+  syncLiveHub();
   scheduleNativeLiveRefresh();
   void updateRoster();
 })();
