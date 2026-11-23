@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.135
+// @version      1.0.136
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -8071,8 +8071,10 @@
     videoId: '',
     lastActive: -1,
     width: 360,
-    widthLoaded: false,
+    height: null, // null keeps the original content-based height until adjusted.
+    sizeLoaded: false,
     resizing: false,
+    heightResizing: false,
     dragging: false,
     // Position offsets relative to the video player (not the viewport).
     // null means the default position; only save after user interaction.
@@ -8098,13 +8100,29 @@
     return Math.max(min, Math.min(max, Number.isFinite(n) ? Math.round(n) : 360));
   }
 
+  // Enlarging the panel is opt-in. The untouched auto-height retains its
+  // original 58% mobile / 72% desktop player limit.
+  function youtubePriorityOverlayHeightBounds(host = youtubeTimestampPlayerHost()) {
+    const playerHeight = Math.max(90, Number(host?.getBoundingClientRect?.().height || 0));
+    const viewportHeight = Math.max(90, Number(window.innerHeight || document.documentElement.clientHeight || 0));
+    const max = Math.max(75, Math.floor(Math.min(playerHeight * 0.9, playerHeight - 8, viewportHeight - 24)));
+    return {min: Math.min(90, max), max};
+  }
+
+  function clampYoutubePriorityOverlayHeight(value, host = youtubeTimestampPlayerHost()) {
+    const {min, max} = youtubePriorityOverlayHeightBounds(host);
+    const n = Number(value);
+    return Math.max(min, Math.min(max, Number.isFinite(n) ? Math.round(n) : Math.min(185, max)));
+  }
+
   async function loadYoutubePriorityOverlayUi() {
-    if (youtubePriorityOverlayUi.widthLoaded) return;
-    youtubePriorityOverlayUi.widthLoaded = true;
+    if (youtubePriorityOverlayUi.sizeLoaded) return;
+    youtubePriorityOverlayUi.sizeLoaded = true;
     try {
       const saved = await gmGet(KEY_YT_PRIORITY_OVERLAY_UI, {});
       if (saved && typeof saved === 'object') {
         youtubePriorityOverlayUi.width = clampYoutubePriorityOverlayWidth(saved.width);
+        if (saved.height != null && Number.isFinite(Number(saved.height))) youtubePriorityOverlayUi.height = Math.round(Number(saved.height));
         if (saved.x != null && Number.isFinite(Number(saved.x))) youtubePriorityOverlayUi.x = Math.round(Number(saved.x));
         if (saved.y != null && Number.isFinite(Number(saved.y))) youtubePriorityOverlayUi.y = Math.round(Number(saved.y));
       }
@@ -8113,16 +8131,17 @@
     if (root) styleYoutubePriorityOverlay(root);
   }
 
-  async function saveYoutubePriorityOverlayWidth() {
+  async function saveYoutubePriorityOverlaySize() {
     try {
       await GM.setValue(KEY_YT_PRIORITY_OVERLAY_UI, {
         width: Math.round(youtubePriorityOverlayUi.width),
+        height: youtubePriorityOverlayUi.height == null ? null : Math.round(youtubePriorityOverlayUi.height),
         x: youtubePriorityOverlayUi.x,
         y: youtubePriorityOverlayUi.y,
         savedAt: Date.now(),
       });
     } catch (e) {
-      console.warn('[NRH][priority overlay width]', e);
+      console.warn('[NRH][priority overlay size]', e);
     }
   }
 
@@ -8237,8 +8256,14 @@
       ? Math.min(160, maxWidth)
       : clampYoutubePriorityOverlayWidth(youtubePriorityOverlayUi.width, host);
     const width = Math.min(maxWidth, wantedWidth);
-    const maxHeight = Math.max(75, Math.floor(rect.height * (mobile ? 0.58 : 0.72)));
-    const currentHeight = root.getBoundingClientRect().height || Math.min(185, maxHeight);
+    const resizedHeight = !youtubePriorityOverlayUi.collapsed && youtubePriorityOverlayUi.height != null
+      ? clampYoutubePriorityOverlayHeight(youtubePriorityOverlayUi.height, host) : null;
+    const maxHeight = resizedHeight == null
+      ? Math.max(75, Math.floor(rect.height * (mobile ? 0.58 : 0.72)))
+      : youtubePriorityOverlayHeightBounds(host).max;
+    const currentHeight = resizedHeight == null
+      ? (root.getBoundingClientRect().height || Math.min(185, maxHeight))
+      : resizedHeight;
     const maxX = Math.max(4, Math.floor(rect.width - width - 4));
     const maxY = Math.max(4, Math.floor(rect.height - Math.min(currentHeight, maxHeight) - 4));
     const x = Math.max(4, Math.min(maxX,
@@ -8251,7 +8276,7 @@
     // immediately without polling, repositioning or a one-frame flash.
     const left = Math.max(0, Math.min(vw - Math.min(width, vw),
       Math.round(rect.left + x)));
-    const top = Math.max(0, Math.min(vh - 40, Math.round(rect.top + y)));
+    const top = Math.max(0, Math.min(vh - (resizedHeight == null ? 40 : resizedHeight), Math.round(rect.top + y)));
 
     root.style.cssText = [
       'position:fixed',
@@ -8260,6 +8285,7 @@
       'z-index:2100',
       'display:flex','flex-direction:column',
       `width:${youtubePriorityOverlayUi.collapsed ? 'auto' : width + 'px'}`,
+      `height:${resizedHeight == null ? 'auto' : resizedHeight + 'px'}`,
       `max-width:${maxWidth}px`,
       `min-width:${youtubePriorityOverlayUi.collapsed ? '0' : Math.min(mobile ? 170 : 220, maxWidth) + 'px'}`,
       `max-height:${maxHeight}px`,
@@ -8456,7 +8482,7 @@
         youtubePriorityOverlayUi.dragging = false;
         dragStart = null;
         try { move.releasePointerCapture(e.pointerId); } catch {}
-        void saveYoutubePriorityOverlayWidth();
+        void saveYoutubePriorityOverlaySize();
         e.preventDefault();
       };
       move.addEventListener('pointerup', endDrag);
@@ -8523,7 +8549,7 @@
           if (!youtubePriorityOverlayUi.resizing) return;
           youtubePriorityOverlayUi.resizing = false;
           try { resize.releasePointerCapture?.(e.pointerId); } catch {}
-          void saveYoutubePriorityOverlayWidth();
+          void saveYoutubePriorityOverlaySize();
           e.preventDefault();
         };
         resize.addEventListener('pointerdown', e => {
@@ -8538,12 +8564,57 @@
         resize.addEventListener('pointerup', onEnd);
         resize.addEventListener('pointercancel', onEnd);
         root.appendChild(resize);
+
+        // Independent bottom-edge grip. Existing right-edge width control,
+        // player-relative positioning and scroll state remain unchanged.
+        const heightResize = document.createElement('div');
+        heightResize.className = 'npf-yt-priority-overlay-resize-height';
+        heightResize.title = '上下にドラッグして高さを変更';
+        heightResize.setAttribute('aria-label', '優先コメントの高さを変更');
+        heightResize.textContent = '↕ 高さ';
+        heightResize.style.cssText = [
+          'position:absolute','left:0','right:12px','bottom:0','height:16px',
+          'z-index:4','display:flex','align-items:center','justify-content:center',
+          'font:700 10px/1 sans-serif','border-radius:0 0 0 10px',
+          'cursor:ns-resize','touch-action:none','user-select:none','-webkit-user-select:none',
+          'background:linear-gradient(to top,rgba(255,255,255,.18),rgba(255,255,255,.03))',
+          'color:rgba(255,255,255,.85)'
+        ].join(';');
+        let heightStartY = 0;
+        let heightStart = 0;
+        heightResize.addEventListener('pointerdown', e => {
+          if (e.button != null && e.button !== 0) return;
+          youtubePriorityOverlayUi.heightResizing = true;
+          heightStartY = Number(e.clientY);
+          heightStart = root.getBoundingClientRect().height;
+          try { heightResize.setPointerCapture(e.pointerId); } catch {}
+          e.preventDefault();
+          e.stopPropagation();
+        });
+        heightResize.addEventListener('pointermove', e => {
+          if (!youtubePriorityOverlayUi.heightResizing) return;
+          youtubePriorityOverlayUi.height = clampYoutubePriorityOverlayHeight(
+            heightStart + Number(e.clientY) - heightStartY, youtubeTimestampPlayerHost());
+          styleYoutubePriorityOverlay(root);
+          e.preventDefault();
+        });
+        const endHeightResize = e => {
+          if (!youtubePriorityOverlayUi.heightResizing) return;
+          youtubePriorityOverlayUi.heightResizing = false;
+          try { heightResize.releasePointerCapture?.(e.pointerId); } catch {}
+          void saveYoutubePriorityOverlaySize();
+          e.preventDefault();
+        };
+        heightResize.addEventListener('pointerup', endHeightResize);
+        heightResize.addEventListener('pointercancel', endHeightResize);
+        root.appendChild(heightResize);
+
         const body = document.createElement('div');
         body.className = 'npf-yt-priority-overlay-body';
         body.style.cssText = [
           'overflow:auto','overscroll-behavior:contain','-webkit-overflow-scrolling:touch',
-          'padding:7px 12px 9px 8px','display:grid','gap:8px',
-          'width:100%','min-width:0','box-sizing:border-box',
+          'padding:7px 12px 20px 8px','display:grid','gap:8px',
+          'width:100%','min-width:0','min-height:0','flex:1 1 auto','box-sizing:border-box',
           'max-height:calc(100% - 32px)','font-size:12px','line-height:1.45',
           'text-shadow:0 1px 2px rgba(0,0,0,.92)'
         ].join(';');
