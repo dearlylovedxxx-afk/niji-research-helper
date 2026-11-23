@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.2.9
+// @version      0.3.0
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
@@ -34,7 +34,8 @@ const app=APPS[location.hostname.toLowerCase()];if (!app) return;
 const GATEWAY='https://niji-research-backup.dearlylovedxxx.workers.dev';
 const CONFIG='ncb_app_cloud_v1_'+app.id;
 const GLOBAL_TOKEN_KEY='ncb_client_token_v1';
-const AUTH_SECRET_NAME=app.id==='x'?'NRH_X_BACKUP_TOKEN':app.id==='or'?'NRH_OR_BACKUP_TOKEN':app.id==='pixiv'?'NRH_PIXIV_BACKUP_TOKEN':'NIJI_CLIENT_TOKEN';
+const SHARED_CLIENT_BACKUP=app.id==='x'||app.id==='pixiv'||app.id==='pictbland';
+const AUTH_SECRET_NAME=SHARED_CLIENT_BACKUP?'NIJI_CLIENT_TOKEN':'NRH_OR_BACKUP_TOKEN';
 const CHUNK=3*1024*1024, MAX_PARTS=80;
 const PIXIV_EXCLUDE_TAGS_KEY='pixiv-saved-searches-feed-exclude-tags-v1';
 // Same NFKC + case-insensitive rules as Pixiv's saved-search feed.
@@ -61,22 +62,31 @@ function savePixivFeedExcludeTags(tags){
  try{window.dispatchEvent(new Event('pixiv-feed-exclude-tags-cloud-applied'));}catch{}
 }
 const enc=new TextEncoder(), dec=new TextDecoder('utf-8',{fatal:true});
-let settings={enabled:false,token:'',lastSavedAt:0,lastSha:'',syncInitialized:false,lastContentSha:'',lastRemoteId:'',lastSyncAt:0,recoveryHold:false},working=false,nextScan=0,notice='未接続';
+let settings={enabled:false,token:'',authMode:'',legacyToken:'',legacyMigrated:false,lastSavedAt:0,lastSha:'',syncInitialized:false,lastContentSha:'',lastRemoteId:'',lastSyncAt:0,recoveryHold:false},working=false,nextScan=0,notice='未接続';
 try {
  const savedConfig=await GM.getValue(CONFIG,null);
  if(savedConfig&&typeof savedConfig==='object')settings={...settings,...savedConfig};
  const globalToken=String(await GM.getValue(GLOBAL_TOKEN_KEY,'')||'').trim();
- // Only pictBLand uses the shared NIJI_CLIENT_TOKEN. Other apps require per-app secrets.
- if(app.id==='pictbland'&&!settings.token&&globalToken&&savedConfig===null){
-  settings.token=globalToken;settings.enabled=true;
+ if(SHARED_CLIENT_BACKUP){
+  if((app.id==='x'||app.id==='pixiv')&&settings.authMode!=='client'){
+   // Keep the old app-only credential for read-only migration.
+   if(settings.token&&!settings.legacyToken)settings.legacyToken=settings.token;
+   settings.token='';settings.enabled=false;
+   settings.syncInitialized=false;settings.lastContentSha='';settings.lastRemoteId='';
+  }
+  if(globalToken&&(settings.authMode!=='client'||!settings.token)){
+   settings.token=globalToken;settings.enabled=true;settings.authMode='client';
+   settings.syncInitialized=false;settings.lastContentSha='';settings.lastRemoteId='';
+  }
  }
+
 }catch(e){console.warn('[NCB] config read',e);}
 const device=()=>`shared-${app.id}`;
 const el=(tag,klass='',value)=>{const n=document.createElement(tag);if(klass)n.className=klass;if(value!==undefined)n.textContent=value;return n;};
 const sha=async data=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),b=>b.toString(16).padStart(2,'0')).join('');
 function b64(bytes){let s='';for(let i=0;i<bytes.length;i+=32768)s+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(s);}
 function fromB64(s){const t=atob(s);return Uint8Array.from(t,c=>c.charCodeAt(0));}
-async function saveSettings(){await GM.setValue(CONFIG,{enabled:settings.enabled,token:settings.token,lastSavedAt:settings.lastSavedAt,lastSha:settings.lastSha,syncInitialized:!!settings.syncInitialized,lastContentSha:settings.lastContentSha||'',lastRemoteId:settings.lastRemoteId||'',lastSyncAt:Number(settings.lastSyncAt||0),recoveryHold:!!settings.recoveryHold});}
+async function saveSettings(){await GM.setValue(CONFIG,{enabled:settings.enabled,token:settings.token,authMode:settings.authMode||'',legacyToken:settings.legacyToken||'',legacyMigrated:!!settings.legacyMigrated,lastSavedAt:settings.lastSavedAt,lastSha:settings.lastSha,syncInitialized:!!settings.syncInitialized,lastContentSha:settings.lastContentSha||'',lastRemoteId:settings.lastRemoteId||'',lastSyncAt:Number(settings.lastSyncAt||0),recoveryHold:!!settings.recoveryHold});}
 function xhr(method,path,body=null,token=settings.token){
  return new Promise((resolve,reject)=>{
   const api=GM.xmlHttpRequest||GM.xmlhttpRequest;
@@ -418,14 +428,14 @@ async function genericJson(method,path,body=null,token=settings.token,responseTy
  return parsed;
 }
 async function getBackups(token=settings.token){
- if(app.id==='pictbland'){
+ if(SHARED_CLIENT_BACKUP){
   const r=await genericJson('GET','/v1/backups?device='+encodeURIComponent(device()),null,token);
   return r.backups||[];
  }
  const r=await xhr('GET','',null,token);return r.backups||[];
 }
 async function fetchBackup(item,token=settings.token){
- if(app.id==='pictbland'){
+ if(SHARED_CLIENT_BACKUP){
   if(!item?.id||!item?.sha256)throw Error('バックアップ情報が不正です');
   const res=await genericJson('GET','/v1/backups/'+encodeURIComponent(item.id),null,token,'arraybuffer');
   if(res.status!==200)throw Error('pCloud読込 HTTP '+res.status);
@@ -453,7 +463,7 @@ async function fetchBackup(item,token=settings.token){
 async function uploadSnapshot(obj){
  obj={...obj,format:2,app:app.name,origin:location.origin,device:device()};
  const contentSha=await payloadSha(obj);
- if(app.id==='pictbland')return genericUploadPictSnapshot(obj);
+ if(SHARED_CLIENT_BACKUP)return genericUploadPictSnapshot(obj);
  const bytes=enc.encode(JSON.stringify(obj)),count=Math.ceil(bytes.length/CHUNK);
  if(count>MAX_PARTS)throw Error('共有データが約240MBを超えました。データを消さずに中止しました');
  const digest=await sha(bytes);
@@ -493,7 +503,7 @@ async function genericUploadPictSnapshot(obj){
  return {item,contentSha:await payloadSha(verify)};
 }
 async function uploadShared(obj){
- return app.id==='pictbland'?genericUploadPictSnapshot(obj):uploadSnapshot(obj);
+ return SHARED_CLIENT_BACKUP?genericUploadPictSnapshot(obj):uploadSnapshot(obj);
 }
 async function migrateStandaloneSavedSearch(deviceName){
  try{
@@ -672,10 +682,10 @@ const css=el('style');css.textContent=`:host{all:initial}*{box-sizing:border-box
 shadow.append(css);const launch=el('button','',`☁️ ${app.label}`);launch.id='launch';launch.style.setProperty('display','none','important');const panel=el('section');panel.id='panel';panel.hidden=true;shadow.append(launch,panel);if(app.id==='x')launch.style.setProperty('display','none','important');
 const header=el('h2','',`☁️ ${app.label}：Niji Cloud同期`);
 const note=el('p','note','このデータはPC・iPhone・iPadで共通です。ページを開いた時・復帰時・定期的にクラウドと双方向同期します。世代履歴は復旧用に残します。Xの一時的ないいね順一覧は共有しません。'
- + (app.id==='pictbland'?'':' このアプリの接続には専用の'+AUTH_SECRET_NAME+'が必要です。にじリサーチヘルパーのNIJI_CLIENT_TOKENとは別設定です。'));
-const tokenLabel=el('label','',app.id==='pictbland'?'NIJI CLIENT TOKEN':'Cloudflareの'+AUTH_SECRET_NAME+'（このアプリ専用）');
+ + (SHARED_CLIENT_BACKUP?' X・Pixiv・pictBLandはNIJI CLIENT TOKENで共通認証します。':' OR検索には専用トークンを使用します。'));
+const tokenLabel=el('label','',SHARED_CLIENT_BACKUP?'NIJI CLIENT TOKEN':'Cloudflareの'+AUTH_SECRET_NAME+'（OR専用）');
 const tokenInput=el('input');tokenInput.type='password';
-tokenInput.placeholder='Cloudflareの'+AUTH_SECRET_NAME+'と同じ値（チャットには送らない）';
+tokenInput.placeholder=SHARED_CLIENT_BACKUP?'NIJI CLIENT TOKEN（共通・チャットに送らない）':'Cloudflareの'+AUTH_SECRET_NAME+'と同じ値（チャットには送らない）';
 tokenInput.autocomplete='off';
 const actions=el('div','actions'),connect=el('button','','接続・初回同期'),backup=el('button','','今すぐ同期・検証'),listButton=el('button','','履歴・復元'),tokenCopy=el('button','','🔐 トークンの控えをコピー'),disconnect=el('button','','この端末の同期を停止'),close=el('button','','閉じる');
 actions.append(connect,backup,listButton,tokenCopy,disconnect,close);
@@ -698,13 +708,13 @@ connect.onclick=async()=>{
  try{
   stateText('Niji Cloud接続を確認中…');
   let status;
-  if(app.id==='pictbland')status=await genericJson('GET','/v1/status',null,token);
+  if(SHARED_CLIENT_BACKUP)status=await genericJson('GET','/v1/status',null,token);
   else status=await xhr('GET','/status',null,token);
   if(!status.connected||!status.remoteOk)throw Error('pCloudが接続されていません');
-  settings.token=token;settings.enabled=true;settings.syncInitialized=false;settings.lastContentSha='';settings.lastRemoteId='';settings.lastSyncAt=0;
+  settings.token=token;settings.enabled=true;settings.authMode=SHARED_CLIENT_BACKUP?'client':'legacy';settings.syncInitialized=false;settings.lastContentSha='';settings.lastRemoteId='';settings.lastSyncAt=0;
   // Preserve a manual recovery hold when reconnecting with a new token.
   if(app.id!=='pixiv')settings.recoveryHold=false;
-  if(app.id==='pictbland')await GM.setValue(GLOBAL_TOKEN_KEY,token);
+  if(SHARED_CLIENT_BACKUP)await GM.setValue(GLOBAL_TOKEN_KEY,token);
   await saveSettings();tokenInput.value='';
   stateText('接続OK。全端末共通データを初回同期します。トークンはiPhoneの「パスワード」アプリにも控えを保存してください。');
  }catch(e){
@@ -741,7 +751,7 @@ tokenCopy.onclick=async()=>{
 listButton.onclick=()=>void showBackups();
 disconnect.onclick=async()=>{
  if(!confirm('この端末のNiji Cloud同期を停止しますか？ クラウドとローカルのデータは削除しません。'))return;
- settings.enabled=false;settings.token='';settings.lastSha='';await saveSettings();stateText('この端末の自動同期を停止しました。クラウド上の共通データは残っています。');update();
+ settings.enabled=false;settings.token='';settings.authMode='';settings.lastSha='';await saveSettings();stateText('この端末の自動同期を停止しました。クラウド上の共通データは残っています。');update();
 };
 if(settings.enabled&&settings.token)void saveSettings().catch(()=>{});
 stateText(settings.recoveryHold&&app.id==='pixiv'
