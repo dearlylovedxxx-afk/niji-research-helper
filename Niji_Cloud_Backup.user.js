@@ -607,6 +607,113 @@ async function migrateLegacyBackups(){
  }
  return merged;
 }
+// pictBLand: manual owner-URL reconciliation. Never generate search tokens.
+function pictBound(row){return /^\/tags\/index\/[A-Za-z0-9_-]{6,}\/?(?:\?.*)?$/.test(String(row?.href||''));}
+function pictKey(row){return String(row?.word||'').trim().normalize('NFKC').toLocaleLowerCase('ja-JP');}
+function pictLocal(){
+ const data=JSON.parse(localStorage.getItem('pictbland-saved-search-words-v1')||'[]');
+ if(!Array.isArray(data))throw Error('端末の保存検索データが不正です');
+ return data.filter(x=>x&&typeof x.word==='string'&&x.word.trim()).slice(0,200);
+}
+async function pictRemote(){
+ const list=(await getBackups()).filter(x=>x.device===device()).sort((a,b)=>
+  Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0));
+ const latest=list[0]||null;
+ if(!latest)return {latest:null,snap:null,rows:[]};
+ const snap=await fetchBackup(latest);
+ if(!Array.isArray(snap?.payload?.savedSearches))throw Error('クラウドの保存検索データが不正です');
+ return {latest,snap,rows:normalizePictRows(snap.payload.savedSearches)};
+}
+function pictOverlay(base,priority){
+ const out=base.map(x=>({...x})),index=new Map(out.map((x,i)=>[pictKey(x),i]));
+ for(const row of priority){
+  const key=pictKey(row);if(!key)continue;
+  const i=index.get(key);
+  if(i===undefined){if(out.length>=200)throw Error('保存検索が200件を超えました');
+   index.set(key,out.length);out.push({...row});
+  }else if(pictBound(row)){
+   out[i]={...out[i],href:row.href,updatedAt:Math.max(
+     Number(out[i].updatedAt||0)||0,Number(row.updatedAt||0)||0,Date.now())};
+  }
+ }
+ return out;
+}
+function pictApply(rows){
+ const current=pictLocal(),next=normalizePictRows(rows);
+ if(JSON.stringify(current)!==JSON.stringify(next)){
+  backupPictLocal(current);
+  localStorage.setItem('pictbland-saved-search-words-v1',JSON.stringify(next));
+  try{window.__pictblandSavedSearchUi?.render?.();}catch{}
+  try{window.dispatchEvent(new CustomEvent('niji-cloud-sync-applied',{detail:{app:'pictbland'}}));}catch{}
+ }
+ return next;
+}
+async function pictDiagnose(){
+ if(working||!settings.token)return;working=true;update();
+ try{
+  const local=pictLocal(),remote=await pictRemote(),cloud=new Map(remote.rows.map(x=>[pictKey(x),x]));
+  const onlyPhone=[],onlyCloud=[],different=[];
+  for(const row of local){
+   const other=cloud.get(pictKey(row));
+   if(pictBound(row)&&!pictBound(other))onlyPhone.push(row.name||row.word);
+   else if(!pictBound(row)&&pictBound(other))onlyCloud.push(row.name||row.word);
+   else if(pictBound(row)&&pictBound(other)&&row.href!==other.href)different.push(row.name||row.word);
+  }
+  const keys=new Set(local.map(pictKey));
+  for(const row of remote.rows)if(pictBound(row)&&!keys.has(pictKey(row)))onlyCloud.push(row.name||row.word);
+  const show=a=>a.length+'件'+(a.length?'（'+a.slice(0,12).join('、')+'）':'');
+  stateText('🔎 URL診断（URL文字列は表示しません）\n端末 '+local.length+'件／クラウド '+remote.rows.length+
+    '件\n端末だけに新URL：'+show(onlyPhone)+
+    '\nクラウドだけに新URL：'+show(onlyCloud)+
+    '\nURLが不一致：'+show(different));
+ }catch(e){stateText('⚠️ URL診断失敗：'+String(e?.message||e));}
+ finally{working=false;update();}
+}
+async function pictPush(){
+ if(working||!settings.token)return;
+ let local;try{local=pictLocal();}catch(e){stateText(String(e));return;}
+ const bound=local.filter(pictBound);
+ if(!bound.length){stateText('有効な再登録URLが0件なので送信しません');return;}
+ if(!confirm('この端末の再登録済みURL '+bound.length+'件をクラウドより優先します。スマホ側で実行してください。既存の世代は削除しません。'))return;
+ working=true;update();
+ try{
+  const remote=await pictRemote(),rows=pictOverlay(remote.rows,local);
+  const template=remote.snap||await snapshot({allowEmpty:true});
+  const outgoing={...template,format:2,app:app.name,origin:location.origin,device:device(),
+   exportedAt:new Date().toISOString(),payload:{...template.payload,savedSearches:rows}};
+  const uploaded=await uploadShared(outgoing);
+  const verified=await fetchBackup(uploaded.item);
+  const confirmed=new Map((verified.payload?.savedSearches||[]).map(x=>[pictKey(x),x.href]));
+  if(bound.some(row=>confirmed.get(pictKey(row))!==row.href))
+   throw Error('クラウド読戻し時のURL照合に失敗しました。再登録データは端末内に保持しています');
+  const applied=pictApply(rows);
+  settings.syncInitialized=true;settings.lastContentSha=await payloadSha(await snapshot({allowEmpty:true}));
+  settings.lastRemoteId=String(uploaded.item?.id||'');settings.lastSha=uploaded.item?.sha256||'';
+  settings.lastSavedAt=Date.now();settings.lastSyncAt=Date.now();await saveSettings();
+  stateText('✅ 再登録済みURL '+bound.length+'件を優先送信し、クラウドで一致確認済み。次にPCで優先取り込みを実行してください。保存検索 '+applied.length+'件。');
+ }catch(e){stateText('⚠️ URL優先送信失敗：'+String(e?.message||e));}
+ finally{working=false;update();}
+}
+async function pictPull(){
+ if(working||!settings.token)return;
+ if(!confirm('クラウドの再登録URLをPCの旧URLより優先して取り込みます。既存データをバックアップし、PC側だけの検索項目は残します。'))return;
+ working=true;update();
+ try{
+  const remote=await pictRemote();
+  if(!remote.latest)throw Error('クラウドに保存データがありません。スマホから先に優先送信してください');
+  const bound=remote.rows.filter(pictBound);
+  if(!bound.length)throw Error('クラウドに再登録URLがありません');
+  const merged=pictOverlay(pictLocal(),remote.rows),applied=pictApply(merged);
+  const byKey=new Map(applied.map(x=>[pictKey(x),x.href]));
+  if(bound.some(x=>byKey.get(pictKey(x))!==x.href))throw Error('取り込み後のURL照合に失敗しました');
+  settings.syncInitialized=true;settings.lastRemoteId=String(remote.latest.id);
+  settings.lastContentSha=await payloadSha(remote.snap);
+  settings.lastSyncAt=Date.now();await saveSettings();
+  stateText('✅ クラウドの再登録URL '+bound.length+'件を優先反映しました。端末内 '+applied.length+'件。変更前のデータはバックアップしています。');
+ }catch(e){stateText('⚠️ URL優先取り込み失敗：'+String(e?.message||e));}
+ finally{working=false;update();}
+}
+
 async function syncShared({force=false,confirmRecovery=false}={}){
  if(working||!settings.enabled||!settings.token)return;
  // Manual history recovery MUST NOT be overwritten or uploaded in the
@@ -755,6 +862,13 @@ tokenInput.placeholder=SHARED_CLIENT_BACKUP?'NIJI CLIENT TOKEN（共通・チャ
 tokenInput.autocomplete='off';
 const actions=el('div','actions'),connect=el('button','','接続・初回同期'),backup=el('button','','今すぐ同期・検証'),listButton=el('button','','履歴・復元'),tokenCopy=el('button','','🔐 トークンの控えをコピー'),disconnect=el('button','','この端末の同期を停止'),close=el('button','','閉じる');
 actions.append(connect,backup,listButton,tokenCopy,disconnect,close);
+const pictCheckButton=el('button','','🔎 保存検索URL診断'),
+ pictPushButton=el('button','','📱 この端末のURLを優先送信'),
+ pictPullButton=el('button','','💻 クラウドURLを優先取り込み');
+if(app.id==='pictbland')actions.append(pictCheckButton,pictPushButton,pictPullButton);
+pictCheckButton.onclick=()=>void pictDiagnose();
+pictPushButton.onclick=()=>void pictPush();
+pictPullButton.onclick=()=>void pictPull();
 const info=el('div','status'),tokenNote=el('p','note','Safariの履歴消去でログイン状態やサイト保存データが失われる場合があります。Niji CloudトークンはMacaque内に保存しますが、Safariによる削除からの保護は保証できません。iPhoneの「パスワード」アプリにも控えを保存してください。トークンはクラウド履歴には含めません。');
 const backupList=el('div');panel.append(header,note,tokenLabel,tokenInput,tokenNote,actions,info,backupList);
 function stateText(s){notice=s;info.textContent=s;}
@@ -766,6 +880,9 @@ function update(){
  listButton.disabled=working||!settings.token;
  tokenCopy.disabled=working||!settings.token;
  disconnect.disabled=working||!settings.enabled;
+ pictCheckButton.disabled=working||!settings.enabled;
+ pictPushButton.disabled=working||!settings.enabled;
+ pictPullButton.disabled=working||!settings.enabled;
 }
 launch.onclick=()=>{panel.hidden=!panel.hidden;update();};close.onclick=()=>{panel.hidden=true;};
 connect.onclick=async()=>{
