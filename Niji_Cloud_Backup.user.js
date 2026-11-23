@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.2.8
+// @version      0.2.9
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
@@ -294,17 +294,44 @@ async function mergePixivDatabases(databases,{replace=false}={}){
  }
  return changed;
 }
+// Preserve the newer owner-specific URL, even when an older PC record
+// appears first in the local-first backup merge.
 function normalizePictRows(rows){
- const out=[],seen=new Set();
+ const out=[],positions=new Map();
+ const privateHref=v=>/^\/tags\/index\/[A-Za-z0-9_-]{6,}\/?(?:\?.*)?$/.test(String(v||''));
  for(const row of Array.isArray(rows)?rows:[]){
   if(!row||typeof row.word!=='string'||!row.word.trim())continue;
-  const key=row.word.trim();if(seen.has(key))continue;seen.add(key);
-  out.push({...row,id:typeof row.id==='string'&&row.id?row.id:crypto.randomUUID(),
-   name:typeof row.name==='string'&&row.name.trim()?row.name.trim():key,
-   word:key,href:typeof row.href==='string'&&row.href.startsWith('/')?row.href:''});
-  if(out.length>=200)break;
+  const word=row.word.trim();
+  const normalized={...row,id:typeof row.id==='string'&&row.id?row.id:crypto.randomUUID(),
+   name:typeof row.name==='string'&&row.name.trim()?row.name.trim():word,
+   word,href:typeof row.href==='string'&&row.href.startsWith('/')?row.href:''};
+  const i=positions.get(word);
+  if(i===undefined){
+   if(out.length>=200)continue;
+   positions.set(word,out.length);out.push(normalized);continue;
+  }
+  const previous=out[i];
+  const oldTime=Number(previous.updatedAt||previous.createdAt||0)||0;
+  const newTime=Number(normalized.updatedAt||normalized.createdAt||0)||0;
+  const oldPrivate=privateHref(previous.href),newPrivate=privateHref(normalized.href);
+  if(newPrivate&&!oldPrivate){out[i]=normalized;continue;}
+  if(oldPrivate&&!newPrivate)continue;
+  if(newTime>oldTime){out[i]=normalized;continue;}
+  if(newTime<oldTime)continue;
+  if(oldPrivate&&newPrivate&&previous.href!==normalized.href){
+   throw Error('同じ保存検索「'+word+'」のURLが同時刻に更新されました。自動上書きを中止しました');
+  }
+  if(!previous.href&&normalized.href)out[i]=normalized;
  }
  return out;
+}
+function backupPictLocal(current){
+ if(!current?.length)return;
+ const prefix='pictbland-niji-cloud-pre-restore-';
+ const k=prefix+Date.now();
+ localStorage.setItem(k,JSON.stringify(current));
+ const keys=Object.keys(localStorage).filter(v=>v.startsWith(prefix)).sort();
+ for(const old of keys.slice(0,Math.max(0,keys.length-3)))localStorage.removeItem(old);
 }
 async function restore(snap,{mode='merge'}={}){
  if(!snap||![1,2].includes(Number(snap.format))||snap.app!==app.name||!snap.payload||typeof snap.payload!=='object')throw Error('バックアップ形式または対象アプリが一致しません');
@@ -330,16 +357,18 @@ async function restore(snap,{mode='merge'}={}){
  if(app.id==='pictbland'){
   const incoming=Array.isArray(snap.payload.savedSearches)?snap.payload.savedSearches:null;
   if(!incoming)throw Error('pictBLandの保存検索形式が違います');
-  let rows;
-  if(mode==='replace') rows=normalizePictRows(incoming);
-  else{
-   let current=[];try{const parsed=JSON.parse(localStorage.getItem('pictbland-saved-search-words-v1')||'[]');if(Array.isArray(parsed))current=parsed;}catch{}
-   rows=normalizePictRows([...current,...incoming]);
+  let current=[];try{const parsed=JSON.parse(localStorage.getItem('pictbland-saved-search-words-v1')||'[]');if(Array.isArray(parsed))current=parsed;}catch{}
+  const safeIncoming=normalizePictRows(incoming);
+  if(mode==='replace'&&current.length&&!safeIncoming.length)
+   throw Error('クラウド側の保存検索が0件のため、既存の保存検索を保護して取り込みを中止しました');
+  const rows=mode==='replace'?safeIncoming:normalizePictRows([...current,...safeIncoming]);
+  if(JSON.stringify(current)!==JSON.stringify(rows)){
+   backupPictLocal(current);
+   localStorage.setItem('pictbland-saved-search-words-v1',JSON.stringify(rows));
   }
-  localStorage.setItem('pictbland-saved-search-words-v1',JSON.stringify(rows));
   try{window.__pictblandSavedSearchUi?.render?.();}catch{}
   try{window.dispatchEvent(new CustomEvent('niji-cloud-sync-applied',{detail:{app:'pictbland'}}));}catch{}
-  return `pictBLand共有検索${rows.length}件を反映しました`;
+  return 'pictBLand共有検索'+rows.length+'件を反映しました';
  }
  const count=await mergePixivDatabases(snap.payload.databases||[],{replace:mode==='replace'});
  const pref=snap.payload.preferences||{};
