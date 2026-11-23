@@ -634,8 +634,12 @@ function pictOverlay(base,priority){
   if(i===undefined){if(out.length>=200)throw Error('保存検索が200件を超えました');
    index.set(key,out.length);out.push({...row});
   }else if(pictBound(row)){
-   out[i]={...out[i],href:row.href,updatedAt:Math.max(
-     Number(out[i].updatedAt||0)||0,Number(row.updatedAt||0)||0,Date.now())};
+   const prev=out[i];
+   const timestamp=Math.max(Number(prev.updatedAt||0)||0,Number(row.updatedAt||0)||0);
+   // Do not generate a new timestamp just by receiving an identical URL;
+   // otherwise two active devices can endlessly create new cloud generations.
+   if(prev.href!==row.href || timestamp>Number(prev.updatedAt||0))
+    out[i]={...prev,href:row.href,updatedAt:timestamp};
   }
  }
  return out;
