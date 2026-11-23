@@ -443,8 +443,24 @@ async function fetchBackup(item,token=settings.token){
   if(Number(item.size||0)&&raw.byteLength!==Number(item.size))throw Error('保存済みファイルのサイズが一致しません');
   if(await sha(raw)!==item.sha256)throw Error('保存済みファイルのSHA-256が一致しません');
   const wrapper=JSON.parse(dec.decode(raw));
-  const snap=wrapper?.preferences?.nijiCloudSnapshot;
-  if(wrapper?.app!=='Niji Research Helper'||wrapper?.device!==device()||!snap)throw Error('pictBLand共有バックアップ形式が違います');
+  let snap=wrapper?.preferences?.nijiCloudSnapshot;
+  const packed=wrapper?.preferences?.nijiCloudCompressedSnapshot;
+  if(packed&&!snap){
+   if(packed.format!=='gzip-base64-v1'||!Number.isSafeInteger(packed.originalBytes)||
+      packed.originalBytes<1||packed.originalBytes>150*1024*1024||
+      !/^[a-f0-9]{64}$/i.test(String(packed.originalSha256||'')))
+     throw Error('共通バックアップの圧縮データ形式が不正です');
+   if(typeof DecompressionStream!=='function')throw Error('圧縮バックアップの復元には対応ブラウザが必要です');
+   const packedBytes=fromB64(packed.payload||'');
+   const input=new Blob([packedBytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+   const original=new Uint8Array(await new Response(input).arrayBuffer());
+   if(original.length!==packed.originalBytes||await sha(original)!==packed.originalSha256)
+     throw Error('共通バックアップの復号・検証に失敗しました');
+   snap=JSON.parse(dec.decode(original));
+  }
+  if(wrapper?.app!=='Niji Research Helper'||wrapper?.device!==device()||!snap||
+     snap.app!==app.name||snap.device!==device())
+    throw Error('共通バックアップのアプリ・端末形式が違います');
   return snap;
  }
  if(!item||!Number.isInteger(item.partCount)||item.partCount<1||item.partCount>MAX_PARTS)throw Error('バックアップの分割情報が不正です');
@@ -460,6 +476,29 @@ async function fetchBackup(item,token=settings.token){
  if(parsed.app!==app.name||![1,2].includes(Number(parsed.format))||parsed.origin!==item.origin||parsed.device!==item.device)throw Error('保存内容のアプリ・端末情報が一致しません');
  return parsed;
 }
+// Read only: previous X/Pixiv per-app protected backup stream.
+// These credentials are never reused for new backups.
+async function fetchLegacyBackup(item,token){
+ if(!token||!item||!Number.isInteger(item.partCount)||item.partCount<1||
+    item.partCount>MAX_PARTS||!Number.isSafeInteger(item.size)||item.size<1)
+   throw Error('旧バックアップの情報が不正です');
+ const output=new Uint8Array(item.size);let offset=0;
+ for(let i=0;i<item.partCount;i++){
+  const part=await xhr('GET','/'+encodeURIComponent(item.id)+'/parts/'+i,null,token);
+  const bytes=fromB64(part.base64||'');
+  if(await sha(bytes)!==part.sha256||offset+bytes.length>output.length)
+   throw Error('旧バックアップの分割データが不正です');
+  output.set(bytes,offset);offset+=bytes.length;
+ }
+ if(offset!==output.length||await sha(output)!==item.sha256)
+  throw Error('旧バックアップのSHA-256検証に失敗しました');
+ const parsed=JSON.parse(dec.decode(output));
+ if(parsed.app!==app.name||parsed.device!==item.device||
+    parsed.origin!==item.origin||![1,2].includes(Number(parsed.format)))
+   throw Error('旧バックアップの種類が異なります');
+ return parsed;
+}
+
 async function uploadSnapshot(obj){
  obj={...obj,format:2,app:app.name,origin:location.origin,device:device()};
  const contentSha=await payloadSha(obj);
@@ -492,8 +531,20 @@ async function genericUploadPictSnapshot(obj){
  // /v1/backups は NRH 共通ゲートウェイ用で、保存メタデータの origin は
  // NRH が許可している論理originを使う。実際の対象サイトは snapshot.origin に保持する。
  const logicalOrigin='https://www.youtube.com';
- const wrapper={app:'Niji Research Helper',version:'0.2.4',dbVersion:1,exportedAt:new Date().toISOString(),sourceOrigin:logicalOrigin,device:device(),stores:{videos:[],channels:[],wiki:[],pairs:[]},preferences:{nijiCloudSnapshot:obj}};
+ const payload=enc.encode(JSON.stringify(obj));
+ let preferences={nijiCloudSnapshot:obj};
+ // The gateway accepts <=20MiB per upload. Compress only larger Pixiv/X
+ // snapshots inside an ordinary v1 wrapper, so no Worker deployment is needed.
+ if(payload.length>4*1024*1024){
+  if(typeof CompressionStream!=='function')throw Error('大きいバックアップは圧縮対応のブラウザで同期してください（ローカルデータは保持）');
+  const stream=new Blob([payload]).stream().pipeThrough(new CompressionStream('gzip'));
+  const gzipped=new Uint8Array(await new Response(stream).arrayBuffer());
+  preferences={nijiCloudCompressedSnapshot:{format:'gzip-base64-v1',
+   originalBytes:payload.length,originalSha256:await sha(payload),payload:b64(gzipped)}};
+ }
+ const wrapper={app:'Niji Research Helper',version:'0.2.4',dbVersion:1,exportedAt:new Date().toISOString(),sourceOrigin:logicalOrigin,device:device(),stores:{videos:[],channels:[],wiki:[],pairs:[]},preferences};
  const text=JSON.stringify(wrapper),bytes=enc.encode(text),digest=await sha(bytes);
+ if(bytes.length>19*1024*1024)throw Error('共通バックアップが19MiBを超えました。旧世代を削除せず保護しています');
  const res=await genericRequest({method:'POST',url:GATEWAY+'/v1/backups',headers:{authorization:'Bearer '+settings.token,accept:'application/json','content-type':'application/json','x-nrh-device':device(),'x-nrh-origin':logicalOrigin,'x-nrh-sha256':digest,'x-nrh-version':'0.2.4'},data:text,responseType:'text',timeout:60000});
  let body={};try{body=JSON.parse(res.responseText||res.response||'{}');}catch{}
  if(res.status<200||res.status>=300||!body.ok)throw Error(`HTTP ${res.status}: ${String(body.error||'保存失敗')}`);
@@ -528,6 +579,21 @@ async function migrateLegacyBackups(){
   merged+=await migrateStandaloneSavedSearch('pictbland_saved_searches_v1');
   return merged;
  }
+ if((app.id==='x'||app.id==='pixiv')&&settings.legacyToken&&!settings.legacyMigrated){
+  // Import the latest old per-app generation before creating the new
+  // NIJI CLIENT TOKEN backup. Keep the old cloud history intact.
+  try{
+   const result=await xhr('GET','',null,settings.legacyToken);
+   const old=(result.backups||[]).filter(b=>b.device===device())
+     .sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0))[0];
+   if(old){await restore(await fetchLegacyBackup(old,settings.legacyToken),{mode:'merge'});merged++;}
+   settings.legacyMigrated=true;
+   await saveSettings();
+  }catch(error){
+   throw Error('旧専用トークンのバックアップを読み取れません。新しい共通世代への自動移行を中止しました：'+String(error?.message||error));
+  }
+ }
+ if(SHARED_CLIENT_BACKUP)return merged;
  const all=await getBackups();
  const latestByDevice=new Map();
  for(const b of all){
