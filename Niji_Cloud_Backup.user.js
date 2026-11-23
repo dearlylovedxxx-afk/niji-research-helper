@@ -532,6 +532,7 @@ async function genericUploadPictSnapshot(obj){
  // NRH が許可している論理originを使う。実際の対象サイトは snapshot.origin に保持する。
  const logicalOrigin='https://www.youtube.com';
  const payload=enc.encode(JSON.stringify(obj));
+ if(payload.length>150*1024*1024)throw Error('共有バックアップの元データが150MiBを超えました。上書きせず中止します');
  let preferences={nijiCloudSnapshot:obj};
  // The gateway accepts <=20MiB per upload. Compress only larger Pixiv/X
  // snapshots inside an ordinary v1 wrapper, so no Worker deployment is needed.
@@ -551,7 +552,9 @@ async function genericUploadPictSnapshot(obj){
  const list=await getBackups(),item=(body.backup?.id?list.find(x=>x.id===body.backup.id):null)||list.find(x=>x.sha256===digest&&Number(x.size||0)===bytes.length)||list[0];
  if(!item)throw Error('pCloud保存後の世代確認に失敗しました');
  const verify=await fetchBackup(item);
- return {item,contentSha:await payloadSha(verify)};
+ const sentHash=await payloadSha(obj),readHash=await payloadSha(verify);
+ if(sentHash!==readHash)throw Error('共有バックアップの保存内容が送信前と一致しません。クラウド上の世代は保護しています');
+ return {item,contentSha:readHash};
 }
 async function uploadShared(obj){
  return SHARED_CLIENT_BACKUP?genericUploadPictSnapshot(obj):uploadSnapshot(obj);
@@ -723,6 +726,21 @@ async function syncShared({force=false,confirmRecovery=false}={}){
  working=true;update();
  try{
   stateText('☁️ 全端末共通データを確認中…');
+  // Import the older per-app generation on EVERY migrating device, even
+  // when a shared-client generation already exists from another device.
+  if((app.id==='x'||app.id==='pixiv')&&settings.legacyToken&&!settings.legacyMigrated){
+   try{
+    const oldList=await xhr('GET','',null,settings.legacyToken);
+    const old=(oldList.backups||[]).filter(x=>x.device===device())
+     .sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0))[0];
+    if(old)await restore(await fetchLegacyBackup(old,settings.legacyToken),{mode:'merge'});
+    settings.legacyMigrated=true;
+    await saveSettings();
+   }catch(error){
+    throw Error('旧X/Pixivバックアップの読込に失敗したため安全のため同期を中止しました：'+String(error?.message||error));
+   }
+  }
+
   let local=await snapshot({allowEmpty:true}),localHash=await payloadSha(local);
   const list=(await getBackups()).filter(b=>b.device===device()).sort((a,b)=>Date.parse(b.createdAt||0)-Date.parse(a.createdAt||0));
   let latest=list[0]||null;
