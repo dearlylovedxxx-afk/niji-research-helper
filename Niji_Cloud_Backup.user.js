@@ -536,8 +536,7 @@ async function genericUploadPictSnapshot(obj){
  let preferences={nijiCloudSnapshot:obj};
  // The gateway accepts <=20MiB per upload. Compress only larger Pixiv/X
  // snapshots inside an ordinary v1 wrapper, so no Worker deployment is needed.
- if(payload.length>4*1024*1024){
-  if(typeof CompressionStream!=='function')throw Error('大きいバックアップは圧縮対応のブラウザで同期してください（ローカルデータは保持）');
+ if(payload.length>4*1024*1024&&typeof CompressionStream==='function'){
   const stream=new Blob([payload]).stream().pipeThrough(new CompressionStream('gzip'));
   const gzipped=new Uint8Array(await new Response(stream).arrayBuffer());
   preferences={nijiCloudCompressedSnapshot:{format:'gzip-base64-v1',
@@ -777,10 +776,13 @@ async function syncShared({force=false,confirmRecovery=false}={}){
     await restore(remote,{mode:'replace'});
    }
   }else if(remoteChanged&&!localChanged){
-   await restore(remote,{mode:app.id==='pixiv'?'merge':'replace'});
+   await restore(remote,{mode:app.id==='pixiv'||app.id==='pictbland'?'merge':'replace'});
    const after=await snapshot({allowEmpty:true}),afterHash=await payloadSha(after);
    if(afterHash!==remoteHash){local=after;localHash=afterHash;needUpload=true;}
   }else if(localChanged&&!remoteChanged){
+   // A mobile/PC, www/non-www origin can hold only a subset of searches.
+   // Never overwrite the shared pictBLand generation with that subset.
+   if(app.id==='pictbland')await restore(remote,{mode:'merge'});
    needUpload=true;
   }else if(localChanged&&remoteChanged){
    await restore(remote,{mode:'merge'});needUpload=true;
