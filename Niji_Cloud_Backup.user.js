@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Cloud Backup (OR / X / Pixiv)
 // @namespace    niji-cloud-backup-three-apps
-// @version      0.3.0
+// @version      0.3.1
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Cloud_Backup.user.js
 // @description  OR・X・Pixiv・pictBLandの保存データをNiji Cloudで全端末共通化。起動時・復帰時・定期的に双方向同期し、世代バックアップも保持。
@@ -38,6 +38,55 @@ const SHARED_CLIENT_BACKUP=app.id==='x'||app.id==='pixiv'||app.id==='pictbland';
 const AUTH_SECRET_NAME=SHARED_CLIENT_BACKUP?'NIJI_CLIENT_TOKEN':'NRH_OR_BACKUP_TOKEN';
 const CHUNK=3*1024*1024, MAX_PARTS=80;
 const PIXIV_EXCLUDE_TAGS_KEY='pixiv-saved-searches-feed-exclude-tags-v1';
+const PICT_EXCLUDE_KEY='pictbland-saved-search-feed-exclude-tags-v1';
+const PICT_EXCLUDE_UPDATED_KEY='pictbland-saved-search-feed-exclude-tags-updated-at-v1';
+function normalizePictExcludeTags(value){
+ const unique=new Map();
+ for(const raw of Array.isArray(value)?value:[]){
+  if(typeof raw!=='string')continue;
+  for(const part of raw.split(/[\n,、]+/)){
+   const text=part.trim().replace(/^#+/,'').trim();
+   const key=text.normalize('NFKC').toLocaleLowerCase('ja-JP');
+   if(key&&!unique.has(key))unique.set(key,text);
+  }
+ }
+ return [...unique.values()];
+}
+function pictExcludeState(){
+ let tags;
+ try {
+  const parsed=JSON.parse(localStorage.getItem(PICT_EXCLUDE_KEY)||'[]');
+  if(!Array.isArray(parsed))throw Error('除外タグが配列ではありません');
+  tags=normalizePictExcludeTags(parsed);
+ } catch(e) {throw Error('pictBLandの除外タグ保存形式を読み取れません：'+String(e?.message||e));}
+ const raw=Number(localStorage.getItem(PICT_EXCLUDE_UPDATED_KEY)||0);
+ return {tags,updatedAt:Number.isFinite(raw)&&raw>0?Math.floor(raw):0};
+}
+function choosePictExcludeState(local,remotePayload){
+ if(!remotePayload||!Array.isArray(remotePayload.feedExcludeTags))return local;
+ const remoteTags=normalizePictExcludeTags(remotePayload.feedExcludeTags);
+ const raw=Number(remotePayload.feedExcludeTagsUpdatedAt||0);
+ const remoteTime=Number.isFinite(raw)&&raw>0?Math.floor(raw):0;
+ if(remoteTime>local.updatedAt)return {tags:remoteTags,updatedAt:remoteTime};
+ if(remoteTime<local.updatedAt)return local;
+ // Equal revisions (including legacy snapshots): retain all distinct tags
+ // instead of letting an old or partially initialized device erase them.
+ const union=normalizePictExcludeTags([...local.tags,...remoteTags]);
+ if(JSON.stringify(union)===JSON.stringify(local.tags))return local;
+ if(JSON.stringify(union)===JSON.stringify(remoteTags))return {tags:remoteTags,updatedAt:remoteTime};
+ return {tags:union,updatedAt:Math.max(Date.now(),local.updatedAt+1)};
+}
+function applyPictExcludeState(payload){
+ const local=pictExcludeState(),chosen=choosePictExcludeState(local,payload);
+ const changed=JSON.stringify(chosen.tags)!==JSON.stringify(local.tags);
+ const revised=chosen.updatedAt!==local.updatedAt;
+ if(changed||revised){
+  if(changed)localStorage.setItem(PICT_EXCLUDE_KEY,JSON.stringify(chosen.tags));
+  if(revised)localStorage.setItem(PICT_EXCLUDE_UPDATED_KEY,String(chosen.updatedAt));
+  if(changed)try{window.dispatchEvent(new Event('pictbland-feed-exclude-tags-cloud-applied'));}catch{}
+ }
+ return chosen;
+}
 // Same NFKC + case-insensitive rules as Pixiv's saved-search feed.
 function normalizePixivFeedExcludeTags(value){
  const result=[],seen=new Set();
@@ -216,8 +265,9 @@ async function snapshot({allowEmpty=false}={}){
    const parsed=JSON.parse(localStorage.getItem('pictbland-saved-search-words-v1')||'[]');
    if(Array.isArray(parsed))savedSearches=parsed.filter(row=>row&&typeof row.word==='string'&&row.word.trim()).slice(0,200);
   }catch{}
-  if(!allowEmpty&&!savedSearches.length)throw Error('pictBLandの保存検索が空です');
-  payload={savedSearches};
+  const exclude=pictExcludeState();
+  if(!allowEmpty&&!savedSearches.length&&!exclude.tags.length)throw Error('pictBLandの保存検索と除外タグが空です');
+  payload={savedSearches,feedExcludeTags:exclude.tags,feedExcludeTagsUpdatedAt:exclude.updatedAt};
  }else payload=await pixivSnapshot(allowEmpty);
  if(app.id==='or'&&!Array.isArray(payload.values?.niji_or_merger_addon_batches_v1))
   throw Error('ORの保存データを取得できませんでした');
@@ -233,7 +283,7 @@ function hasMeaningfulPayload(obj){
  const p=obj?.payload||{};
  if(app.id==='or')return !!(p.values?.[OR_KEYS[0]]?.length||p.values?.[OR_KEYS[6]]?.length||p.values?.[OR_KEYS[5]]?.words?.length);
  if(app.id==='x')return !!(p.savedSearches?.length||p.history?.length||p.folders?.length);
- if(app.id==='pictbland')return !!p.savedSearches?.length;
+ if(app.id==='pictbland')return !!(p.savedSearches?.length||p.feedExcludeTags?.length||p.feedExcludeTagsUpdatedAt>0);
  return !!(p.savedSearches?.length||(p.databases||[]).some(d=>Object.values(d.stores||{}).some(rows=>Array.isArray(rows)&&rows.length))||
    p.preferences?.minimum!=null||p.preferences?.sort!=null||!!p.preferences?.feedExcludeTags?.length);
 }
@@ -376,9 +426,10 @@ async function restore(snap,{mode='merge'}={}){
    backupPictLocal(current);
    localStorage.setItem('pictbland-saved-search-words-v1',JSON.stringify(rows));
   }
+  const exclude=applyPictExcludeState(snap.payload);
   try{window.__pictblandSavedSearchUi?.render?.();}catch{}
   try{window.dispatchEvent(new CustomEvent('niji-cloud-sync-applied',{detail:{app:'pictbland'}}));}catch{}
-  return 'pictBLand共有検索'+rows.length+'件を反映しました';
+  return 'pictBLand共有検索'+rows.length+'件・除外タグ'+exclude.tags.length+'件を反映しました';
  }
  const count=await mergePixivDatabases(snap.payload.databases||[],{replace:mode==='replace'});
  const pref=snap.payload.preferences||{};
@@ -685,14 +736,17 @@ async function pictPush(){
  try{
   const remote=await pictRemote(),rows=pictOverlay(remote.rows,local);
   const template=remote.snap||await snapshot({allowEmpty:true});
+  const exclude=choosePictExcludeState(pictExcludeState(),remote.snap?.payload);
   const outgoing={...template,format:2,app:app.name,origin:location.origin,device:device(),
-   exportedAt:new Date().toISOString(),payload:{...template.payload,savedSearches:rows}};
+   exportedAt:new Date().toISOString(),payload:{...template.payload,savedSearches:rows,
+    feedExcludeTags:exclude.tags,feedExcludeTagsUpdatedAt:exclude.updatedAt}};
   const uploaded=await uploadShared(outgoing);
   const verified=await fetchBackup(uploaded.item);
   const confirmed=new Map((verified.payload?.savedSearches||[]).map(x=>[pictKey(x),x.href]));
   if(bound.some(row=>confirmed.get(pictKey(row))!==row.href))
    throw Error('クラウド読戻し時のURL照合に失敗しました。再登録データは端末内に保持しています');
   const applied=pictApply(rows);
+  applyPictExcludeState(outgoing.payload);
   settings.syncInitialized=true;settings.lastContentSha=await payloadSha(await snapshot({allowEmpty:true}));
   settings.lastRemoteId=String(uploaded.item?.id||'');settings.lastSha=uploaded.item?.sha256||'';
   settings.lastSavedAt=Date.now();settings.lastSyncAt=Date.now();await saveSettings();
@@ -710,6 +764,7 @@ async function pictPull(){
   const bound=remote.rows.filter(pictBound);
   if(!bound.length)throw Error('クラウドに再登録URLがありません');
   const merged=pictOverlay(pictLocal(),remote.rows),applied=pictApply(merged);
+  applyPictExcludeState(remote.snap?.payload);
   const byKey=new Map(applied.map(x=>[pictKey(x),x.href]));
   if(bound.some(x=>byKey.get(pictKey(x))!==x.href))throw Error('取り込み後のURL照合に失敗しました');
   settings.syncInitialized=true;settings.lastRemoteId=String(remote.latest.id);
@@ -1060,6 +1115,15 @@ setInterval(integrateNativeBackup,1200);
 if(app.id==='pixiv'){
  let excludeTagsSyncTimer=null;
  window.addEventListener('pixiv-feed-exclude-tags-changed',()=>{
+  clearTimeout(excludeTagsSyncTimer);
+  excludeTagsSyncTimer=setTimeout(()=>{
+   if(settings.enabled&&!working)void syncShared({force:true});
+  },2500);
+ });
+}
+if(app.id==='pictbland'){
+ let excludeTagsSyncTimer=null;
+ window.addEventListener('pictbland-feed-exclude-tags-changed',()=>{
   clearTimeout(excludeTagsSyncTimer);
   excludeTagsSyncTimer=setTimeout(()=>{
    if(settings.enabled&&!working)void syncShared({force:true});
