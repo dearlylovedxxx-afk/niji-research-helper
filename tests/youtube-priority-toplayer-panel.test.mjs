@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 
 const source=readFileSync(new URL('../Niji_Research_Helper.user.js',import.meta.url),'utf8');
 const meta=readFileSync(new URL('../Niji_Research_Helper.meta.js',import.meta.url),'utf8');
+const memberChat=readFileSync(new URL('../YouTube_Member_Chat_Search.user.js',import.meta.url),'utf8');
 const part=(a,b)=>{
   const from=source.indexOf(a),to=source.indexOf(b,from+a.length);
   assert.ok(from>=0&&to>from,'Cannot extract '+a);
@@ -41,9 +42,9 @@ function harness(root){
 
 test('release versions and script syntax match',()=>{
   assert.doesNotThrow(()=>new Function(source));
-  assert.match(source,/@version\s+1\.0\.129/);
-  assert.match(meta,/@version\s+1\.0\.129/);
-  assert.match(source,/const VERSION = '1\.0\.129'/);
+  assert.match(source,/@version\s+1\.0\.137/);
+  assert.match(meta,/@version\s+1\.0\.137/);
+  assert.match(source,/const VERSION = '1\.0\.137'/);
 });
 
 test('opening settings closes browser top-layer priority popover, not just CSS z-index',()=>{
@@ -123,4 +124,21 @@ test('stored priority authors/positions and ordinary navigation are untouched',(
   assert.doesNotMatch(suspender,/GM\.setValue|localStorage|scrollTop\s*=|width\s*=/);
   assert.match(ensure,/youtubePriorityOverlayStamp\(entries\)/);
   assert.match(source,/function scanYoutubePreferredComments\(force = false\)/);
+});
+
+
+test('chat tab waits for member-chat confirmation before closing NIJI',()=>{
+  const bridge=part('  let youtubeMemberChatOpenRequest = 0;','  function ensureYoutubePanel() {');
+  assert.match(bridge,/niji-member-chat-opened/);
+  assert.match(bridge,/niji-member-chat-ready/);
+  assert.match(bridge,/youtubeMemberChatPanelIsOpen\(\)/);
+  assert.match(source,/if \(tab === 'chat'\) \{\s*openMemberChatFromYoutubePanel\(\);/);
+});
+
+test('member chat repairs split UI and acknowledges successful open',()=>{
+  assert.match(memberChat,/if \(existingButton && existingPanel\) \{/);
+  assert.match(memberChat,/existingButton\?\.remove\(\);/);
+  assert.match(memberChat,/existingPanel\?\.remove\(\);/);
+  assert.match(memberChat,/niji-member-chat-opened/);
+  assert.match(memberChat,/if \(!document\.getElementById\(BUTTON_ID\) \|\| !document\.getElementById\(PANEL_ID\)\) createUi\(\);/);
 });

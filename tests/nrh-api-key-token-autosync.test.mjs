@@ -92,9 +92,9 @@ async function legacySnapshot(rows){
 
 test('v1.0.128 syntax, metadata, and no passphrase UI',()=>{
   assert.doesNotThrow(()=>new Function(src));
-  assert.match(src,/@version\s+1\.0\.128/);
-  assert.match(meta,/@version\s+1\.0\.128/);
-  assert.match(src,/const VERSION = '1\.0\.128'/);
+  assert.match(src,/@version\s+1\.0\.137/);
+  assert.match(meta,/@version\s+1\.0\.137/);
+  assert.match(src,/const VERSION = '1\.0\.137'/);
   assert.doesNotMatch(code,/npf-api-secret-passphrase|npf-api-secret-confirm|async function apiSecretEnable/);
 });
 test('connected PC automatically stores real AES-GCM ciphertext, not plaintext',async()=>{

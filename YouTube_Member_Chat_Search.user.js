@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube メン限アーカイブ チャット検索
 // @namespace    marina-youtube-chat-search
-// @version      0.5.8
+// @version      0.5.9
 // @description  視聴権限があるYouTubeアーカイブのChat Replayを取得・pCloud保存し、動画内検索と全アーカイブ横断検索を行います。
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/YouTube_Member_Chat_Search.user.js
@@ -27,7 +27,7 @@
   const APP_ID = 'marina-member-chat-search';
   const BUTTON_ID = `${APP_ID}-button`;
   const PANEL_ID = `${APP_ID}-panel`;
-  const VERSION = '0.5.8';
+  const VERSION = '0.5.9';
 
   const state = {
     videoId: null,
@@ -3106,9 +3106,43 @@
   }
 
 
+  function setPanelOpen(open) {
+    const panel = document.getElementById(PANEL_ID);
+    const btn = document.getElementById(BUTTON_ID);
+    if (!panel?.isConnected) return false;
+    panel.classList.toggle('open', !!open);
+    panel.style.setProperty('display', open ? 'flex' : 'none', 'important');
+    btn?.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) document.dispatchEvent(new CustomEvent('niji-member-chat-opened'));
+    return true;
+  }
+
+  let nijiBridgeInstalled = false;
+  function ensureNijiBridge() {
+    if (nijiBridgeInstalled) return;
+    nijiBridgeInstalled = true;
+    document.addEventListener('niji-member-chat-open', () => {
+      if (!document.getElementById(BUTTON_ID) || !document.getElementById(PANEL_ID)) createUi();
+      if (!setPanelOpen(true)) {
+        setTimeout(() => {
+          createUi();
+          setPanelOpen(true);
+        }, 0);
+      }
+    });
+    document.addEventListener('niji-member-chat-close', () => { setPanelOpen(false); });
+  }
+
   function createUi() {
     injectStyle();
-    if (document.getElementById(BUTTON_ID)) return;
+    const existingButton = document.getElementById(BUTTON_ID);
+    const existingPanel = document.getElementById(PANEL_ID);
+    if (existingButton && existingPanel) {
+      ensureNijiBridge();
+      return;
+    }
+    existingButton?.remove();
+    existingPanel?.remove();
 
     const mount = document.documentElement || document.body;
     if (!mount) return;
@@ -3205,21 +3239,14 @@
     mount.appendChild(panel);
     mount.appendChild(btn);
 
-    const setPanelOpen = (open) => {
-      panel.classList.toggle('open', open);
-      panel.style.setProperty('display', open ? 'flex' : 'none', 'important');
-      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    };
-
+    ensureNijiBridge();
     btn.setAttribute('aria-expanded', 'false');
     btn.style.setProperty('display', 'none', 'important');
     btn.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
-      setPanelOpen(panel.style.display === 'none');
+      setPanelOpen(!panel.classList.contains('open'));
     });
-    document.addEventListener('niji-member-chat-open', () => setPanelOpen(true));
-    document.addEventListener('niji-member-chat-close', () => setPanelOpen(false));
     document.dispatchEvent(new CustomEvent('niji-member-chat-ready'));
     close.addEventListener('click', (event) => {
       event.preventDefault();

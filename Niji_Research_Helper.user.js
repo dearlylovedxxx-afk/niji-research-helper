@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niji Research Helper
 // @namespace    niji-pov-helper
-// @version      1.0.136
+// @version      1.0.137
 // @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.meta.js
 // @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/niji-research-helper/main/Niji_Research_Helper.user.js
 // @description  comment2434 と YouTube をつなぐ調査支援ツール。IndexedDB蓄積、Holodexの429待機制御、Wiki照合状況の見える化でアーカイブ調査を安定化します。
@@ -52,7 +52,7 @@
       })()
     : null;
 
-  const VERSION = '1.0.129';
+  const VERSION = '1.0.137';
   const API = 'https://holodex.net/api/v2';
   const KEY_API = 'npf_holodex_api_key';
   const KEY_YT_API = 'npf_youtube_api_key_local_v1'; // GM local cache; Niji Cloud shares only the separately encrypted v2 credentials
@@ -9995,6 +9995,49 @@
     setMobileYoutubeTab(show ? 'settings' : 'pov');
   }
 
+  let youtubeMemberChatOpenRequest = 0;
+
+  function youtubeMemberChatPanelIsOpen() {
+    const panel = $('#marina-member-chat-search-panel');
+    if (!panel?.isConnected || !panel.classList.contains('open')) return false;
+    try { return getComputedStyle(panel).display !== 'none'; }
+    catch { return panel.style.display !== 'none'; }
+  }
+
+  function openMemberChatFromYoutubePanel() {
+    const request = ++youtubeMemberChatOpenRequest;
+    let settled = false;
+    let timeout = null;
+    const cleanup = () => {
+      document.removeEventListener('niji-member-chat-opened', onOpened);
+      document.removeEventListener('niji-member-chat-ready', onReady);
+      if (timeout) clearTimeout(timeout);
+    };
+    const finishIfOpen = () => {
+      if (settled || request !== youtubeMemberChatOpenRequest || !youtubeMemberChatPanelIsOpen()) return false;
+      settled = true;
+      cleanup();
+      closeYoutubePanel();
+      return true;
+    };
+    const onOpened = () => requestAnimationFrame(() => { finishIfOpen(); });
+    const onReady = () => {
+      if (settled || request !== youtubeMemberChatOpenRequest) return;
+      document.dispatchEvent(new CustomEvent('niji-member-chat-open'));
+      setTimeout(() => { finishIfOpen(); }, 0);
+    };
+
+    document.addEventListener('niji-member-chat-opened', onOpened);
+    document.addEventListener('niji-member-chat-ready', onReady);
+    document.dispatchEvent(new CustomEvent('niji-member-chat-open'));
+    setTimeout(() => { finishIfOpen(); }, 0);
+    timeout = setTimeout(() => {
+      if (finishIfOpen()) return;
+      cleanup();
+      toast('チャット検索を開けませんでした。チャット検索スクリプトの起動状態を確認してください');
+    }, 900);
+  }
+
   function ensureYoutubePanel() {
     if (!isYoutubeHost()) return null;
     let panel = $('#npf-yt-panel');
@@ -10027,8 +10070,7 @@
         button.setAttribute('aria-pressed', String(tab === mobileYoutubeTab));
         button.addEventListener('click', () => {
           if (tab === 'chat') {
-            closeYoutubePanel();
-            document.dispatchEvent(new CustomEvent('niji-member-chat-open'));
+            openMemberChatFromYoutubePanel();
             return;
           }
           setMobileYoutubeTab(tab);
@@ -10173,8 +10215,7 @@
     $$('[data-seek]', panel).forEach(btn => btn.addEventListener('click', () => seekYoutube(Number(btn.dataset.seek || 0))));
     $('#npf-yt-other-pov', panel)?.addEventListener('click', () => void searchOtherPovsFromYoutube());
     $('#npf-yt-comment-search', panel)?.addEventListener('click', () => {
-      document.dispatchEvent(new CustomEvent('niji-member-chat-open'));
-      if (isMobileYoutubeUi()) closeYoutubePanel();
+      openMemberChatFromYoutubePanel();
     });
     $('#npf-liveclock-mark', panel)?.addEventListener('click', youtubeLiveClockMarkToggle);
     $('#npf-liveclock-sync', panel)?.addEventListener('click', youtubeLiveClockSyncFromThisTab);
