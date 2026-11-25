@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         YouTube にじさんじ サイドバー
 // @namespace    marina.youtube.nijisanji.sidebar
-// @version      0.4.0
+// @version      0.4.1
 // @description  にじさんじをデビュー期別に表示。公開配信中は赤リングとLIVE印、卒業済はアーカイブ確認後に表示。
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
+// @match        https://m.youtube.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_xmlhttpRequest
@@ -1176,7 +1177,7 @@
       '#'+LIVE_HUB_ID+' .nh-channel{color:var(--yt-spec-text-secondary,#666);margin-top:5px;font-size:12px}',
       '#'+LIVE_HUB_ID+' .nh-note{padding:26px 18px;border-radius:12px;background:var(--yt-spec-10-percent-layer,rgba(127,127,127,.08));color:var(--yt-spec-text-secondary,#666);line-height:1.8}',
       '@media(max-width:1250px){#'+LIVE_HUB_ID+' .nh-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}',
-      '@media(max-width:760px){#'+LIVE_HUB_ID+' .nh-wrap{padding:16px 12px 40px}#'+LIVE_HUB_ID+' .nh-grid{grid-template-columns:1fr}#'+LIVE_HUB_ID+' h1{font-size:20px}}'
+      '@media(max-width:760px){#'+LIVE_HUB_ID+'{top:0!important;left:0!important;right:0!important;bottom:0!important;z-index:2147483000!important}#'+LIVE_HUB_ID+' .nh-wrap{padding:calc(16px + env(safe-area-inset-top,0px)) 12px calc(40px + env(safe-area-inset-bottom,0px))}#'+LIVE_HUB_ID+' .nh-grid{grid-template-columns:1fr}#'+LIVE_HUB_ID+' h1{font-size:20px}}'
     ].join('\n');
     (document.head||document.documentElement).append(st);
   }
@@ -1405,7 +1406,7 @@
     const refresh=el('button','',liveHubLoading?'取得中…':'↻ 更新');
     refresh.disabled=liveHubLoading;refresh.addEventListener('click',()=>void liveHubFetch());
     const close=el('button','','YouTubeトップへ');
-    close.addEventListener('click',()=>location.assign('https://www.youtube.com/'));
+    close.addEventListener('click',()=>location.assign(location.hostname==='m.youtube.com'?'https://m.youtube.com/':'https://www.youtube.com/'));
     top.append(refresh,close);wrap.append(top);
     const meta=el('div','nh-meta',
       '同時視聴者数の多い順 ・ 約3分ごとに自動更新 ・ ホバー時は同一YouTubeの視聴ページでライブ再生を試行（無音・視聴履歴に残る場合があります）'+
